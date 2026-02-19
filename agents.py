@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import uuid
 
@@ -631,6 +632,58 @@ async def llm_list() -> str:
             f"    description      : {cfg.get('description', '')}\n"
         )
     return "\n".join(lines)
+
+
+async def agent_call(agent_url: str, message: str, target_client_id: str = None) -> str:
+    """
+    Call another agent-mcp instance (swarm/multi-agent coordination).
+
+    Sends `message` to a remote agent at `agent_url` using the API client plugin.
+    The remote agent processes it through its full stack (LLM, tools, gates).
+    Returns the complete text response.
+
+    Depth guard: calls originating from an api-swarm- prefixed client_id are
+    rejected immediately to prevent unbounded recursion (max 1 hop).
+
+    client_id is read from the current_client_id ContextVar (set by execute_tool).
+    target_client_id: optional session name on the remote agent (auto-generated if omitted).
+    """
+    from api_client import AgentClient
+
+    calling_client = current_client_id.get("")
+
+    # Depth guard — api-swarm- prefix signals this is already a delegated call
+    if calling_client.startswith("api-swarm-"):
+        return "[agent_call] Max swarm depth reached (1 hop). Call rejected to prevent recursion."
+
+    swarm_client_id = target_client_id or f"api-swarm-{uuid.uuid4().hex[:6]}"
+    api_key = os.getenv("API_KEY", "") or None
+    timeout = 120
+
+    await push_tok(calling_client, f"\n[agent_call ▶] {agent_url} → {swarm_client_id}: {message[:100]}{'…' if len(message) > 100 else ''}\n")
+
+    try:
+        client = AgentClient(agent_url, client_id=swarm_client_id, api_key=api_key)
+        result = await asyncio.wait_for(
+            client.send(message, timeout=timeout),
+            timeout=timeout + 5,
+        )
+
+        preview_len = sessions.get(calling_client, {}).get("tool_preview_length", 500)
+        preview = result if (preview_len == 0 or len(result) <= preview_len) else result[:preview_len] + "\n…(truncated)"
+        await push_tok(calling_client, f"[agent_call ◀] {agent_url}:\n{preview}\n")
+        return result
+
+    except asyncio.TimeoutError:
+        msg = f"ERROR: agent_call timed out after {timeout}s waiting for {agent_url}."
+        await push_tok(calling_client, f"[agent_call ✗] timeout after {timeout}s\n")
+        log.warning(f"agent_call timeout: url={agent_url} swarm_client={swarm_client_id}")
+        return msg
+    except Exception as exc:
+        msg = f"ERROR: agent_call failed for {agent_url}: {exc}"
+        await push_tok(calling_client, f"[agent_call ✗] {exc}\n")
+        log.error(f"agent_call error: url={agent_url} exc={exc}")
+        return msg
 
 
 async def dispatch_llm(model_key: str, messages: list[dict], client_id: str) -> str:

@@ -23,6 +23,22 @@
       "default_enabled": false,
       "priority": 20
     },
+    "plugin_client_api": {
+      "type": "client_interface",
+      "file": "plugin_client_api.py",
+      "description": "Programmatic HTTP/SSE API for agent access and swarm coordination",
+      "dependencies": [
+        "sse-starlette"
+      ],
+      "env_vars": [
+        "API_PORT",
+        "API_KEY",
+        "API_GATE_TIMEOUT"
+      ],
+      "config_files": [],
+      "default_enabled": true,
+      "priority": 15
+    },
     "plugin_client_slack": {
       "type": "client_interface",
       "file": "plugin_client_slack.py",
@@ -165,7 +181,7 @@
   },
   "metadata": {
     "schema_version": "1.0",
-    "last_updated": "2026-02-17",
-    "notes": "Plugin manifest for MCP agent system. Renamed plugins to type-prefixed scheme. Added plugin_search_ddgs, plugin_search_tavily, plugin_search_xai, plugin_urlextract_tavily."
+    "last_updated": "2026-02-18",
+    "notes": "Plugin manifest for MCP agent system. Renamed plugins to type-prefixed scheme. Added plugin_search_ddgs, plugin_search_tavily, plugin_search_xai, plugin_urlextract_tavily. Added plugin_client_api for programmatic/swarm access."
   }
 }

@@ -1,9 +1,14 @@
 import uuid
 import asyncio
+import os
 import re
 from state import push_gate, pending_gates, auto_aidb_state, tool_gate_state, sessions
 from database import extract_table_names
 from tools import get_gate_tools_by_type
+
+# How long (seconds) to wait for an api- client to respond to a gate before auto-rejecting.
+# AgentClient with an approval directive responds within milliseconds, so 2s is ample.
+_API_GATE_TIMEOUT: float = float(os.getenv("API_GATE_TIMEOUT", "2.0"))
 
 def is_sql_write_operation(sql: str) -> bool:
     """Check if SQL is a write operation (INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE)"""
@@ -28,6 +33,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
     # Check if this is a non-interactive client (no gate support)
     is_llama_proxy = client_id.startswith("llama-")
     is_slack_client = client_id.startswith("slack-")
+    is_api_client = client_id.startswith("api-")
     is_non_interactive = is_llama_proxy or is_slack_client
 
     # @<model> temp switch: admin explicitly delegated this turn — auto-allow all gates
@@ -37,6 +43,25 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
     def should_auto_reject(needs_gate: bool) -> bool:
         """Auto-reject gates for non-interactive clients (llama proxy, slack)"""
         return needs_gate and is_non_interactive
+
+    async def do_api_gate(gate_data: dict) -> bool:
+        """
+        For api- clients: push gate to SSE queue then wait _API_GATE_TIMEOUT seconds
+        for the AgentClient to respond via POST /api/v1/gate/{gate_id}.
+        If no response arrives in time, auto-reject.
+        AgentClient with auto_approve_gates responds within milliseconds when configured.
+        """
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        try:
+            await asyncio.wait_for(pending_gates[gate_id]["event"].wait(), timeout=_API_GATE_TIMEOUT)
+            decision = pending_gates[gate_id].pop("decision", "reject")
+        except asyncio.TimeoutError:
+            decision = "reject"
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
     if tool_name == "db_query":
         sql = tool_args.get("sql", "")
         tables = extract_table_names(sql)
@@ -71,14 +96,19 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         if should_auto_reject(needs_gate):
             return False
 
-        gate_id = str(uuid.uuid4())
-        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
-        await push_gate(client_id, {
-            "gate_id": gate_id,
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
             "tool_name": tool_name,
             "tool_args": {**tool_args, "operation_type": permission_type},
-            "tables": display_tables
-        })
+            "tables": display_tables,
+        }
+
+        if is_api_client:
+            return await do_api_gate(gate_data)
+
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
@@ -96,12 +126,8 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         if is_non_interactive:
             return False
 
-        gate_id = str(uuid.uuid4())
-        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
-        # Send full content — the client controls display truncation via gate_preview_length.
-        # Keys match the new surgical-op schema in tools.py.
-        await push_gate(client_id, {
-            "gate_id":   gate_id,
+        gate_data = {
+            "gate_id":   str(uuid.uuid4()),
             "tool_name": tool_name,
             "tool_args": {
                 "operation": tool_args.get("operation", "?"),
@@ -110,7 +136,16 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
                 "operation_type": "write",
             },
             "tables": [],
-        })
+        }
+
+        if is_api_client:
+            return await do_api_gate(gate_data)
+
+        # Send full content — the client controls display truncation via gate_preview_length.
+        # Keys match the new surgical-op schema in tools.py.
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
@@ -131,15 +166,20 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         if is_non_interactive:
             return False
 
-        gate_id = str(uuid.uuid4())
-        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
         section = tool_args.get("section", "")
-        await push_gate(client_id, {
-            "gate_id": gate_id,
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
             "tool_name": tool_name,
             "tool_args": {"section": section, "operation_type": "read"},
-            "tables": []
-        })
+            "tables": [],
+        }
+
+        if is_api_client:
+            return await do_api_gate(gate_data)
+
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         return decision == "allow"
@@ -156,16 +196,21 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         if is_non_interactive:
             return False
 
-        gate_id = str(uuid.uuid4())
-        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
         url = tool_args.get("url", "")
         query = tool_args.get("query", "")
-        await push_gate(client_id, {
-            "gate_id": gate_id,
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
             "tool_name": tool_name,
             "tool_args": {"url": url, "query": query, "operation_type": "read"},
-            "tables": []
-        })
+            "tables": [],
+        }
+
+        if is_api_client:
+            return await do_api_gate(gate_data)
+
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
@@ -183,15 +228,20 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         if is_non_interactive:
             return False
 
-        gate_id = str(uuid.uuid4())
-        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
         query = tool_args.get("query", "")
-        await push_gate(client_id, {
-            "gate_id": gate_id,
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
             "tool_name": tool_name,
             "tool_args": {"query": query, "operation_type": "read"},
-            "tables": []
-        })
+            "tables": [],
+        }
+
+        if is_api_client:
+            return await do_api_gate(gate_data)
+
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         return decision == "allow"
@@ -211,15 +261,20 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         if is_non_interactive:
             return False
 
-        gate_id = str(uuid.uuid4())
-        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
         fname = tool_args.get("file_name") or tool_args.get("file_id") or ""
-        await push_gate(client_id, {
-            "gate_id": gate_id,
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
             "tool_name": tool_name,
             "tool_args": {"operation": op, "details": fname, "operation_type": permission_type},
-            "tables": []
-        })
+            "tables": [],
+        }
+
+        if is_api_client:
+            return await do_api_gate(gate_data)
+
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         return decision == "allow"

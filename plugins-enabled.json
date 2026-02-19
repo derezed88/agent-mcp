@@ -3,6 +3,7 @@
   "default_model": "gemini25",
   "enabled_plugins": [
     "plugin_client_shellpy",
+    "plugin_client_api",
     "plugin_database_mysql",
     "plugin_storage_googledrive",
     "plugin_search_google",
@@ -23,6 +24,11 @@
       "enabled": true,
       "mcp_port": 8765,
       "mcp_host": "0.0.0.0"
+    },
+    "plugin_client_api": {
+      "enabled": true,
+      "api_port": 8766,
+      "api_host": "0.0.0.0"
     }
   },
   "rate_limits": {
@@ -55,10 +61,15 @@
       "calls": 0,
       "window_seconds": 0,
       "auto_disable": false
+    },
+    "agent_call": {
+      "calls": 5,
+      "window_seconds": 60,
+      "auto_disable": false
     }
   },
   "metadata": {
-    "last_modified": "2026-02-17",
+    "last_modified": "2026-02-18",
     "notes": "Configuration for enabled plugins. Modified by plugin-manager.py"
   }
 }

@@ -215,6 +215,7 @@ def get_core_tools():
             'llm_clean_text': _agents.llm_clean_text,
             'llm_clean_tool': _agents.llm_clean_tool,
             'llm_list': _agents.llm_list,
+            'agent_call': _agents.agent_call,
         }
     }
 
@@ -273,6 +274,7 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "llm_clean_text":       "llm_call",
     "llm_clean_tool":       "llm_call",
     "llm_list":             "system",
+    "agent_call":           "agent_call",
 }
 
 
@@ -296,11 +298,12 @@ def get_tool_executor(tool_name: str):
 
     core_executors = {
         'update_system_prompt': update_system_prompt,
-        'read_system_prompt': read_system_prompt,
-        'get_system_info': get_system_info,
-        'llm_clean_text': _agents.llm_clean_text,
-        'llm_clean_tool': _agents.llm_clean_tool,
-        'llm_list': _agents.llm_list,
+        'read_system_prompt':   read_system_prompt,
+        'get_system_info':      get_system_info,
+        'llm_clean_text':       _agents.llm_clean_text,
+        'llm_clean_tool':       _agents.llm_clean_tool,
+        'llm_list':             _agents.llm_list,
+        'agent_call':           _agents.agent_call,
     }
 
     if tool_name in core_executors:
@@ -365,6 +368,23 @@ class _LlmCleanToolArgs(BaseModel):
     model: str = Field(description="Model key name (e.g., 'nuc11Local'). Use llm_list() to see valid names.")
     tool: str = Field(description="Exact tool name to delegate (e.g., 'url_extract', 'db_query', 'ddgs_search').")
     arguments: str = Field(description="The user request / arguments to pass as the prompt to the target model. Be specific.")
+
+
+class _AgentCallArgs(BaseModel):
+    agent_url: str = Field(
+        description="Base URL of the target agent-mcp instance, e.g. 'http://localhost:8766'. "
+                    "The target must have the API client plugin (plugin_client_api) enabled."
+    )
+    message: str = Field(
+        description="The message or command to send to the target agent. "
+                    "Can be any text, !command, or @model prefix. "
+                    "The full response from the target agent is returned."
+    )
+    target_client_id: str = Field(
+        default="",
+        description="Optional: session name to use on the target agent. "
+                    "Omit to auto-generate an isolated swarm session."
+    )
 
 
 def _make_core_lc_tools() -> list:
@@ -450,6 +470,21 @@ def _make_core_lc_tools() -> list:
                 "max_context, tool_call_available status, timeout, and description. "
                 "Use this before calling llm_clean_text or llm_clean_tool to identify a suitable target model."
             ),
+        ),
+        StructuredTool.from_function(
+            coroutine=_agents.agent_call,
+            name="agent_call",
+            description=(
+                "Send a message or command to another agent-mcp instance and return its response. "
+                "Use for multi-agent coordination (swarm): delegate tasks, verify answers, or "
+                "parallelize work across agent instances. "
+                "The target agent processes the message through its full stack (LLM, tools, gates). "
+                "Swarm depth is limited to 1 hop to prevent recursion. "
+                "Gate approval on the target agent follows that agent's own gate policy — "
+                "configure auto_approve_gates on the AgentClient if the target needs tool access. "
+                "Rate limited: 5 calls per 60 seconds per session."
+            ),
+            args_schema=_AgentCallArgs,
         ),
     ]
 
