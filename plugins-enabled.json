@@ -16,27 +16,25 @@
   ],
   "plugin_config": {
     "plugin_proxy_llama": {
-      "enabled": false,
+      "enabled": true,
       "llama_port": 11434,
       "llama_host": "0.0.0.0"
     },
     "plugin_client_slack": {
-      "enabled": false,
+      "enabled": true,
       "slack_port": 8766,
-      "slack_host": "0.0.0.0"
+      "slack_host": "0.0.0.0",
+      "inter_turn_timeout": 30
     },
     "plugin_client_shellpy": {
       "enabled": true,
-      "mcp_port": 8770,
+      "mcp_port": 8765,
       "mcp_host": "0.0.0.0"
     },
     "plugin_client_api": {
       "enabled": true,
-      "api_port": 8777,
+      "api_port": 8767,
       "api_host": "0.0.0.0"
-    },
-    "plugin_client_slack": {
-      "enabled": false
     }
   },
   "rate_limits": {

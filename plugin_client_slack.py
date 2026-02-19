@@ -49,6 +49,7 @@ class SlackClientPlugin(BasePlugin):
         self.enabled = False
         self.slack_port = 8766
         self.slack_host = "0.0.0.0"
+        self.inter_turn_timeout = 30.0
         self.slack_client: Optional[AsyncWebClient] = None
         self.socket_client: Optional[SocketModeClient] = None
 
@@ -69,6 +70,10 @@ class SlackClientPlugin(BasePlugin):
             # Get configuration
             self.slack_port = config.get('slack_port', 8766)
             self.slack_host = config.get('slack_host', '0.0.0.0')
+            self.inter_turn_timeout = float(
+                config.get("inter_turn_timeout",
+                os.getenv("SLACK_INTER_TURN_TIMEOUT", "30"))
+            )
 
             # Get Slack credentials from environment
             bot_token = os.getenv("SLACK_BOT_TOKEN")
@@ -360,9 +365,7 @@ class SlackClientPlugin(BasePlugin):
         # grace period for the next turn to start.
         # If nothing arrives within the grace period, the conversation is truly finished.
         FIRST_TIMEOUT = 120.0   # max wait for first token (LLM can be slow)
-        INTER_TURN_TIMEOUT = 30.0  # grace period between turns after a "done"
-        # 30s allows frontier models time to generate a final summary after the
-        # last agent_call completes before we declare the conversation finished.
+        INTER_TURN_TIMEOUT = self.inter_turn_timeout  # configurable via plugins-enabled.json
 
         timeout = FIRST_TIMEOUT
         received_done = False
