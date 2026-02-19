@@ -156,6 +156,8 @@ async def test_gate_config_command(runner: TestRunner):
         result = await c.send("!autoAIdb read true", timeout=10)
         ok = len(result) > 0
         runner.record("!autoAIdb gate config command", ok, result[:80].strip().replace("\n", " "))
+        # Reset wildcard to gated (OFF) so subsequent gate tests start from a known state
+        await c.send("!autoAIdb read false", timeout=10)
     except Exception as e:
         runner.record("!autoAIdb gate config command", False, str(e))
 
