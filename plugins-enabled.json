@@ -16,12 +16,12 @@
   ],
   "plugin_config": {
     "plugin_proxy_llama": {
-      "enabled": true,
+      "enabled": false,
       "llama_port": 11434,
       "llama_host": "0.0.0.0"
     },
     "plugin_client_slack": {
-      "enabled": true,
+      "enabled": false,
       "slack_port": 8766,
       "slack_host": "0.0.0.0",
       "inter_turn_timeout": 30
