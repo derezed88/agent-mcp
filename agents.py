@@ -684,9 +684,10 @@ async def agent_call(agent_url: str, message: str, target_client_id: str = None)
             timeout=timeout + 5,
         )
 
-        preview_len = sessions.get(calling_client, {}).get("tool_preview_length", 500)
-        preview = result if (preview_len == 0 or len(result) <= preview_len) else result[:preview_len] + "\n…(truncated)"
-        await push_tok(calling_client, f"[agent_call ◀] {agent_url}:\n{preview}\n")
+        # No ◀ preview push_tok here — the LLM always narrates the remote agent's
+        # response in its own words, so echoing the raw result would double it in
+        # every client (Slack, open-webui, etc.). The ▶ dispatch line above is
+        # sufficient for shell.py operators to see the call was made.
         return result
 
     except asyncio.TimeoutError:
