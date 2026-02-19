@@ -10,6 +10,7 @@ Provides bidirectional Slack integration with asymmetric transport:
 """
 
 import os
+import re
 import json
 import asyncio
 from typing import List, Dict, Optional
@@ -297,6 +298,22 @@ class SlackClientPlugin(BasePlugin):
         # Process through agent (imported from routes.py)
         asyncio.create_task(process_request(client_id, text, payload))
 
+    # Regex for push_tok status lines emitted by the agent framework.
+    # These bracket tokens (e.g. "[agent_call ▶ gemini25]", "[agent_call ◀]") are
+    # informational noise that should not appear in Slack posts.
+    _STATUS_LINE_RE = re.compile(
+        r'^\[(?:agent_call|tool_call|llm_call)[^\]]*\]\s*$',
+        re.MULTILINE,
+    )
+
+    @classmethod
+    def _filter_status_lines(cls, text: str) -> str:
+        """Remove push_tok status bracket lines from agent output."""
+        filtered = cls._STATUS_LINE_RE.sub('', text)
+        # Collapse runs of blank lines that may be left behind
+        filtered = re.sub(r'\n{3,}', '\n\n', filtered)
+        return filtered.strip()
+
     async def _consume_agent_responses(
         self,
         client_id: str,
@@ -307,6 +324,11 @@ class SlackClientPlugin(BasePlugin):
         Consume responses from agent queue and send to Slack.
 
         Similar to how shell.py consumes via SSE stream.
+
+        Multi-turn behaviour: after each agent turn completes (done event) the
+        accumulated text is posted to Slack immediately so the user sees progress.
+        Accumulation then resets for the next turn.  The final turn's post is the
+        last message the user sees — no silent 2-minute wait.
         """
         if not self.slack_client:
             log.error("Slack client not initialized")
@@ -315,17 +337,33 @@ class SlackClientPlugin(BasePlugin):
         # Get the queue for this client
         queue = await get_queue(client_id)
 
-        # Accumulate response text
-        response_parts = []
+        # Accumulate tokens for the current turn
+        response_parts: List[str] = []
+        turn_index = 0  # which agent turn we are on (0-based)
 
         # Multi-turn agents (tool call → LLM response) emit multiple "done" signals.
-        # After each "done" we wait a short grace period for the next turn to start.
+        # After each "done" we post the turn's output immediately, then wait a short
+        # grace period for the next turn to start.
         # If nothing arrives within the grace period, the conversation is truly finished.
         FIRST_TIMEOUT = 120.0   # max wait for first token (LLM can be slow)
         INTER_TURN_TIMEOUT = 5.0  # grace period between turns after a "done"
 
         timeout = FIRST_TIMEOUT
         received_done = False
+
+        async def _flush_turn(label: str) -> None:
+            """Post the current turn's accumulated text to Slack and reset."""
+            nonlocal response_parts, turn_index
+            if response_parts:
+                turn_text = self._filter_status_lines("".join(response_parts))
+                if turn_text:
+                    if turn_index > 0:
+                        # Prefix intermediate turns so the user knows more is coming
+                        turn_text = f"_(turn {turn_index + 1})_\n{turn_text}"
+                    await self._send_slack_message(channel_id, thread_ts, turn_text)
+                    log.info(f"Slack: posted {label} for {client_id} (turn {turn_index + 1})")
+            response_parts = []
+            turn_index += 1
 
         try:
             while True:
@@ -334,11 +372,14 @@ class SlackClientPlugin(BasePlugin):
                     received_done = False  # reset: activity means we're still in a turn
                 except asyncio.TimeoutError:
                     if received_done:
-                        # Grace period expired after a "done" — conversation finished
+                        # Grace period expired after a "done" — conversation finished.
+                        # The turn was already flushed on the done event; nothing left to do.
                         break
                     else:
                         # No response at all within FIRST_TIMEOUT
                         log.warning(f"Slack consumer timeout waiting for response from {client_id}")
+                        # Flush whatever we have (may be empty)
+                        await _flush_turn("timeout flush")
                         break
 
                 item_type = item.get("t")
@@ -349,33 +390,30 @@ class SlackClientPlugin(BasePlugin):
                     timeout = FIRST_TIMEOUT  # reset to long timeout while active
 
                 elif item_type == "done":
-                    # One turn complete — switch to short grace period for next turn
+                    # One turn complete — post immediately, then wait for next turn
+                    await _flush_turn("turn complete")
                     received_done = True
                     timeout = INTER_TURN_TIMEOUT
 
                 elif item_type == "err":
-                    # Error occurred
+                    # Error occurred — append and flush immediately
                     error_msg = item.get("d", "Unknown error")
                     response_parts.append(f"\n\n⚠️ Error: {error_msg}")
+                    await _flush_turn("error")
                     break
 
                 elif item_type == "gate":
                     # Gate request - inform user that approval is needed
                     gate_data = item.get("d", {})
                     tool_name = gate_data.get("tool_name", "unknown")
-                    response_parts.append(
-                        f"\n\n🔒 Gate approval required for tool: `{tool_name}`\n"
+                    gate_notice = (
+                        f"🔒 Gate approval required for tool: `{tool_name}`\n"
                         f"(Approval must be provided via shell.py client)"
                     )
+                    await self._send_slack_message(channel_id, thread_ts, gate_notice)
                     timeout = FIRST_TIMEOUT  # gate may take a while
                     received_done = False
                     # Continue listening for more responses
-
-            # Send accumulated response to Slack
-            if response_parts:
-                full_response = "".join(response_parts).strip()
-                if full_response:
-                    await self._send_slack_message(channel_id, thread_ts, full_response)
 
         except Exception as e:
             log.error(f"Error consuming agent responses for {client_id}: {e}", exc_info=True)
