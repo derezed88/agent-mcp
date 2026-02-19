@@ -1,7 +1,7 @@
 """
 API Client Interface Plugin for MCP Agent
 
-Exposes a JSON/SSE HTTP API on port 8766 for programmatic access
+Exposes a JSON/SSE HTTP API on port 8767 for programmatic access
 and agent-to-agent (swarm) communication.
 
 Endpoints:
@@ -299,7 +299,7 @@ class ApiClientPlugin(BasePlugin):
 
     def init(self, config: dict) -> bool:
         try:
-            self.api_port = config.get("api_port", int(os.getenv("API_PORT", 8766)))
+            self.api_port = config.get("api_port", int(os.getenv("API_PORT", 8767)))
             self.api_host = config.get("api_host", "0.0.0.0")
             import sse_starlette  # noqa: F401 — verify dep
             self.enabled = True

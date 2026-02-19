@@ -30,11 +30,7 @@
       "dependencies": [
         "sse-starlette"
       ],
-      "env_vars": [
-        "API_PORT",
-        "API_KEY",
-        "API_GATE_TIMEOUT"
-      ],
+      "env_vars": [],
       "config_files": [],
       "default_enabled": true,
       "priority": 15

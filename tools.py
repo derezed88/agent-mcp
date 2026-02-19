@@ -372,7 +372,7 @@ class _LlmCleanToolArgs(BaseModel):
 
 class _AgentCallArgs(BaseModel):
     agent_url: str = Field(
-        description="Base URL of the target agent-mcp instance, e.g. 'http://localhost:8766'. "
+        description="Base URL of the target agent-mcp instance, e.g. 'http://localhost:8767'. "
                     "The target must have the API client plugin (plugin_client_api) enabled."
     )
     message: str = Field(

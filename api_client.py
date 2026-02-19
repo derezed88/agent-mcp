@@ -6,7 +6,7 @@ Usage (standalone):
     from api_client import AgentClient
 
     async def main():
-        client = AgentClient("http://localhost:8766", client_id="my-agent")
+        client = AgentClient("http://localhost:8767", client_id="my-agent")
         response = await client.send("What is 2+2?")
         print(response)
 
@@ -14,7 +14,7 @@ Usage (standalone):
 
 Usage (streaming with gate policy):
     client = AgentClient(
-        "http://localhost:8766",
+        "http://localhost:8767",
         auto_approve_gates={"db_query": True},   # approve DB reads/writes
     )
     async for token in client.stream("!autoAIdb read true"):
@@ -41,7 +41,7 @@ import httpx
 
 class AgentClient:
     """
-    Async HTTP client for agent-mcp API plugin (port 8766 by default).
+    Async HTTP client for agent-mcp API plugin (port 8767 by default).
 
     All methods are async and must be called from an async context.
     The client is stateless between calls — no persistent connection is kept.
@@ -57,7 +57,7 @@ class AgentClient:
     ):
         """
         Args:
-            base_url:           Base URL of the agent-mcp API plugin, e.g. "http://localhost:8766"
+            base_url:           Base URL of the agent-mcp API plugin, e.g. "http://localhost:8767"
             client_id:          Session identifier. Auto-generated api-{8hex} if omitted.
                                 Reuse the same client_id across calls to preserve session history.
             api_key:            Optional Bearer token if the server has API_KEY set.

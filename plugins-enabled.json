@@ -27,7 +27,7 @@
     },
     "plugin_client_api": {
       "enabled": true,
-      "api_port": 8766,
+      "api_port": 8767,
       "api_host": "0.0.0.0"
     }
   },

@@ -1,11 +1,11 @@
 """
 Integration test for the agent-mcp API client plugin.
 
-Assumes the agent is running with plugin_client_api enabled (port 8766).
+Assumes the agent is running with plugin_client_api enabled (port 8767).
 Start the agent: source venv/bin/activate && python agent-mcp.py
 
 Usage:
-    python test_api_client.py [--url http://localhost:8766] [--api-key KEY]
+    python test_api_client.py [--url http://localhost:8767] [--api-key KEY]
 
 Tests:
     1.  Health check
@@ -303,7 +303,7 @@ async def run_all(base_url: str, api_key: str = None):
 
 def main():
     parser = argparse.ArgumentParser(description="Test agent-mcp API plugin")
-    parser.add_argument("--url", default="http://localhost:8766", help="API base URL")
+    parser.add_argument("--url", default="http://localhost:8767", help="API base URL")
     parser.add_argument("--api-key", default=os.getenv("API_KEY", ""), help="API key")
     args = parser.parse_args()
 
