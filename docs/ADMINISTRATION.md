@@ -273,6 +273,78 @@ Container sections cannot be directly edited — edit their child sections inste
 
 ## Deployment
 
+### Automated node setup (`setup-agent-mcp.sh`)
+
+`setup-agent-mcp.sh` (repo root) automates cloning the repo, creating a venv,
+installing requirements, and pulling all secrets/config from an existing reference
+installation — so a new node is fully configured and ready to start in one step.
+
+#### Prerequisites
+
+- **Python 3.11+** via pyenv (recommended) or system Python
+- **SSH key auth** from the new machine back to the dev machine (when deploying remotely):
+  ```bash
+  # On the new/remote machine — one-time setup:
+  ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+  ssh-copy-id user@192.168.1.10   # your dev machine IP
+  ```
+
+#### Local clone (same machine, new directory)
+
+```bash
+mkdir ~/projects/mynode && cd ~/projects/mynode
+bash /path/to/setup-agent-mcp.sh \
+    --source-dir /path/to/your/dev/install
+```
+
+#### Remote node (different machine)
+
+```bash
+# On the remote machine:
+mkdir ~/projects/mynode && cd ~/projects/mynode
+# Download the script from the repo (or scp it from your dev machine)
+curl -O https://raw.githubusercontent.com/derezed88/agent-mcp/main/setup-agent-mcp.sh
+
+bash setup-agent-mcp.sh \
+    --source-host 192.168.1.10 \
+    --source-dir /path/to/your/dev/install \
+    [--source-user <user>]        # SSH user on dev machine (default: $USER)
+    [--branch <branch>]           # git branch to check out (default: main)
+    [--name <dirname>]            # target directory name (default: agent-mcp)
+```
+
+The script will:
+1. Verify SSH connectivity to the dev machine
+2. Clone the repo (SSH if a GitHub key is present, HTTPS otherwise)
+3. Create a venv with the correct Python version (reads `.python-version`)
+4. Install all requirements
+5. Pull from the dev machine via `scp`: `.env`, `credentials.json`, `token.json`,
+   `llm-models.json`, `.python-version`, service account JSON, and all `.system_prompt*` files
+6. Run an import check and display the port configuration
+
+#### After setup
+
+```bash
+cd agent-mcp   # (or --name value)
+source venv/bin/activate
+
+# If running alongside other instances on the same machine, reassign ports first:
+python plugin-manager.py port-list
+python plugin-manager.py port-set plugin_client_shellpy 8770
+python plugin-manager.py port-set plugin_client_api     8777
+
+python agent-mcp.py       # terminal 1 — server
+python shell.py           # terminal 2 — client
+```
+
+#### What is NOT copied
+
+`plugins-enabled.json` is intentionally not copied. Each node gets the repo's
+clean defaults. Adjust ports and plugin state per-instance with `plugin-manager.py`
+after setup.
+
+---
+
 ### Development (foreground)
 
 ```bash

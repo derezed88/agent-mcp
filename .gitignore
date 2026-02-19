@@ -29,8 +29,6 @@ server.log
 .aiops_session_id
 sprompt_backup/
 
-# Local deployment / swarm setup scripts (not part of the project)
-setup-agent-mcp.sh
 
 # IDE / tool settings
 .claude/
