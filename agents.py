@@ -446,12 +446,19 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 return final
 
             # Execute all tool calls in this turn
+            has_visible_output = False
             for tc in ai_msg.tool_calls:
+                if tc["name"] != "agent_call":
+                    has_visible_output = True
                 result = await execute_tool(client_id, tc["name"], tc["args"])
                 ctx.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
             # Signal end of this tool-call round trip so streaming clients
             # (e.g. Slack) can post intermediate progress before the next turn.
-            await push_done(client_id)
+            # Skip for agent_call-only turns: agent_call blocks for the full remote
+            # conversation duration, so emitting done would fire INTER_TURN_TIMEOUT
+            # before the call returns and cause the Slack consumer to exit early.
+            if has_visible_output:
+                await push_done(client_id)
 
         await push_tok(client_id, "\n[Max iterations]\n")
         await push_done(client_id)
