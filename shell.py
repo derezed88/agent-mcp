@@ -45,6 +45,7 @@ Server-side commands (forwarded):
 import asyncio
 import curses
 import json
+import locale
 import os
 import sys
 import uuid
@@ -611,7 +612,7 @@ def _draw(stdscr, snap: dict):
             break
         try:
             stdscr.addstr(row, 0, line[:max_x])
-        except curses.error:
+        except Exception:
             pass
 
     # ---- Separator ---------------------------------------------------------
@@ -623,6 +624,9 @@ def _draw(stdscr, snap: dict):
         if scroll > 0:
             lines_above = max(0, total_display - output_rows - scroll)
             base_status = f"{base_status}  [↑{scroll} scrolled — ↑{lines_above} more above]"
+        elif total_display > output_rows:
+            lines_above = total_display - output_rows
+            base_status = f"{base_status}  [↑{lines_above} above — PgUp to scroll]"
         status_str = f" {base_status} "
         attr = curses.A_BOLD
 
@@ -630,7 +634,7 @@ def _draw(stdscr, snap: dict):
     sep_line = (status_str + BORDER_CHAR * fill_len)[:max_x]
     try:
         stdscr.addstr(border_row, 0, sep_line, attr)
-    except curses.error:
+    except Exception:
         pass
 
     # ---- Input area --------------------------------------------------------
@@ -640,7 +644,7 @@ def _draw(stdscr, snap: dict):
         hint = "  (input blocked — resolve gate above)"[:max_x]
         try:
             stdscr.addstr(border_row + 1, 0, hint, curses.A_DIM)
-        except curses.error:
+        except Exception:
             pass
     else:
         text      = snap["input_text"]
@@ -660,7 +664,7 @@ def _draw(stdscr, snap: dict):
             prefix    = "> " if (start_chunk == 0 and i == 0) else "  "
             try:
                 stdscr.addstr(row, 0, (prefix + chunk)[:max_x])
-            except curses.error:
+            except Exception:
                 pass
 
         # Cursor
@@ -672,7 +676,7 @@ def _draw(stdscr, snap: dict):
                 min(screen_row, max_y - 1),
                 min(screen_col, max_x - 1),
             )
-        except curses.error:
+        except Exception:
             pass
 
     stdscr.refresh()
@@ -969,6 +973,9 @@ async def async_main(stdscr):
 
 
 def main():
+    # Set locale so curses handles UTF-8 and non-ASCII characters correctly.
+    locale.setlocale(locale.LC_ALL, "")
+
     # Enable xterm-style extended mouse reporting (button 4/5 = wheel up/down)
     # Must be written BEFORE curses.wrapper takes over stdout.
     try:
