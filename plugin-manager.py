@@ -405,6 +405,8 @@ class PluginManager:
 
         enabled_plugins.append(plugin_name)
         self.config['enabled_plugins'] = enabled_plugins
+        # Set explicit enabled: true in plugin_config so plugin_loader skips the flag check
+        self.config.setdefault('plugin_config', {}).setdefault(plugin_name, {})['enabled'] = True
 
         if self.save_config():
             print(f"{Colors.GREEN}✓ Enabled plugin: {plugin_name}{Colors.RESET}")
@@ -421,6 +423,9 @@ class PluginManager:
 
         enabled_plugins.remove(plugin_name)
         self.config['enabled_plugins'] = enabled_plugins
+        # Set explicit enabled: false so plugin_loader won't load it even if it
+        # lingers in enabled_plugins (e.g. if config was hand-edited)
+        self.config.setdefault('plugin_config', {}).setdefault(plugin_name, {})['enabled'] = False
 
         if self.save_config():
             print(f"{Colors.GREEN}✓ Disabled plugin: {plugin_name}{Colors.RESET}")
