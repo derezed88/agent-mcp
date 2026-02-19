@@ -81,6 +81,7 @@ python plugin-manager.py disable <plugin_name>   # disable a plugin
 | `plugin_client_shellpy` | client_interface | shell.py terminal client (always keep enabled) |
 | `plugin_proxy_llama` | client_interface | OpenAI/Ollama API (port set via `llama_port` in `plugins-enabled.json`) |
 | `plugin_client_slack` | client_interface | Slack bidirectional client |
+| `plugin_client_api` | client_interface | JSON/SSE API for programmatic access and swarm (port 8767) |
 | `plugin_database_mysql` | data_tool | `db_query` tool |
 | `plugin_storage_googledrive` | data_tool | `google_drive` tool |
 | `plugin_search_ddgs` | data_tool | `ddgs_search` tool (no key required) |
@@ -336,6 +337,96 @@ to `llm-models.json` for any models served via that tunnel.
 | `.system_prompt` | Root system prompt file | Admin manually or LLM via tool |
 | `.system_prompt_*` | Individual section files | Admin manually or LLM via tool |
 | `.aiops_session_id` | shell.py session persistence | shell.py automatically |
+
+---
+
+## Swarm / Multi-Agent Setup
+
+The `plugin_client_api` plugin must be enabled on any instance that will **receive** swarm calls. The `agent_call` tool is always available for any LLM to **initiate** calls.
+
+### Port configuration
+
+```bash
+python plugin-manager.py port-list                         # show all configured ports
+python plugin-manager.py port-set plugin_client_api 8777   # change API port if needed
+```
+
+When running multiple instances on the same machine, each must have a unique port for each client interface plugin.
+
+### Enabling the API plugin
+
+```bash
+python plugin-manager.py enable plugin_client_api
+python agent-mcp.py                                        # restart to apply
+```
+
+Verify: `curl http://localhost:8767/api/v1/health`
+
+### Optional: API key authentication
+
+Set `API_KEY` in `.env` to require Bearer token auth on all `/api/v1/*` endpoints:
+
+```
+API_KEY=your-secret-key
+```
+
+Clients must then pass `Authorization: Bearer your-secret-key`. `agent_call` picks this up automatically from the calling instance's environment.
+
+### Using the `agent_call` tool
+
+The LLM calls other agents by URL. No special configuration is required on the calling side.
+
+Example (from shell.py on Agent A):
+```
+Use agent_call to ask the agent at http://192.168.10.102:8767 to run !model
+```
+
+The remote session is preserved across calls — the same human session talking to the same remote URL always reuses the same remote session.
+
+### Using `api_client.py` programmatically
+
+```python
+import asyncio
+from api_client import AgentClient
+
+async def main():
+    client = AgentClient("http://localhost:8767", api_key="your-key")
+
+    # One-shot — blocks until done
+    result = await client.send("!model")
+    print(result)
+
+    # Streaming
+    async for token in client.stream("What tables are in the database?"):
+        print(token, end="", flush=True)
+
+asyncio.run(main())
+```
+
+Gate policy (for automated clients that need to approve tool calls):
+```python
+# Approve all db reads, reject everything else
+client = AgentClient(
+    "http://localhost:8767",
+    auto_approve_gates={"db_query": True}
+)
+```
+
+### Multi-instance setup
+
+```bash
+# First instance (default ports)
+cd /path/to/agent-mcp-1
+python agent-mcp.py
+
+# Second instance (custom ports, same machine)
+cd /path/to/agent-mcp-2
+python plugin-manager.py port-set plugin_client_shellpy 8770
+python plugin-manager.py port-set plugin_client_api 8777
+python agent-mcp.py
+```
+
+See `setup-agent-mcp.sh` for a complete fresh-checkout setup script that handles port configuration automatically.
 
 ---
 

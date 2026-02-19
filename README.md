@@ -64,6 +64,7 @@ Executors are auto-extracted from `StructuredTool.coroutine` — no separate exe
 | OpenAI-compatible chat apps (open-webui, LM Studio) | HTTP (`llama_port`, default 11434) | OpenAI chat completions (streaming + non-streaming) |
 | Ollama-compatible apps | HTTP (`llama_port`, default 11434) | Ollama NDJSON |
 | Slack | Socket Mode WebSocket (inbound) + Web API (outbound) | Slack Events API / `chat.postMessage` |
+| Programmatic / swarm | SSE (port 8767) | JSON/SSE via `api_client.py` or HTTP directly |
 
 The llama proxy auto-detects client format from User-Agent and path prefix, then routes all formats to the same `process_request()` pipeline.
 
@@ -90,6 +91,32 @@ The session LLM can delegate sub-tasks to other registered models:
 | `llm_clean_tool(model, tool, args)` | Tool definition only | Isolated tool call via a second model |
 
 Enable delegation per model with `!llm_call <model> true`. Rate-limited by default (3 calls / 20 s, auto-disables on breach).
+
+### Swarm / Multi-Agent Communication
+
+The `plugin_client_api` plugin exposes a JSON/SSE HTTP API (port 8767 by default) for programmatic and agent-to-agent access. Combined with the `agent_call` tool, any LLM on any instance can reach any other instance that has the API plugin enabled.
+
+**`agent_call(agent_url, message)`** — core swarm tool:
+- Sends `message` to a remote agent-mcp instance at `agent_url`
+- The remote agent processes the message through its full stack (LLM, tools, gates)
+- Returns the complete text response to the calling LLM
+- Session persistence: the remote session is derived deterministically from the calling session + target URL, so repeated calls from the same session to the same agent reuse the same remote session (history preserved across calls)
+- Depth guard: calls from a swarm-originated session are rejected with an error to prevent unbounded recursion (max 1 hop)
+
+**Programmatic access via `api_client.py`:**
+
+```python
+from api_client import AgentClient
+
+client = AgentClient("http://localhost:8767")
+response = await client.send("!model")          # sync — returns full text
+async for token in client.stream("hello"):      # streaming — yields tokens
+    print(token, end="", flush=True)
+```
+
+The API plugin and `api_client.py` are also the transport layer used internally by `agent_call`.
+
+> **Note:** A scheme for agents to discover each other automatically is not yet implemented. Swarm targets must be specified explicitly by URL.
 
 ### Modular System Prompt
 
@@ -152,11 +179,14 @@ shell.py    ──SSE──►   agent-mcp.py                    OpenAI API
 open-webui  ─HTTP──►   ┌──────────────────────────┐    Gemini API
 LM Studio   ─HTTP──►   │ routes.py                │    xAI API
 Slack ─Socket Mode──►  │ agents.py (agentic_lc)   │    llama.cpp / Ollama
-                       │   LangChain bind_tools()  │
-                       │   ChatOpenAI              │──► MySQL
+api_client  ─HTTP──►   │   LangChain bind_tools()  │
+Agent B ────HTTP──►    │   ChatOpenAI              │──► MySQL
                        │   ChatGoogleGenerativeAI  │──► Google Drive
                        │ plugin_*.py               │──► Web search APIs
                        └──────────────────────────┘
+                                    │ agent_call tool
+                                    ▼
+                             Agent B / Agent C  (other agent-mcp instances)
 ```
 
 - **`agent-mcp.py`** — entry point; loads plugins, builds Starlette app, starts uvicorn servers
@@ -175,6 +205,7 @@ Slack ─Socket Mode──►  │ agents.py (agentic_lc)   │    llama.cpp / O
 | `plugin_client_shellpy` | client_interface | shell.py terminal client (SSE, port 8765) |
 | `plugin_proxy_llama` | client_interface | OpenAI/Ollama API (configurable port, default 11434) |
 | `plugin_client_slack` | client_interface | Slack bidirectional interface |
+| `plugin_client_api` | client_interface | JSON/SSE HTTP API for programmatic access and swarm (port 8767) |
 | `plugin_database_mysql` | data_tool | `db_query` — SQL against MySQL |
 | `plugin_storage_googledrive` | data_tool | `google_drive` — CRUD within authorised folder |
 | `plugin_search_ddgs` | data_tool | `ddgs_search` — DuckDuckGo (no API key) |
@@ -202,6 +233,7 @@ python plugin-manager.py disable <plugin_name>
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System internals, LangChain integration, request flow |
 | [docs/PLUGIN_DEVELOPMENT.md](docs/PLUGIN_DEVELOPMENT.md) | How to write new plugins and add new models |
 | [docs/setup_services.md](docs/setup_services.md) | systemd, tmux, screen, and tunnel deployment |
+| [docs/plugin-client-api.md](docs/plugin-client-api.md) | API plugin — programmatic access and swarm setup |
 | [docs/plugin-*.md](docs/) | Per-plugin setup and configuration |
 
 ---

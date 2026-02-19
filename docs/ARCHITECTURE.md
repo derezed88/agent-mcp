@@ -12,8 +12,8 @@ open-webui    ─HTTP─►  ┌────────────────
 LM Studio app ─HTTP─►  │  routes.py           │        Local llama.cpp / Ollama
 Slack  ─Socket Mode──►  │  (process_request)   │
        ◄─Web API(bot)─  │                      │
-                       │    │                 │
-                       │    ▼                 │
+api_client.py ─HTTP─►  │    │                 │
+Agent B       ─HTTP─►  │    ▼                 │
                        │  agents.py           │
                        │  (dispatch_llm)      │
                        │  LangChain agentic   │
@@ -21,11 +21,14 @@ Slack  ─Socket Mode──►  │  (process_request)   │
                        │    │                 │
                        │    ▼                 │
                        │  execute_tool()      │──► gate.py ──► shell.py
-                       │    │                 │                (approval)
+                       │    │  agent_call()   │                (approval)
                        │    ▼                 │
                        │  Plugin executors    │──► MySQL
                        │  (db, drive, search) │──► Google Drive
                        └──────────────────────┘──► Web search APIs
+                                │ agent_call
+                                ▼
+                         Agent B / Agent C  (other agent-mcp instances)
 ```
 
 ## Source Files
@@ -179,6 +182,8 @@ Sessions are keyed by `client_id`:
 | shell.py | read from `.aiops_session_id` | Full interactive approval |
 | llama proxy | `llama-<client-ip>` | Auto-reject (non-interactive) |
 | Slack | `slack-<channel_id>-<thread_ts>` | Auto-reject (non-interactive) |
+| API plugin (direct) | `api-<8 hex chars>` (auto-generated) | 2-second window then auto-reject |
+| Swarm (agent_call) | `api-swarm-<8 hex chars>` (derived from caller + URL) | Auto-reject (non-interactive) |
 
 Each session stores: `model`, `history`, `tool_preview_length`, `_temp_model_active`.
 
@@ -196,6 +201,7 @@ Plugins are declared in `plugin-manifest.json` and enabled/disabled in `plugins-
 - `plugin_client_shellpy` — SSE streaming endpoint for shell.py (port 8765)
 - `plugin_proxy_llama` — OpenAI/Ollama-compatible proxy (configurable port, default 11434)
 - `plugin_client_slack` — Slack client: inbound via Socket Mode WebSocket, outbound via Web API (`chat.postMessage`)
+- `plugin_client_api` — JSON/SSE HTTP API for programmatic access and swarm coordination (port 8767)
 
 **`data_tool`** — registers tools callable by the LLM:
 - `plugin_database_mysql` — `db_query` tool
@@ -250,6 +256,7 @@ Gates are per-tool human approval checkpoints. `check_human_gate()` in `gate.py`
 **Auto-bypass conditions:**
 - `session["_temp_model_active"] = True` — set by `@model` prefix, bypasses all gates for that turn
 - `client_id.startswith("llama-")` or `client_id.startswith("slack-")` — auto-rejects (non-interactive)
+- `client_id.startswith("api-")` — pushes gate to SSE queue, waits 2 seconds (`API_GATE_TIMEOUT`) for client to respond via `POST /api/v1/gate/{gate_id}`, then auto-rejects if no response. `AgentClient` with `auto_approve_gates` policy responds within milliseconds when configured.
 
 ## System Prompt Structure
 
@@ -307,15 +314,47 @@ No code changes are needed for models that use the standard `OPENAI` or `GEMINI`
 
 ## LLM Delegation Tools
 
-Three mechanisms for the session LLM to delegate work:
+Four mechanisms for the session LLM to delegate work:
 
-| Tool | Context sent | Tools available | Gates | Use case |
-|---|---|---|---|---|
-| `llm_clean_text(model, prompt)` | None (prompt only) | None (text only) | N/A | Summarization, analysis of embedded data |
-| `llm_clean_tool(model, tool, arguments)` | Tool def only | One named tool | Honored | Isolated tool call via target model |
-| `@model <prompt>` (user-initiated) | Full session | All tools | Bypassed | Full turn delegation to free/local model |
+| Tool | Target | Context sent | Use case |
+|---|---|---|---|
+| `llm_clean_text(model, prompt)` | Local model | Prompt only — no context, no tools | Summarization, classification, analysis |
+| `llm_clean_tool(model, tool, arguments)` | Local model | Tool definition only | Isolated tool call via a second model |
+| `agent_call(agent_url, message)` | Remote agent-mcp instance | None (fresh remote session or persisted swarm session) | Swarm / multi-agent coordination |
+| `@model <prompt>` (user-initiated) | Local model | Full session | Full turn delegation to free/local model |
 
-Both `llm_clean_text` and `llm_clean_tool` require `tool_call_available: true` on the target model. Enable with `!llm_call <model> true`.
+`llm_clean_text` and `llm_clean_tool` require `tool_call_available: true` on the target model. Enable with `!llm_call <model> true`.
+
+`agent_call` routes through `plugin_client_api` and requires no additional configuration beyond the API plugin being enabled on the target instance.
+
+## Swarm Architecture
+
+Agent-to-agent communication is built on the API client plugin (`plugin_client_api`) as the transport layer.
+
+```
+Agent A (calling instance)           Agent B (target instance)
+─────────────────────────            ──────────────────────────
+LLM emits agent_call tool call
+        │
+        ▼
+agent_call(agent_url, message)
+        │
+        │  POST /api/v1/submit        ┌─────────────────────────┐
+        │─────────────────────────►   │  plugin_client_api      │
+        │                             │  process_request()      │
+        │  GET  /api/v1/stream/{id}   │  agents.py              │
+        │◄────── SSE events ──────────│  (full LLM + tools)     │
+        │        tok / gate / done    └─────────────────────────┘
+        │
+        ▼
+result returned to Agent A's LLM as tool result
+```
+
+**Session persistence:** The swarm `client_id` is derived as `api-swarm-{md5(calling_client_id + ":" + agent_url)[:8]}`. This means repeated `agent_call` invocations from the same human session to the same remote agent reuse the same remote session, preserving conversation history across calls. Pass `target_client_id` explicitly to override.
+
+**Depth guard:** If a session's `client_id` starts with `api-swarm-`, further `agent_call` invocations from that session are rejected immediately. This prevents unbounded recursion at 1 hop.
+
+**Discovery:** There is currently no automatic discovery mechanism — target agents must be specified by URL. A discovery scheme is left to the operator or future development.
 
 ## Rate Limiting
 
