@@ -84,8 +84,16 @@ async def cancel_active_task(client_id: str) -> bool:
     if task and not task.done() and task is not asyncio.current_task():
         task.cancel()
         try:
-            await task
-        except (asyncio.CancelledError, Exception):
+            # Wait up to 5s for the task to acknowledge cancellation.
+            # If it's stuck in a non-cancellable I/O call we don't block forever.
+            done, _ = await asyncio.wait({task}, timeout=5)
+            if not done:
+                # Task didn't finish in time — log and move on
+                import logging
+                logging.getLogger("agent").warning(
+                    f"cancel_active_task: task for '{client_id}' didn't finish in 5s after cancel"
+                )
+        except Exception:
             pass
         active_tasks.pop(client_id, None)
         # Drain any stale tokens the cancelled task already queued

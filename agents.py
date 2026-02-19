@@ -59,6 +59,7 @@ def _build_lc_llm(model_key: str):
         return ChatGoogleGenerativeAI(
             model=cfg["model_id"],
             google_api_key=cfg.get("key"),
+            request_timeout=cfg.get("llm_call_timeout", 60),
         )
     raise ValueError(f"Unsupported model type '{cfg['type']}' for model '{model_key}'")
 
