@@ -1166,6 +1166,16 @@ async def endpoint_submit(request: Request) -> JSONResponse:
 async def endpoint_stream(request: Request):
     client_id = request.query_params.get("client_id")
     if not client_id: return JSONResponse({"error": "Missing client_id"}, 400)
+
+    # Register session on connect so it shows up in !session before first message
+    from state import get_or_create_shorthand_id
+    if client_id not in sessions:
+        sessions[client_id] = {"model": DEFAULT_MODEL, "history": []}
+        get_or_create_shorthand_id(client_id)
+    peer_ip = request.client.host if request.client else None
+    if peer_ip:
+        sessions[client_id]["peer_ip"] = peer_ip
+
     q = await get_queue(client_id)
 
     async def generator() -> AsyncGenerator[dict, None]:
