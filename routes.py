@@ -130,7 +130,14 @@ async def cmd_autoaidb(client_id: str, args: str):
         if not auto_aidb_state:
             await push_tok(client_id, "No database gate settings configured (all tables gated by default)")
         else:
-            await push_tok(client_id, "Database gate settings:\n" + str(auto_aidb_state))
+            lines = ["Database gate settings (set this session — resets on restart):"]
+            for key, perms in auto_aidb_state.items():
+                label = "(wildcard — applies to all tables)" if key == "*" else \
+                        "(metadata: SHOW/DESCRIBE)" if key == "__meta__" else key
+                read_s = "auto-allow" if perms.get("read") else "gated"
+                write_s = "auto-allow" if perms.get("write") else "gated"
+                lines.append(f"  {label}: read={read_s}, write={write_s}")
+            await push_tok(client_id, "\n".join(lines))
         await conditional_push_done(client_id)
         return
 
