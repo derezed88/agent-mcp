@@ -94,13 +94,14 @@ async def endpoint_api_submit(request: Request) -> JSONResponse:
 
     wait = bool(payload.get("wait", False))
     timeout = int(payload.get("timeout", 60))
+    peer_ip = request.client.host if request.client else None
 
     await cancel_active_task(client_id)
 
     if wait:
         # Sync mode: accumulate all tokens until done, then return
         q = await get_queue(client_id)
-        task = asyncio.create_task(process_request(client_id, text, payload))
+        task = asyncio.create_task(process_request(client_id, text, payload, peer_ip=peer_ip))
         active_tasks[client_id] = task
 
         accumulated = []
@@ -145,7 +146,7 @@ async def endpoint_api_submit(request: Request) -> JSONResponse:
             return JSONResponse({"client_id": client_id, "status": "cancelled", "text": "".join(accumulated)})
     else:
         # Async mode: fire-and-forget, client streams via /api/v1/stream/{client_id}
-        task = asyncio.create_task(process_request(client_id, text, payload))
+        task = asyncio.create_task(process_request(client_id, text, payload, peer_ip=peer_ip))
         active_tasks[client_id] = task
         return JSONResponse({"client_id": client_id, "status": "accepted"})
 

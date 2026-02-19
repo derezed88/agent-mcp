@@ -721,7 +721,9 @@ async def cmd_session(client_id: str, arg: str):
                 model = data.get("model", "unknown")
                 history_len = len(data.get("history", []))
                 shorthand_id = get_or_create_shorthand_id(sid)
-                lines.append(f"  ID [{shorthand_id}] {sid}: model={model}, history={history_len} messages{marker}")
+                peer_ip = data.get("peer_ip")
+                ip_str = f", ip={peer_ip}" if peer_ip else ""
+                lines.append(f"  ID [{shorthand_id}] {sid}: model={model}, history={history_len} messages{ip_str}{marker}")
             await push_tok(client_id, "\n".join(lines))
     elif len(parts) == 2:
         target_arg, action = parts[0], parts[1].lower()
@@ -975,13 +977,16 @@ async def cmd_tool_preview_length(client_id: str, arg: str, session: dict):
     await conditional_push_done(client_id)
 
 
-async def process_request(client_id: str, text: str, raw_payload: dict):
+async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip: str = None):
     from state import get_or_create_shorthand_id
 
     if client_id not in sessions:
         sessions[client_id] = {"model": raw_payload.get("default_model", DEFAULT_MODEL), "history": []}
         # Assign shorthand ID when session is created
         get_or_create_shorthand_id(client_id)
+    # Store/update peer IP whenever we have it
+    if peer_ip:
+        sessions[client_id]["peer_ip"] = peer_ip
     session = sessions[client_id]
     stripped = text.strip()
 
@@ -1154,12 +1159,13 @@ async def process_request(client_id: str, text: str, raw_payload: dict):
 async def endpoint_submit(request: Request) -> JSONResponse:
     try: payload = await request.json()
     except: return JSONResponse({"status": "error"}, 400)
-    
+
     client_id, text = payload.get("client_id"), payload.get("text", "")
     if not client_id or not text: return JSONResponse({"error": "Missing fields"}, 400)
-    
+
+    peer_ip = request.client.host if request.client else None
     await cancel_active_task(client_id)
-    task = asyncio.create_task(process_request(client_id, text, payload))
+    task = asyncio.create_task(process_request(client_id, text, payload, peer_ip=peer_ip))
     active_tasks[client_id] = task
     return JSONResponse({"status": "OK"})
 
@@ -1217,7 +1223,7 @@ async def endpoint_health(request: Request) -> JSONResponse:
 
 async def endpoint_list_sessions(request: Request) -> JSONResponse:
     """List all active sessions with metadata."""
-    from state import sessions, sse_queues
+    from state import sessions, sse_queues, get_or_create_shorthand_id
 
     client_id_filter = request.query_params.get("client_id")
 
@@ -1227,8 +1233,10 @@ async def endpoint_list_sessions(request: Request) -> JSONResponse:
             continue
         session_list.append({
             "client_id": cid,
+            "shorthand_id": get_or_create_shorthand_id(cid),
             "model": data.get("model", "unknown"),
             "history_length": len(data.get("history", [])),
+            "peer_ip": data.get("peer_ip"),
         })
 
     return JSONResponse({"sessions": session_list})

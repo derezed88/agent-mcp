@@ -204,15 +204,19 @@ async def list_sessions():
                 if not sessions:
                     await state.append_output("\n[shell] No active sessions found.\n")
                     return
-                await state.append_output("\nActive Sessions:")
+                await state.append_output("\nActive sessions:")
                 for s in sessions:
-                    current = " (YOU)" if s["client_id"] == CLIENT_ID else ""
-                    cid_short = s["client_id"][:8] + "..."
+                    current = " (current)" if s["client_id"] == CLIENT_ID else ""
+                    shorthand = s.get("shorthand_id", "?")
+                    cid = s["client_id"]
+                    model = s["model"]
+                    history = s["history_length"]
+                    peer_ip = s.get("peer_ip")
+                    ip_str = f", ip={peer_ip}" if peer_ip else ""
                     await state.append_output(
-                        f"  {cid_short}{current} - Model: {s['model']} - "
-                        f"History: {s['history_length']} messages"
+                        f"  ID [{shorthand}] {cid}: model={model}, history={history} messages{ip_str}{current}"
                     )
-                await state.append_output(f"\nCurrent session: {CLIENT_ID[:8]}...\n")
+                await state.append_output("")
             else:
                 await state.append_output(f"[ERROR] Server returned {resp.status_code}: {resp.text}")
     except Exception as exc:
