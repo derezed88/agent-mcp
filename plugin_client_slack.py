@@ -298,18 +298,32 @@ class SlackClientPlugin(BasePlugin):
         # Process through agent (imported from routes.py)
         asyncio.create_task(process_request(client_id, text, payload))
 
-    # Regex for push_tok status lines emitted by the agent framework.
-    # These bracket tokens (e.g. "[agent_call ▶ gemini25]", "[agent_call ◀]") are
-    # informational noise that should not appear in Slack posts.
-    _STATUS_LINE_RE = re.compile(
-        r'^\[(?:agent_call|tool_call|llm_call)[^\]]*\]\s*$',
+    # Two-pass regexes to strip push_tok bracket status lines from agent output.
+    #
+    # Pass 1 — "owned body" tags: bracket lines whose content ends with ":"
+    # own the body lines that immediately follow (e.g. "[agent_call ◀] url:\nbody").
+    # Both the tag line and the body are removed because the LLM always writes
+    # its own summary of the result afterwards.
+    _STATUS_OWNED_RE = re.compile(
+        r'\[(?:agent_call|tool_call|llm_clean_text|llm_clean_tool'
+        r'|db|search\s+\w+|sysprompt|sysinfo|drive)[^\]]*\][^\n]*:\n'
+        r'(?:(?!\[)[^\n]+\n?)*',
+        re.MULTILINE,
+    )
+    # Pass 2 — standalone bracket tag lines (▶ progress lines, bare ◀, ✗ errors,
+    # [Max iterations], [RATE LIMITED], [REJECTED], [catcher], [context], etc.)
+    _STATUS_STANDALONE_RE = re.compile(
+        r'^\[(?:agent_call|tool_call|llm_clean_text|llm_clean_tool'
+        r'|db|search\s+\w+|sysprompt|sysinfo|drive|catcher|context'
+        r'|RATE\s+LIMITED|REJECTED|Max\s+iterations)[^\]]*\][^\n]*\n?',
         re.MULTILINE,
     )
 
     @classmethod
     def _filter_status_lines(cls, text: str) -> str:
-        """Remove push_tok status bracket lines from agent output."""
-        filtered = cls._STATUS_LINE_RE.sub('', text)
+        """Remove push_tok status bracket lines (and their owned bodies) from agent output."""
+        filtered = cls._STATUS_OWNED_RE.sub('', text)
+        filtered = cls._STATUS_STANDALONE_RE.sub('', filtered)
         # Collapse runs of blank lines that may be left behind
         filtered = re.sub(r'\n{3,}', '\n\n', filtered)
         return filtered.strip()
