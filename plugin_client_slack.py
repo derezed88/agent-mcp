@@ -360,7 +360,9 @@ class SlackClientPlugin(BasePlugin):
         # grace period for the next turn to start.
         # If nothing arrives within the grace period, the conversation is truly finished.
         FIRST_TIMEOUT = 120.0   # max wait for first token (LLM can be slow)
-        INTER_TURN_TIMEOUT = 5.0  # grace period between turns after a "done"
+        INTER_TURN_TIMEOUT = 30.0  # grace period between turns after a "done"
+        # 30s allows frontier models time to generate a final summary after the
+        # last agent_call completes before we declare the conversation finished.
 
         timeout = FIRST_TIMEOUT
         received_done = False
@@ -376,8 +378,8 @@ class SlackClientPlugin(BasePlugin):
                         turn_text = f"_(turn {turn_index + 1})_\n{turn_text}"
                     await self._send_slack_message(channel_id, thread_ts, turn_text)
                     log.info(f"Slack: posted {label} for {client_id} (turn {turn_index + 1})")
+                    turn_index += 1  # only advance on visible output
             response_parts = []
-            turn_index += 1
 
         try:
             while True:
