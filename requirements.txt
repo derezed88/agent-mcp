@@ -1,0 +1,46 @@
+# Agent MCP requirements
+
+# Server
+starlette>=0.36.0
+sse-starlette>=2.0.0
+uvicorn[standard]>=0.29.0
+
+# LLM clients
+openai>=1.30.0
+google-genai>=1.0.0
+google-generativeai>=0.7.0
+
+# LangChain LLM abstraction
+langchain>=1.2.0
+langchain-openai>=1.1.0
+langchain-google-genai>=4.2.0
+
+# MCP
+mcp>=1.0.0
+
+# Plugin: Slack client
+slack-sdk>=3.0
+aiohttp>=3.0
+
+# Plugin: Google Drive
+google-auth>=2.0
+google-auth-oauthlib>=1.0
+google-api-python-client>=2.0
+
+# Plugin: DuckDuckGo search (no API key required)
+ddgs>=6.0
+
+# Plugin: xAI search
+xai-sdk
+
+# Plugin: Tavily search + URL extract
+tavily-python>=0.3.0
+
+# Plugin: MySQL database
+mysql-connector-python>=8.3.0
+
+# HTTP client
+httpx[http2]>=0.27.0
+
+# Shared
+python-dotenv>=1.0.0

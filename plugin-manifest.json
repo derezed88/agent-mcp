@@ -1,0 +1,171 @@
+{
+  "version": "1.0.0",
+  "plugins": {
+    "plugin_client_shellpy": {
+      "type": "client_interface",
+      "file": "plugin_client_shellpy.py",
+      "description": "shell.py client with SSE streaming and gate approval UI",
+      "dependencies": [
+        "sse-starlette"
+      ],
+      "env_vars": [],
+      "config_files": [],
+      "default_enabled": true,
+      "priority": 10
+    },
+    "plugin_proxy_llama": {
+      "type": "client_interface",
+      "file": "plugin_proxy_llama.py",
+      "description": "Llama proxy for OpenAI/Ollama compatible clients (open-webui, Enchanted, etc.)",
+      "dependencies": [],
+      "env_vars": [],
+      "config_files": [],
+      "default_enabled": false,
+      "priority": 20
+    },
+    "plugin_client_slack": {
+      "type": "client_interface",
+      "file": "plugin_client_slack.py",
+      "description": "Slack bidirectional client with Socket Mode and thread support",
+      "dependencies": [
+        "slack-sdk>=3.0",
+        "aiohttp>=3.0"
+      ],
+      "env_vars": [
+        "SLACK_BOT_TOKEN",
+        "SLACK_APP_TOKEN"
+      ],
+      "config_files": [],
+      "default_enabled": false,
+      "priority": 30
+    },
+    "plugin_database_mysql": {
+      "type": "data_tool",
+      "file": "plugin_database_mysql.py",
+      "description": "MySQL database query tool with per-table gates",
+      "dependencies": [
+        "mysql-connector-python>=8.0"
+      ],
+      "env_vars": [
+        "MYSQL_USER",
+        "MYSQL_PASS"
+      ],
+      "config_files": [],
+      "default_enabled": true,
+      "priority": 100,
+      "tools": [
+        "db_query"
+      ]
+    },
+    "plugin_storage_googledrive": {
+      "type": "data_tool",
+      "file": "plugin_storage_googledrive.py",
+      "description": "Google Drive CRUD operations within authorized folder",
+      "dependencies": [
+        "google-auth",
+        "google-auth-oauthlib",
+        "google-api-python-client"
+      ],
+      "env_vars": [
+        "FOLDER_ID"
+      ],
+      "config_files": [
+        "credentials.json",
+        "token.json"
+      ],
+      "default_enabled": true,
+      "priority": 200,
+      "tools": [
+        "google_drive"
+      ]
+    },
+    "plugin_search_google": {
+      "type": "data_tool",
+      "file": "plugin_search_google.py",
+      "description": "Web search via Gemini grounding",
+      "dependencies": [
+        "httpx"
+      ],
+      "env_vars": [
+        "GEMINI_API_KEY"
+      ],
+      "config_files": [],
+      "default_enabled": true,
+      "priority": 300,
+      "tools": [
+        "google_search"
+      ]
+    },
+    "plugin_search_ddgs": {
+      "type": "data_tool",
+      "file": "plugin_search_ddgs.py",
+      "description": "Web search via DuckDuckGo (no API key required)",
+      "dependencies": [
+        "ddgs"
+      ],
+      "env_vars": [],
+      "config_files": [],
+      "default_enabled": true,
+      "priority": 310,
+      "tools": [
+        "ddgs_search"
+      ]
+    },
+    "plugin_search_tavily": {
+      "type": "data_tool",
+      "file": "plugin_search_tavily.py",
+      "description": "Web search via Tavily AI search API (AI-curated results with answers)",
+      "dependencies": [
+        "tavily-python"
+      ],
+      "env_vars": [
+        "TAVILY_API_KEY"
+      ],
+      "config_files": [],
+      "default_enabled": true,
+      "priority": 320,
+      "tools": [
+        "tavily_search"
+      ]
+    },
+    "plugin_search_xai": {
+      "type": "data_tool",
+      "file": "plugin_search_xai.py",
+      "description": "Web search via xAI Grok x_search (real-time web and X/Twitter search)",
+      "dependencies": [
+        "xai-sdk"
+      ],
+      "env_vars": [
+        "XAI_API_KEY"
+      ],
+      "config_files": [],
+      "default_enabled": false,
+      "priority": 330,
+      "tools": [
+        "xai_search"
+      ]
+    },
+    "plugin_urlextract_tavily": {
+      "type": "data_tool",
+      "file": "plugin_urlextract_tavily.py",
+      "description": "Web page content extraction via Tavily (plain or query-focused)",
+      "dependencies": [
+        "tavily-python"
+      ],
+      "env_vars": [
+        "TAVILY_API_KEY"
+      ],
+      "config_files": [],
+      "default_enabled": false,
+      "priority": 400,
+      "tools": [
+        "url_extract"
+      ]
+    }
+  },
+  "metadata": {
+    "schema_version": "1.0",
+    "last_updated": "2026-02-17",
+    "notes": "Plugin manifest for MCP agent system. Renamed plugins to type-prefixed scheme. Added plugin_search_ddgs, plugin_search_tavily, plugin_search_xai, plugin_urlextract_tavily."
+  }
+}

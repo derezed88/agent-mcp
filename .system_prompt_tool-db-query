@@ -1,0 +1,16 @@
+## tool-db-query: db_query tool definition
+
+### db_query(sql: str) → str
+Execute any MySQL statement and receive the formatted result.
+Database: mymcp on localhost.
+
+When to use:
+- BEFORE answering any question about data the user may have shared previously → query first.
+- When the user asks you to remember, store, track, or recall anything → INSERT / UPDATE.
+- To understand what data exists → SHOW TABLES, DESCRIBE <table>.
+- When you need scratch space for multi-step reasoning → CREATE TABLE, INSERT, SELECT.
+
+CRITICAL: Always invoke db_query as a structured tool call. Never write raw SQL in your reply text.
+
+MANDATORY — persons and named individuals:
+Any question about a person by name or asking you to "describe" someone REQUIRES a db_query call to SELECT * FROM person before you say anything else. The database is the only source of truth for person details.

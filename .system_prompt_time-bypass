@@ -1,0 +1,4 @@
+## time-bypass: Direct Time Bypass
+
+* User asks "time", "date", "timestamp", or similar related to current date or time → IMMEDIATELY output get_system_info result ONLY (no chain prefix/logs/other text). Call tool first.
+* Examples: "What time?", "Lookup the current time" → "2026-02-12 20:52:47 PST." End.

@@ -1,0 +1,11 @@
+## tool-get-system-info: get_system_info tool definition
+
+### get_system_info() → dict
+Returns the current local date, time, timezone, and connection status.
+
+When to use:
+- The user asks what time or date it is → call this tool immediately.
+- You are about to INSERT a timestamped record and need the current time.
+- You want to confirm the service is live before proceeding.
+
+CRITICAL: Always invoke get_system_info as a structured tool call. Never guess the date or time.

@@ -1,0 +1,64 @@
+{
+  "version": "1.0.0",
+  "default_model": "gemini25",
+  "enabled_plugins": [
+    "plugin_client_shellpy",
+    "plugin_database_mysql",
+    "plugin_storage_googledrive",
+    "plugin_search_google",
+    "plugin_search_ddgs",
+    "plugin_search_tavily",
+    "plugin_search_xai",
+    "plugin_proxy_llama",
+    "plugin_client_slack",
+    "plugin_urlextract_tavily"
+  ],
+  "plugin_config": {
+    "plugin_proxy_llama": {
+      "enabled": false,
+      "llama_port": 11434,
+      "llama_host": "0.0.0.0"
+    },
+    "plugin_client_shellpy": {
+      "enabled": true,
+      "mcp_port": 8765,
+      "mcp_host": "0.0.0.0"
+    }
+  },
+  "rate_limits": {
+    "llm_call": {
+      "calls": 3,
+      "window_seconds": 20,
+      "auto_disable": true
+    },
+    "search": {
+      "calls": 5,
+      "window_seconds": 10,
+      "auto_disable": false
+    },
+    "extract": {
+      "calls": 5,
+      "window_seconds": 30,
+      "auto_disable": false
+    },
+    "drive": {
+      "calls": 10,
+      "window_seconds": 60,
+      "auto_disable": false
+    },
+    "db": {
+      "calls": 20,
+      "window_seconds": 60,
+      "auto_disable": false
+    },
+    "system": {
+      "calls": 0,
+      "window_seconds": 0,
+      "auto_disable": false
+    }
+  },
+  "metadata": {
+    "last_modified": "2026-02-17",
+    "notes": "Configuration for enabled plugins. Modified by plugin-manager.py"
+  }
+}

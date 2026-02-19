@@ -1,0 +1,216 @@
+# agent-mcp
+
+A multi-client AI agent server with a plugin architecture. Maintains persistent conversation sessions, routes all requests through a unified LangChain-based LLM dispatch loop, enforces human-approval gates on tool calls, and exposes a modular plugin system for data tools and client interfaces.
+
+---
+
+## Technical Overview
+
+### LangChain LLM Abstraction
+
+All LLM backends are unified under a single `agentic_lc()` loop using LangChain:
+
+- **`ChatOpenAI`** — covers OpenAI, xAI/Grok, and any local llama.cpp or Ollama server (all speak the OpenAI chat completions API)
+- **`ChatGoogleGenerativeAI`** — covers Gemini models via the Google GenAI SDK
+
+`_build_lc_llm(model_key)` constructs the correct LangChain chat model from `llm-models.json` at call time. Adding a new LLM backend requires only a JSON entry — no code changes.
+
+The loop calls `llm.bind_tools(tools)` once and `llm.ainvoke(messages)` each iteration. Tool calls, results, and conversation history are exchanged as typed LangChain message objects (`AIMessage`, `ToolMessage`, `HumanMessage`). A `_content_to_str()` helper normalises model responses — Gemini returns content as a list of typed blocks; OpenAI returns a plain string.
+
+### Tool Definition — LangChain StructuredTool
+
+All tools — core and plugin — are defined as LangChain `StructuredTool` objects with Pydantic `BaseModel` argument schemas. This is the single source of truth for every backend:
+
+```python
+class _SearchArgs(BaseModel):
+    query: str = Field(description="Search query")
+    max_results: Optional[int] = Field(default=10, description="Max results")
+
+StructuredTool.from_function(
+    coroutine=search_executor,
+    name="ddgs_search",
+    description="Search the web via DuckDuckGo.",
+    args_schema=_SearchArgs,
+)
+```
+
+`_lc_tool_to_openai_dict()` converts StructuredTool to OpenAI dict format on the fly for the bare-text tool call fallback used by local models. No separate OpenAI or Gemini tool declarations are maintained anywhere.
+
+### Bare Tool Call Fallback
+
+Local models (Qwen, Hermes) sometimes output tool calls as raw JSON or XML rather than using the native function-calling API. `try_force_tool_calls()` extracts these from the model's text output and re-injects them as proper tool calls, with results fed back as `HumanMessage` objects. Tool names are validated against the live StructuredTool registry.
+
+### Plugin Architecture
+
+Plugins are loaded dynamically from `plugin-manifest.json` at startup. Each plugin is a Python file with a single `BasePlugin` subclass:
+
+```python
+class MyPlugin(BasePlugin):
+    PLUGIN_TYPE = "data_tool"          # or "client_interface"
+
+    def init(self, config) -> bool: ...     # connect, validate env
+    def shutdown(self) -> None: ...
+    def get_tools(self) -> dict: ...        # returns {"lc": [StructuredTool, ...]}
+    def get_gate_tools(self) -> dict: ...   # declares gate types per tool
+```
+
+Executors are auto-extracted from `StructuredTool.coroutine` — no separate executor registry needed.
+
+### Client Interfaces
+
+| Client | Transport | Protocol |
+|---|---|---|
+| `shell.py` terminal | SSE (port 8765) | Custom SSE streaming + gate approval UI |
+| OpenAI-compatible chat apps (open-webui, LM Studio) | HTTP (`llama_port`, default 11434) | OpenAI chat completions (streaming + non-streaming) |
+| Ollama-compatible apps | HTTP (`llama_port`, default 11434) | Ollama NDJSON |
+| Slack | Socket Mode WebSocket (inbound) + Web API (outbound) | Slack Events API / `chat.postMessage` |
+
+The llama proxy auto-detects client format from User-Agent and path prefix, then routes all formats to the same `process_request()` pipeline.
+
+### Human Approval Gate System
+
+Every tool call passes through `check_human_gate()` before execution. Gates are registered per tool type by plugins at startup — no hardcoded tool names in gate logic.
+
+| Gate type | Command | Granularity |
+|---|---|---|
+| `search` / `extract` | `!autogate search true/false` | Per tool or all at once |
+| `drive` | `!autogate drive read/write true/false` | Separate read and write |
+| `db` | `!autoAIdb <table> read/write true/false` | Per-table, per-operation |
+| `system` | `!autoAISysPrompt write true/false` | System prompt writes |
+
+Non-interactive clients (llama proxy, Slack) auto-reject gated calls immediately with an instructive message to the LLM.
+
+### LLM Delegation
+
+The session LLM can delegate sub-tasks to other registered models:
+
+| Tool | What is sent | Use case |
+|---|---|---|
+| `llm_clean_text(model, prompt)` | Prompt only — no context, no tools | Summarisation, analysis |
+| `llm_clean_tool(model, tool, args)` | Tool definition only | Isolated tool call via a second model |
+
+Enable delegation per model with `!llm_call <model> true`. Rate-limited by default (3 calls / 20 s, auto-disables on breach).
+
+### Modular System Prompt
+
+The system prompt is a recursive tree of `.system_prompt_<section>` files, assembled at runtime. Sections are editable by the LLM via the `update_system_prompt` tool or directly by the operator. All sections are addressable by name or index from the client (`!read_system_prompt behavior`).
+
+---
+
+## Quick Start
+
+### 1. Clone and set up
+
+```bash
+git clone https://github.com/derezed88/agent-mcp.git
+cd agent-mcp
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+# Edit .env and add at least one LLM API key (e.g. GEMINI_API_KEY)
+```
+
+Edit `llm-models.json` to match your models and endpoints. At minimum, make sure one model is `"enabled": true` with a valid `env_key` pointing to your `.env` variable.
+
+### 3. Start the server
+
+```bash
+source venv/bin/activate
+python agent-mcp.py
+```
+
+### 4. Connect with shell.py (in a second terminal)
+
+```bash
+source venv/bin/activate
+python shell.py
+```
+
+Type `!help` to see all commands. Some useful ones to start:
+
+```
+!model                   list available LLMs (* = current)
+!model <name>            switch active model
+!autogate search true    auto-allow web searches (no gate pop-ups)
+!reset                   clear conversation history
+```
+
+---
+
+## Architecture
+
+```
+Clients                 Server                          Backends
+───────                 ──────                          ────────
+shell.py    ──SSE──►   agent-mcp.py                    OpenAI API
+open-webui  ─HTTP──►   ┌──────────────────────────┐    Gemini API
+LM Studio   ─HTTP──►   │ routes.py                │    xAI API
+Slack ─Socket Mode──►  │ agents.py (agentic_lc)   │    llama.cpp / Ollama
+                       │   LangChain bind_tools()  │
+                       │   ChatOpenAI              │──► MySQL
+                       │   ChatGoogleGenerativeAI  │──► Google Drive
+                       │ plugin_*.py               │──► Web search APIs
+                       └──────────────────────────┘
+```
+
+- **`agent-mcp.py`** — entry point; loads plugins, builds Starlette app, starts uvicorn servers
+- **`agents.py`** — LangChain dispatch loop, tool execution, rate limiting, LLM delegation
+- **`tools.py`** — StructuredTool registry; single source of truth for all tool schemas
+- **`shell.py`** — interactive terminal client with gate approval UI
+- **`plugin_*.py`** — pluggable data tools and client interfaces
+- **`plugin-manager.py`** — CLI tool for managing plugins and models
+
+---
+
+## Plugins
+
+| Plugin | Type | What it adds |
+|---|---|---|
+| `plugin_client_shellpy` | client_interface | shell.py terminal client (SSE, port 8765) |
+| `plugin_proxy_llama` | client_interface | OpenAI/Ollama API (configurable port, default 11434) |
+| `plugin_client_slack` | client_interface | Slack bidirectional interface |
+| `plugin_database_mysql` | data_tool | `db_query` — SQL against MySQL |
+| `plugin_storage_googledrive` | data_tool | `google_drive` — CRUD within authorised folder |
+| `plugin_search_ddgs` | data_tool | `ddgs_search` — DuckDuckGo (no API key) |
+| `plugin_search_tavily` | data_tool | `tavily_search` — AI-curated results |
+| `plugin_search_xai` | data_tool | `xai_search` — Grok x_search (web + X/Twitter) |
+| `plugin_search_google` | data_tool | `google_search` — Gemini grounding |
+| `plugin_urlextract_tavily` | data_tool | `url_extract` — web page content extraction |
+
+Manage plugins:
+
+```bash
+python plugin-manager.py list
+python plugin-manager.py enable <plugin_name>
+python plugin-manager.py disable <plugin_name>
+```
+
+---
+
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [docs/QUICK_START.md](docs/QUICK_START.md) | Essential commands and first steps |
+| [docs/ADMINISTRATION.md](docs/ADMINISTRATION.md) | Full plugin/model/gate/session management reference |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System internals, LangChain integration, request flow |
+| [docs/PLUGIN_DEVELOPMENT.md](docs/PLUGIN_DEVELOPMENT.md) | How to write new plugins and add new models |
+| [docs/setup_services.md](docs/setup_services.md) | systemd, tmux, screen, and tunnel deployment |
+| [docs/plugin-*.md](docs/) | Per-plugin setup and configuration |
+
+---
+
+## Configuration Files
+
+| File | Purpose |
+|---|---|
+| `.env` | API keys and credentials (never commit) |
+| `llm-models.json` | Model registry — `type`, `host`, `env_key`, `enabled`, `tool_call_available` |
+| `plugins-enabled.json` | Active plugins, rate limits, per-plugin config |
+| `.system_prompt*` | Modular system prompt sections (recursive tree) |

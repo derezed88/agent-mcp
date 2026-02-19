@@ -1,0 +1,39 @@
+# Secrets and credentials - NEVER commit these
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+gen-lang-client*.json
+*service-account*.json
+*-key.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Logs
+*.log
+server.log
+/tmp/
+
+# Runtime state
+.aiops_session_id
+sprompt_backup/
+
+# IDE / tool settings
+.claude/
+.aider*
+*.aider*
+
+# OS
+.DS_Store
+Thumbs.db

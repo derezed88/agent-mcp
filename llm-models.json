@@ -1,0 +1,64 @@
+{
+  "version": "1.0.0",
+  "models": {
+    "nuc11": {
+      "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "type": "OPENAI",
+      "host": "https://YOUR_TUNNEL_HOST.a.pinggy.link/v1",
+      "env_key": "LLAMA_API_KEY",
+      "max_context": 50,
+      "enabled": true,
+      "description": "Remote llama.cpp server via SSH tunnel (e.g. Pinggy)",
+      "tool_call_available": false,
+      "llm_call_timeout": 60
+    },
+    "nuc11Local": {
+      "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "type": "OPENAI",
+      "host": "http://YOUR_LOCAL_HOST:8000/v1",
+      "env_key": null,
+      "max_context": 50,
+      "enabled": true,
+      "description": "Local llama.cpp server on LAN",
+      "tool_call_available": true,
+      "llm_call_timeout": 120
+    },
+    "gpt52": {
+      "model_id": "gpt-5.2",
+      "type": "OPENAI",
+      "host": "https://api.openai.com/v1",
+      "env_key": "OPENAI_API_KEY",
+      "max_context": 2000,
+      "enabled": true,
+      "description": "OpenAI GPT-5.2",
+      "tool_call_available": false,
+      "llm_call_timeout": 60
+    },
+    "grok4": {
+      "model_id": "grok-4-1-fast-reasoning",
+      "type": "OPENAI",
+      "host": "https://api.x.ai/v1",
+      "env_key": "XAI_API_KEY",
+      "max_context": 5000,
+      "enabled": true,
+      "description": "xAI Grok-4 with fast reasoning",
+      "tool_call_available": false,
+      "llm_call_timeout": 60
+    },
+    "gemini25": {
+      "model_id": "gemini-2.5-flash",
+      "type": "GEMINI",
+      "host": null,
+      "env_key": "GEMINI_API_KEY",
+      "max_context": 10000,
+      "enabled": true,
+      "description": "Google Gemini 2.5 Flash",
+      "tool_call_available": false,
+      "llm_call_timeout": 60
+    }
+  },
+  "metadata": {
+    "last_modified": "2026-02-18",
+    "notes": "LLM model registry. Modified by plugin-manager.py model commands."
+  }
+}
