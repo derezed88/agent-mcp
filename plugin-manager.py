@@ -428,6 +428,80 @@ class PluginManager:
             return True
         return False
 
+    # ------------------------------------------------------------------
+    # Port management
+    # ------------------------------------------------------------------
+
+    def _get_client_plugins(self) -> List[str]:
+        """Return all client_interface plugin names from the manifest."""
+        return [
+            name for name, meta in self.manifest.get('plugins', {}).items()
+            if meta.get('type') == 'client_interface'
+        ]
+
+    def port_list(self):
+        """List configured ports for all client interface plugins."""
+        print(f"\n{Colors.BOLD}Client Interface Port Configuration{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*60}{Colors.RESET}")
+        print(f"  {'Plugin':<30} {'Port':>6}  {'Config key'}")
+        print(f"  {'-'*30} {'-'*6}  {'-'*20}")
+
+        for plugin_name in self._get_client_plugins():
+            meta = self.manifest['plugins'][plugin_name]
+            port_key = meta.get('port_config_key', '')
+            default_port = meta.get('default_port', '?')
+            plugin_cfg = self.config.get('plugin_config', {}).get(plugin_name, {})
+            current_port = plugin_cfg.get(port_key, default_port) if port_key else default_port
+
+            enabled = plugin_name in self.config.get('enabled_plugins', [])
+            color = Colors.GREEN if enabled else Colors.GRAY
+            marker = " (enabled)" if enabled else ""
+            print(f"  {color}{plugin_name:<30}{Colors.RESET} {current_port:>6}  {port_key}{marker}")
+
+        print()
+        print(f"  Change port: {Colors.BOLD}python plugin-manager.py port-set <plugin> <port>{Colors.RESET}")
+        print()
+
+    def port_set(self, plugin_name: str, port: int) -> bool:
+        """Set the listening port for a client interface plugin."""
+        meta = self.manifest.get('plugins', {}).get(plugin_name)
+        if not meta:
+            print(f"{Colors.RED}✗ Plugin '{plugin_name}' not found in manifest{Colors.RESET}")
+            return False
+        if meta.get('type') != 'client_interface':
+            print(f"{Colors.RED}✗ '{plugin_name}' is not a client interface plugin — only those have ports{Colors.RESET}")
+            return False
+
+        port_key = meta.get('port_config_key')
+        if not port_key:
+            print(f"{Colors.RED}✗ Manifest entry for '{plugin_name}' has no port_config_key{Colors.RESET}")
+            return False
+
+        if not (1 <= port <= 65535):
+            print(f"{Colors.RED}✗ Port must be between 1 and 65535{Colors.RESET}")
+            return False
+
+        # Warn about conflicts with other configured ports
+        for other_name in self._get_client_plugins():
+            if other_name == plugin_name:
+                continue
+            other_meta = self.manifest['plugins'][other_name]
+            other_key = other_meta.get('port_config_key', '')
+            other_default = other_meta.get('default_port')
+            other_cfg = self.config.get('plugin_config', {}).get(other_name, {})
+            other_port = other_cfg.get(other_key, other_default) if other_key else other_default
+            if other_port == port:
+                print(f"{Colors.YELLOW}Warning: port {port} is also used by '{other_name}'{Colors.RESET}")
+
+        plugin_config = self.config.setdefault('plugin_config', {})
+        plugin_config.setdefault(plugin_name, {})[port_key] = port
+
+        if self.save_config():
+            print(f"{Colors.GREEN}✓ Set {plugin_name} port to {port} ({port_key}={port}){Colors.RESET}")
+            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            return True
+        return False
+
     def save_models(self) -> bool:
         """Save models configuration to file."""
         try:
@@ -966,6 +1040,9 @@ class PluginManager:
             print("  model-llmcall <name> <true|false> - Set tool_call_available for model")
             print("  model-llmcall-all <true|false>  - Set tool_call_available for all enabled models")
             print("  model-timeout <name> <secs>     - Set llm_call_timeout for model")
+            print(f"\n{Colors.BOLD}Port Configuration:{Colors.RESET}")
+            print("  port-list                       - Show listening ports for all client plugins")
+            print("  port-set <plugin> <port>        - Set listening port for a plugin")
             print(f"\n{Colors.BOLD}Rate Limit Commands:{Colors.RESET}")
             print("  ratelimit-list                        - Show all rate limit settings")
             print("  ratelimit-set <type> <calls> <window> - Set rate limit (calls=0 = unlimited)")
@@ -1120,6 +1197,17 @@ class PluginManager:
                     print(f"{Colors.RED}Usage: ratelimit-autodisable <type> <true|false>{Colors.RESET}")
                 else:
                     self.ratelimit_auto_disable(args[0], args[1].lower() in ("true", "1", "yes"))
+            elif action == "port-list":
+                self.port_list()
+            elif action == "port-set":
+                args = arg.split()
+                if len(args) != 2:
+                    print(f"{Colors.RED}Usage: port-set <plugin_name> <port>{Colors.RESET}")
+                else:
+                    try:
+                        self.port_set(args[0], int(args[1]))
+                    except ValueError:
+                        print(f"{Colors.RED}Port must be an integer{Colors.RESET}")
             else:
                 print(f"{Colors.RED}Unknown command: {action}{Colors.RESET}")
 
@@ -1238,6 +1326,15 @@ def main():
             except ValueError:
                 print(f"{Colors.RED}✗ Timeout must be a number (seconds){Colors.RESET}")
                 return 1
+        elif cmd == "port-list":
+            manager.port_list()
+        elif cmd == "port-set" and len(sys.argv) > 3:
+            try:
+                manager.port_set(sys.argv[2], int(sys.argv[3]))
+            except ValueError:
+                print(f"{Colors.RED}✗ Port must be an integer{Colors.RESET}")
+                return 1
+
         elif cmd == "ratelimit-list":
             manager.ratelimit_list()
         elif cmd == "ratelimit-set" and len(sys.argv) > 4:
@@ -1260,6 +1357,9 @@ def main():
             print(f"  {sys.argv[0]} info <plugin>                - Show plugin details")
             print(f"  {sys.argv[0]} enable <plugin>              - Enable a plugin")
             print(f"  {sys.argv[0]} disable <plugin>             - Disable a plugin")
+            print(f"\n{Colors.BOLD}Port Configuration:{Colors.RESET}")
+            print(f"  {sys.argv[0]} port-list                    - Show listening ports for all client plugins")
+            print(f"  {sys.argv[0]} port-set <plugin> <port>     - Set listening port for a plugin")
             print(f"\n{Colors.BOLD}Model Management:{Colors.RESET}")
             print(f"  {sys.argv[0]} models                       - List all models")
             print(f"  {sys.argv[0]} model-info <name>            - Show model details")

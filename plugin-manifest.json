@@ -11,7 +11,9 @@
       "env_vars": [],
       "config_files": [],
       "default_enabled": true,
-      "priority": 10
+      "priority": 10,
+      "port_config_key": "mcp_port",
+      "default_port": 8765
     },
     "plugin_proxy_llama": {
       "type": "client_interface",
@@ -21,7 +23,9 @@
       "env_vars": [],
       "config_files": [],
       "default_enabled": false,
-      "priority": 20
+      "priority": 20,
+      "port_config_key": "llama_port",
+      "default_port": 11434
     },
     "plugin_client_api": {
       "type": "client_interface",
@@ -33,7 +37,9 @@
       "env_vars": [],
       "config_files": [],
       "default_enabled": true,
-      "priority": 15
+      "priority": 15,
+      "port_config_key": "api_port",
+      "default_port": 8767
     },
     "plugin_client_slack": {
       "type": "client_interface",
@@ -49,7 +55,9 @@
       ],
       "config_files": [],
       "default_enabled": false,
-      "priority": 30
+      "priority": 30,
+      "port_config_key": "slack_port",
+      "default_port": 8766
     },
     "plugin_database_mysql": {
       "type": "data_tool",

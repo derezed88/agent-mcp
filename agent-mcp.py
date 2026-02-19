@@ -27,6 +27,8 @@ Configuration:
 import uvicorn
 import argparse
 import asyncio
+import socket
+import sys
 from starlette.applications import Starlette
 from starlette.routing import Route
 
@@ -36,6 +38,18 @@ from tools import get_core_tools
 import tools as tools_module
 import agents as agents_module
 from tools import register_gate_tools
+
+
+def _check_port_available(host: str, port: int) -> bool:
+    """Return True if the port is free to bind, False if already in use."""
+    bind_host = "127.0.0.1" if host == "0.0.0.0" else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((bind_host, port))
+            return True
+        except OSError:
+            return False
 
 
 async def run_agent(host: str = "0.0.0.0"):
@@ -86,6 +100,41 @@ async def run_agent(host: str = "0.0.0.0"):
 
     # Determine which servers to run
     servers_to_run = []
+
+    # Check all ports before starting any server — fail fast with a clear message
+    port_conflicts = []
+    seen_ports: dict = {}
+    for plugin in client_plugins:
+        plugin_config = plugin.get_config()
+        port = plugin_config.get('port')
+        host = plugin_config.get('host', '0.0.0.0')
+        name = plugin_config.get('name', 'unknown')
+
+        if port in seen_ports:
+            port_conflicts.append(
+                f"  Port {port}: claimed by both '{seen_ports[port]}' and '{name}'"
+            )
+        else:
+            seen_ports[port] = name
+
+        if not _check_port_available(host, port):
+            port_conflicts.append(
+                f"  Port {port} ({name}): already in use — "
+                f"another process is listening on {host}:{port}"
+            )
+
+    if port_conflicts:
+        log.error("=" * 70)
+        log.error("STARTUP ABORTED — port conflict(s) detected:")
+        for msg in port_conflicts:
+            log.error(msg)
+        log.error("")
+        log.error("Fix options:")
+        log.error("  1. Stop the process already using the port")
+        log.error("  2. Change the port:  python plugin-manager.py port-set <plugin> <new_port>")
+        log.error("  3. List configured ports:  python plugin-manager.py port-list")
+        log.error("=" * 70)
+        sys.exit(1)
 
     for plugin in client_plugins:
         plugin_config = plugin.get_config()

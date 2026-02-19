@@ -645,8 +645,10 @@ async def agent_call(agent_url: str, message: str, target_client_id: str = None)
     Depth guard: calls originating from an api-swarm- prefixed client_id are
     rejected immediately to prevent unbounded recursion (max 1 hop).
 
-    client_id is read from the current_client_id ContextVar (set by execute_tool).
-    target_client_id: optional session name on the remote agent (auto-generated if omitted).
+    Session persistence: the remote session_id is derived deterministically from the
+    calling session + agent URL, so repeated calls from the same human session to
+    the same remote agent reuse the same remote session (history is preserved).
+    Pass target_client_id to override and use a specific named session.
     """
     from api_client import AgentClient
 
@@ -656,7 +658,16 @@ async def agent_call(agent_url: str, message: str, target_client_id: str = None)
     if calling_client.startswith("api-swarm-"):
         return "[agent_call] Max swarm depth reached (1 hop). Call rejected to prevent recursion."
 
-    swarm_client_id = target_client_id or f"api-swarm-{uuid.uuid4().hex[:6]}"
+    # Derive a stable swarm client_id from calling session + agent URL so the
+    # remote session persists across multiple agent_call invocations (same human
+    # session talking to same remote agent = same remote session).
+    # The LLM can still override with an explicit target_client_id.
+    if target_client_id:
+        swarm_client_id = target_client_id
+    else:
+        import hashlib
+        key = f"{calling_client}:{agent_url}"
+        swarm_client_id = f"api-swarm-{hashlib.md5(key.encode()).hexdigest()[:8]}"
     api_key = os.getenv("API_KEY", "") or None
     timeout = 120
 
