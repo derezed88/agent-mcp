@@ -10,7 +10,6 @@
       ],
       "env_vars": [],
       "config_files": [],
-      "default_enabled": true,
       "priority": 10,
       "port_config_key": "mcp_port",
       "default_port": 8765
@@ -22,7 +21,6 @@
       "dependencies": [],
       "env_vars": [],
       "config_files": [],
-      "default_enabled": false,
       "priority": 20,
       "port_config_key": "llama_port",
       "default_port": 11434
@@ -36,7 +34,6 @@
       ],
       "env_vars": [],
       "config_files": [],
-      "default_enabled": true,
       "priority": 15,
       "port_config_key": "api_port",
       "default_port": 8767
@@ -54,7 +51,6 @@
         "SLACK_APP_TOKEN"
       ],
       "config_files": [],
-      "default_enabled": false,
       "priority": 30,
       "port_config_key": "slack_port",
       "default_port": 8766
@@ -71,7 +67,6 @@
         "MYSQL_PASS"
       ],
       "config_files": [],
-      "default_enabled": true,
       "priority": 100,
       "tools": [
         "db_query"
@@ -93,7 +88,6 @@
         "credentials.json",
         "token.json"
       ],
-      "default_enabled": true,
       "priority": 200,
       "tools": [
         "google_drive"
@@ -110,7 +104,6 @@
         "GEMINI_API_KEY"
       ],
       "config_files": [],
-      "default_enabled": true,
       "priority": 300,
       "tools": [
         "google_search"
@@ -125,7 +118,6 @@
       ],
       "env_vars": [],
       "config_files": [],
-      "default_enabled": true,
       "priority": 310,
       "tools": [
         "ddgs_search"
@@ -142,7 +134,6 @@
         "TAVILY_API_KEY"
       ],
       "config_files": [],
-      "default_enabled": true,
       "priority": 320,
       "tools": [
         "tavily_search"
@@ -159,7 +150,6 @@
         "XAI_API_KEY"
       ],
       "config_files": [],
-      "default_enabled": false,
       "priority": 330,
       "tools": [
         "xai_search"
@@ -176,7 +166,6 @@
         "TAVILY_API_KEY"
       ],
       "config_files": [],
-      "default_enabled": false,
       "priority": 400,
       "tools": [
         "url_extract"

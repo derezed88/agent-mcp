@@ -69,10 +69,11 @@ python plugin-manager.py disable <plugin_name>   # disable a plugin
 ```
 
 **Plugin status indicators:**
-- `✓` Ready — enabled, dependencies met, credentials present
-- `○` Available — disabled, or enabled but unconfigured
-- `✗` Has Issues — enabled but missing dependencies or credentials
-- `⊗` Unavailable — plugin file not found
+- `✓` Enabled — active, all dependencies met, all credentials present
+- `–` Disabled — in `enabled_plugins` but turned off via `enabled: false` in `plugin_config`
+- `○` Configured — available (file + deps present) but not in `enabled_plugins`
+- `✗` Has Issues — enabled but missing dependencies, env vars, or config files
+- `⊗` Unavailable — not enabled and has unresolved issues
 
 **Plugin names** (use with enable/disable):
 
@@ -81,7 +82,6 @@ python plugin-manager.py disable <plugin_name>   # disable a plugin
 | `plugin_client_shellpy` | client_interface | shell.py terminal client (always keep enabled) |
 | `plugin_proxy_llama` | client_interface | OpenAI/Ollama API (port set via `llama_port` in `plugins-enabled.json`) |
 | `plugin_client_slack` | client_interface | Slack bidirectional client |
-| `plugin_client_api` | client_interface | JSON/SSE API for programmatic access and swarm (port 8767) |
 | `plugin_database_mysql` | data_tool | `db_query` tool |
 | `plugin_storage_googledrive` | data_tool | `google_drive` tool |
 | `plugin_search_ddgs` | data_tool | `ddgs_search` tool (no key required) |
@@ -331,102 +331,51 @@ to `llm-models.json` for any models served via that tunnel.
 | File | Purpose | Edited by |
 |---|---|---|
 | `.env` | API keys and credentials | Admin manually |
-| `plugins-enabled.json` | Which plugins are active + rate limits | `plugin-manager.py` |
-| `plugin-manifest.json` | Plugin registry (metadata, deps) | Read-only, maintained by developers |
+| `plugins-enabled.json` | Which plugins are active + per-plugin config + rate limits | `plugin-manager.py` or direct edit |
+| `plugin-manifest.json` | Plugin registry — metadata, deps, env vars (read-only) | Plugin authors only |
 | `llm-models.json` | Model registry (enabled, model_id, type, etc.) | `plugin-manager.py` |
 | `.system_prompt` | Root system prompt file | Admin manually or LLM via tool |
 | `.system_prompt_*` | Individual section files | Admin manually or LLM via tool |
 | `.aiops_session_id` | shell.py session persistence | shell.py automatically |
 
----
+### `plugin-manifest.json` vs `plugins-enabled.json`
 
-## Swarm / Multi-Agent Setup
+These two files have distinct, non-overlapping roles:
 
-The `plugin_client_api` plugin must be enabled on any instance that will **receive** swarm calls. The `agent_call` tool is always available for any LLM to **initiate** calls.
+**`plugin-manifest.json` — the plugin catalog (read-only)**
 
-### Port configuration
+Declares that a plugin *exists* and what it needs to run: its Python file, type,
+pip dependencies, required `.env` variables, and load priority.  This file is
+maintained by plugin authors and committed to the repo.  The agent and
+`plugin-manager.py` read it purely for validation — to check whether a plugin's
+dependencies and credentials are present before attempting to load it.  You never
+edit this file to enable or disable plugins.
 
-```bash
-python plugin-manager.py port-list                         # show all configured ports
-python plugin-manager.py port-set plugin_client_api 8777   # change API port if needed
-```
+**`plugins-enabled.json` — the operator control panel (read/write)**
 
-When running multiple instances on the same machine, each must have a unique port for each client interface plugin.
+Determines what actually runs.  It has three jobs:
 
-### Enabling the API plugin
+1. **`enabled_plugins` list** — the ordered list of plugin names the agent will
+   attempt to load at startup.  Add a plugin here to activate it; remove it to
+   deactivate it entirely.  Managed by `plugin-manager.py enable/disable` or by
+   direct edit.
 
-```bash
-python plugin-manager.py enable plugin_client_api
-python agent-mcp.py                                        # restart to apply
-```
+2. **`plugin_config` blocks** — per-plugin runtime settings such as port, host,
+   and the `enabled` flag.  The `enabled: false` pattern lets you keep a plugin
+   in `enabled_plugins` (preserving its config) without starting it.  This is how
+   `plugin_proxy_llama` and `plugin_client_slack` ship: configured but off until
+   you flip `"enabled": true` or run `plugin-manager.py enable <plugin>`.
 
-Verify: `curl http://localhost:8767/api/v1/health`
+3. **`rate_limits`** and **`default_model`** — server-wide settings also stored here.
 
-### Optional: API key authentication
+**Practical rule:** to enable or disable a plugin, always use `plugin-manager.py`
+or edit `plugins-enabled.json`.  Never add enable/disable logic to `plugin-manifest.json`.
 
-Set `API_KEY` in `.env` to require Bearer token auth on all `/api/v1/*` endpoints:
-
-```
-API_KEY=your-secret-key
-```
-
-Clients must then pass `Authorization: Bearer your-secret-key`. `agent_call` picks this up automatically from the calling instance's environment.
-
-### Using the `agent_call` tool
-
-The LLM calls other agents by URL. No special configuration is required on the calling side.
-
-Example (from shell.py on Agent A):
-```
-Use agent_call to ask the agent at http://192.168.10.102:8767 to run !model
-```
-
-The remote session is preserved across calls — the same human session talking to the same remote URL always reuses the same remote session.
-
-### Using `api_client.py` programmatically
-
-```python
-import asyncio
-from api_client import AgentClient
-
-async def main():
-    client = AgentClient("http://localhost:8767", api_key="your-key")
-
-    # One-shot — blocks until done
-    result = await client.send("!model")
-    print(result)
-
-    # Streaming
-    async for token in client.stream("What tables are in the database?"):
-        print(token, end="", flush=True)
-
-asyncio.run(main())
-```
-
-Gate policy (for automated clients that need to approve tool calls):
-```python
-# Approve all db reads, reject everything else
-client = AgentClient(
-    "http://localhost:8767",
-    auto_approve_gates={"db_query": True}
-)
-```
-
-### Multi-instance setup
-
-```bash
-# First instance (default ports)
-cd /path/to/agent-mcp-1
-python agent-mcp.py
-
-# Second instance (custom ports, same machine)
-cd /path/to/agent-mcp-2
-python plugin-manager.py port-set plugin_client_shellpy 8770
-python plugin-manager.py port-set plugin_client_api 8777
-python agent-mcp.py
-```
-
-See `setup-agent-mcp.sh` for a complete fresh-checkout setup script that handles port configuration automatically.
+**Fresh installs:** `setup-agent-mcp.sh` clones the repo and copies credentials
+(`.env`, `credentials.json`, `llm-models.json`) from a reference installation.
+It intentionally does *not* copy `plugins-enabled.json` — the repo's version is
+the authoritative default for new installs, and port assignments are adjusted
+per-instance afterward with `plugin-manager.py port-set`.
 
 ---
 

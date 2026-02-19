@@ -37,6 +37,24 @@ finds it automatically by scanning for any `BasePlugin` subclass in the module.
 
 ---
 
+## The Two Config Files
+
+Before adding a plugin, understand the roles of the two JSON files that govern
+the plugin system:
+
+| File | Role | Who edits it |
+|------|------|--------------|
+| `plugin-manifest.json` | **Static registry** — declares that a plugin *exists*: its file, type, dependencies, required env vars, and load priority. Never read at agent startup for enable/disable decisions — only for validation metadata. | Plugin author (once, when adding the plugin) |
+| `plugins-enabled.json` | **Runtime config** — which plugins to actually load, per-plugin config overrides (port, host, `enabled` flag), default model, and rate limits. This is the operator control panel. | `plugin-manager.py` or direct edit |
+
+**When you add a new plugin you touch both files:**
+1. Add an entry to `plugin-manifest.json` so the system knows the plugin exists and can validate its dependencies.
+2. Add the plugin name to the `enabled_plugins` list in `plugins-enabled.json` so the loader picks it up.  Add a `plugin_config` block only if you need non-default settings (port, host, or to start it disabled with `"enabled": false`).
+
+**The `enabled: false` pattern** lets you keep a plugin in `enabled_plugins` (so its config is preserved) without actually starting it.  This is how `plugin_proxy_llama` and `plugin_client_slack` ship — configured but off until the operator flips the flag.  Use `python plugin-manager.py enable <plugin>` or set it directly in `plugins-enabled.json`.
+
+---
+
 ## Manifest Entry (`plugin-manifest.json`)
 
 Every plugin must have an entry in `plugin-manifest.json`:
@@ -49,7 +67,6 @@ Every plugin must have an entry in `plugin-manifest.json`:
   "dependencies": ["package-name>=1.0"],
   "env_vars": ["EXAMPLE_API_KEY"],
   "config_files": [],
-  "default_enabled": false,
   "priority": 340,
   "tools": ["example_search"]
 }
@@ -62,7 +79,6 @@ Every plugin must have an entry in `plugin-manifest.json`:
 - `dependencies` — pip package names (validated at startup; use `>=` for minimum version)
 - `env_vars` — environment variable names required from `.env`; validated at startup
 - `config_files` — additional files that must exist (e.g., `credentials.json`)
-- `default_enabled` — whether the plugin is on by default in a fresh install
 - `priority` — load order (lower = loaded first); use these ranges:
   - 10–99: client interfaces
   - 100–199: database plugins
@@ -350,12 +366,15 @@ and `llm_clean_tool`.
 
 1. **Create** `plugin_<type>_<name>.py` — subclass `BasePlugin`, implement all
    required methods (see template below).
-2. **Add entry** to `plugin-manifest.json`.
-3. **Enable** via `python plugin-manager.py enable plugin_<type>_<name>` or by
-   adding to `plugins-enabled.json` directly.
+2. **Add entry** to `plugin-manifest.json` — file, type, description, dependencies,
+   env_vars, config_files, priority, tools.
+3. **Add to `plugins-enabled.json`** — append the plugin name to the `enabled_plugins`
+   list.  Optionally add a `plugin_config` block for non-default port/host settings,
+   or to ship it disabled (`"enabled": false`) until credentials are ready.
 4. **Add env vars** to `.env` if required.
 5. **Restart** `python agent-mcp.py`.
-6. **Verify** with `python plugin-manager.py list` — plugin should show `✓`.
+6. **Verify** with `python plugin-manager.py list` — plugin should show `✓` (green,
+   all deps and env vars present) or `–` (yellow, if you shipped it with `enabled: false`).
 7. **Test** with `!help` in the client — new tool should appear automatically
    in the AI tools section if `get_gate_tools()` is implemented.
 

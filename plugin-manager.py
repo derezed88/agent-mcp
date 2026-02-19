@@ -108,6 +108,11 @@ class PluginManager:
 
         # Check if enabled
         if plugin_name in enabled_plugins:
+            # Check for explicit runtime kill switch (enabled: false in plugin_config)
+            plugin_cfg = self.config.get('plugin_config', {}).get(plugin_name, {})
+            if plugin_cfg.get('enabled') is False:
+                return ("disabled", Colors.YELLOW, "–")
+
             # Verify all requirements
             issues = self.validate_plugin(plugin_name)[1]
             if not issues:
@@ -195,6 +200,9 @@ class PluginManager:
 
         for plugin_name in enabled_plugins:
             if plugin_name in self.manifest.get('plugins', {}):
+                plugin_cfg = self.config.get('plugin_config', {}).get(plugin_name, {})
+                if plugin_cfg.get('enabled') is False:
+                    continue  # disabled plugins don't count toward ready or issues
                 is_valid, issues = self.validate_plugin(plugin_name)
                 if is_valid:
                     ready_count += 1
@@ -219,6 +227,7 @@ class PluginManager:
 
         print(f"\n{Colors.BOLD}Legend:{Colors.RESET}")
         print(f"  {Colors.GREEN}✓{Colors.RESET} Enabled     - Plugin active and ready")
+        print(f"  {Colors.YELLOW}–{Colors.RESET} Disabled    - In enabled_plugins but turned off (enabled: false in plugin_config)")
         print(f"  {Colors.YELLOW}○{Colors.RESET} Configured  - Plugin available but not enabled")
         print(f"  {Colors.RED}✗{Colors.RESET} Has Issues  - Missing dependencies, env vars, or config files")
         print(f"  {Colors.GRAY}⊗{Colors.RESET} Unavailable - Not enabled and has unresolved issues")
@@ -399,13 +408,18 @@ class PluginManager:
             return False
 
         enabled_plugins = self.config.get('enabled_plugins', [])
-        if plugin_name in enabled_plugins:
+        plugin_cfg = self.config.get('plugin_config', {}).get(plugin_name, {})
+
+        if plugin_name in enabled_plugins and plugin_cfg.get('enabled') is not False:
             print(f"{Colors.YELLOW}Plugin '{plugin_name}' is already enabled{Colors.RESET}")
             return True
 
-        enabled_plugins.append(plugin_name)
-        self.config['enabled_plugins'] = enabled_plugins
-        # Set explicit enabled: true in plugin_config so plugin_loader skips the flag check
+        # Add to enabled_plugins list if not already present
+        if plugin_name not in enabled_plugins:
+            enabled_plugins.append(plugin_name)
+            self.config['enabled_plugins'] = enabled_plugins
+
+        # Flip the runtime flag to true
         self.config.setdefault('plugin_config', {}).setdefault(plugin_name, {})['enabled'] = True
 
         if self.save_config():
@@ -417,14 +431,14 @@ class PluginManager:
     def disable_plugin(self, plugin_name: str) -> bool:
         """Disable a plugin."""
         enabled_plugins = self.config.get('enabled_plugins', [])
-        if plugin_name not in enabled_plugins:
+        plugin_cfg = self.config.get('plugin_config', {}).get(plugin_name, {})
+
+        if plugin_name not in enabled_plugins or plugin_cfg.get('enabled') is False:
             print(f"{Colors.YELLOW}Plugin '{plugin_name}' is not enabled{Colors.RESET}")
             return True
 
-        enabled_plugins.remove(plugin_name)
-        self.config['enabled_plugins'] = enabled_plugins
-        # Set explicit enabled: false so plugin_loader won't load it even if it
-        # lingers in enabled_plugins (e.g. if config was hand-edited)
+        # Keep in enabled_plugins to preserve config (port, host, etc.)
+        # Only flip the runtime flag — loader checks this before starting the plugin
         self.config.setdefault('plugin_config', {}).setdefault(plugin_name, {})['enabled'] = False
 
         if self.save_config():
@@ -1022,40 +1036,45 @@ class PluginManager:
             return True
         return False
 
+    def show_help(self):
+        """Print all available commands."""
+        print(f"\n{Colors.BOLD}Plugin Commands:{Colors.RESET}")
+        print("  list                              - List all plugins")
+        print("  info <plugin>                     - Show plugin details")
+        print("  enable <plugin>                   - Enable a plugin")
+        print("  disable <plugin>                  - Disable a plugin")
+        print(f"\n{Colors.BOLD}Model Commands:{Colors.RESET}")
+        print("  models                            - List all models")
+        print("  model-info <name>                 - Show model details")
+        print("  model-add                         - Add a new model (interactive)")
+        print("  model-remove <name>               - Remove a model")
+        print("  model-enable <name>               - Enable a model")
+        print("  model-disable <name>              - Disable a model")
+        print("  model-context <name> <n>          - Set max history size (messages)")
+        print("  model-rename <old> <new>          - Rename a model")
+        print("  model-desc <name> <desc>          - Set model description")
+        print("  model-host <name> <url>           - Set model host URL")
+        print("  model <name>                      - Set default model")
+        print("  model-llmcall <name> <true|false> - Set tool_call_available for model")
+        print("  model-llmcall-all <true|false>    - Set tool_call_available for all enabled models")
+        print("  model-timeout <name> <secs>       - Set llm_call_timeout for model")
+        print(f"\n{Colors.BOLD}Port Configuration:{Colors.RESET}")
+        print("  port-list                         - Show listening ports for all client plugins")
+        print("  port-set <plugin> <port>          - Set listening port for a plugin")
+        print(f"\n{Colors.BOLD}Rate Limit Commands:{Colors.RESET}")
+        print("  ratelimit-list                            - Show all rate limit settings")
+        print("  ratelimit-set <type> <calls> <window>     - Set rate limit (calls=0 = unlimited)")
+        print("  ratelimit-autodisable <type> <true|false> - Set auto_disable flag")
+        print(f"  Valid types: llm_call, search, extract, drive, db, system")
+        print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
+        print("  help                              - Show this command list")
+        print("  quit                              - Exit plugin manager")
+
     def interactive_menu(self):
         """Run interactive menu."""
-        while True:
-            print(f"\n{Colors.BOLD}Plugin Commands:{Colors.RESET}")
-            print("  list                - List all plugins")
-            print("  info <plugin>       - Show plugin details")
-            print("  enable <plugin>     - Enable a plugin")
-            print("  disable <plugin>    - Disable a plugin")
-            print(f"\n{Colors.BOLD}Model Commands:{Colors.RESET}")
-            print("  models                    - List all models")
-            print("  model-info <name>         - Show model details")
-            print("  model-add                 - Add a new model (interactive)")
-            print("  model-remove <name>       - Remove a model")
-            print("  model-enable <name>       - Enable a model")
-            print("  model-disable <name>      - Disable a model")
-            print("  model-context <name> <n>  - Set max history size (messages)")
-            print("  model-rename <old> <new>  - Rename a model")
-            print("  model-desc <name> <desc>  - Set model description")
-            print("  model-host <name> <url>         - Set model host URL")
-            print("  model <name>                    - Set default model")
-            print("  model-llmcall <name> <true|false> - Set tool_call_available for model")
-            print("  model-llmcall-all <true|false>  - Set tool_call_available for all enabled models")
-            print("  model-timeout <name> <secs>     - Set llm_call_timeout for model")
-            print(f"\n{Colors.BOLD}Port Configuration:{Colors.RESET}")
-            print("  port-list                       - Show listening ports for all client plugins")
-            print("  port-set <plugin> <port>        - Set listening port for a plugin")
-            print(f"\n{Colors.BOLD}Rate Limit Commands:{Colors.RESET}")
-            print("  ratelimit-list                        - Show all rate limit settings")
-            print("  ratelimit-set <type> <calls> <window> - Set rate limit (calls=0 = unlimited)")
-            print("  ratelimit-autodisable <type> <true|false> - Set auto_disable flag")
-            print(f"  Valid types: llm_call, search, extract, drive, db, system")
-            print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
-            print("  quit                - Exit plugin manager")
+        self.show_help()
 
+        while True:
             try:
                 cmd = input(f"\n{Colors.CYAN}plugin-manager>{Colors.RESET} ").strip()
             except (KeyboardInterrupt, EOFError):
@@ -1071,6 +1090,8 @@ class PluginManager:
 
             if action == "quit" or action == "exit":
                 break
+            elif action == "help":
+                self.show_help()
             elif action == "list":
                 self.list_plugins()
             elif action == "info":
@@ -1273,8 +1294,12 @@ def main():
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
 
+        # Help
+        if cmd == "help":
+            manager.show_help()
+
         # Plugin commands
-        if cmd == "list":
+        elif cmd == "list":
             manager.list_plugins()
         elif cmd == "info" and len(sys.argv) > 2:
             manager.show_plugin_info(sys.argv[2])
@@ -1356,37 +1381,8 @@ def main():
             manager.ratelimit_auto_disable(sys.argv[2], val in ("true", "1", "yes"))
 
         else:
-            print(f"{Colors.BOLD}Usage:{Colors.RESET}")
-            print(f"\n{Colors.BOLD}Plugin Management:{Colors.RESET}")
-            print(f"  {sys.argv[0]} list                         - List all plugins")
-            print(f"  {sys.argv[0]} info <plugin>                - Show plugin details")
-            print(f"  {sys.argv[0]} enable <plugin>              - Enable a plugin")
-            print(f"  {sys.argv[0]} disable <plugin>             - Disable a plugin")
-            print(f"\n{Colors.BOLD}Port Configuration:{Colors.RESET}")
-            print(f"  {sys.argv[0]} port-list                    - Show listening ports for all client plugins")
-            print(f"  {sys.argv[0]} port-set <plugin> <port>     - Set listening port for a plugin")
-            print(f"\n{Colors.BOLD}Model Management:{Colors.RESET}")
-            print(f"  {sys.argv[0]} models                       - List all models")
-            print(f"  {sys.argv[0]} model-info <name>            - Show model details")
-            print(f"  {sys.argv[0]} model-add                    - Add a new model (interactive)")
-            print(f"  {sys.argv[0]} model-remove <name>          - Remove a model")
-            print(f"  {sys.argv[0]} model-enable <name>          - Enable a model")
-            print(f"  {sys.argv[0]} model-disable <name>         - Disable a model")
-            print(f"  {sys.argv[0]} model-context <name> <n>     - Set max history size (messages)")
-            print(f"  {sys.argv[0]} model-rename <old> <new>     - Rename a model")
-            print(f"  {sys.argv[0]} model-desc <name> <desc>     - Set model description")
-            print(f"  {sys.argv[0]} model-host <name> <url>      - Set model host URL")
-            print(f"  {sys.argv[0]} model <name>                 - Set default model")
-            print(f"  {sys.argv[0]} model-llmcall <name> <t|f>   - Set tool_call_available for model")
-            print(f"  {sys.argv[0]} model-llmcall-all <t|f>      - Set tool_call_available for all enabled models")
-            print(f"  {sys.argv[0]} model-timeout <name> <secs>  - Set llm_call_timeout for model")
-            print(f"\n{Colors.BOLD}Rate Limit Management:{Colors.RESET}")
-            print(f"  {sys.argv[0]} ratelimit-list                        - Show all rate limits")
-            print(f"  {sys.argv[0]} ratelimit-set <type> <calls> <window> - Set rate limit")
-            print(f"  {sys.argv[0]} ratelimit-autodisable <type> <t|f>    - Set auto_disable flag")
-            print(f"  Valid types: llm_call, search, extract, drive, db, system")
-            print(f"\n{Colors.BOLD}Interactive Mode:{Colors.RESET}")
-            print(f"  {sys.argv[0]}                               - Start interactive shell")
+            print(f"{Colors.RED}Unknown command: {cmd}{Colors.RESET}")
+            manager.show_help()
             return 1
     else:
         # Interactive mode
