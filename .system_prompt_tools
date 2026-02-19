@@ -14,3 +14,4 @@ tool-url-extract: url_extract tool definition
 tool-llm-list: llm_list tool definition
 tool-llm-call-clean: llm_clean_text tool definition (llm_call_clean alias)
 tool-llm-clean-tool: llm_clean_tool tool definition
+tool-agent-call: agent_call tool definition

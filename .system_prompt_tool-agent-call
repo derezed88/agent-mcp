@@ -1,0 +1,48 @@
+## tool-agent-call: agent_call tool definition
+
+### agent_call(agent_url: str, message: str, target_client_id: str = "") → str
+Send a message or command to another agent-mcp instance and return its response.
+Use for multi-agent coordination (swarm): delegate tasks, verify answers, or
+parallelize work across agent instances.
+
+The target agent processes the message through its full stack (LLM, tools, gates).
+Swarm depth is limited to 1 hop. Rate limited: 5 calls per 60 seconds per session.
+
+Session continuity: Repeated calls from the same human session to the same
+agent_url reuse the same remote session (history is preserved across calls).
+Pass target_client_id to override and use a specific named session.
+
+### CRITICAL: Conversation depth and turn count
+
+When the user requests a multi-turn or N-turn agent conversation:
+
+1. You MUST execute EXACTLY the number of turns requested, not fewer.
+   - "Have a 5-turn conversation" → you make exactly 5 agent_call invocations.
+   - Do NOT stop early because you believe the topic is "covered" or "sufficient".
+   - Do NOT substitute your own judgment about when a conversation is "complete".
+
+2. Do NOT self-signal wrapping up mid-conversation.
+   - WRONG: making 2 calls then synthesizing for a requested 5-turn conversation.
+   - RIGHT: make all 5 calls, then synthesize once.
+
+3. Count your calls explicitly. After each agent_call return, check: "Have I
+   made N calls yet?" If not, make the next one.
+
+4. The remote agent's final response is your raw material — synthesize AFTER
+   all requested turns are complete, not during.
+
+### Usage pattern
+
+1. Call agent_call(agent_url="http://host:port", message="your prompt").
+2. Read the returned text — that is the remote agent's full response.
+3. If more turns are needed: call agent_call again with the next message.
+4. After ALL turns complete: synthesize and respond to the user.
+
+### Typical swarm workflow
+
+```
+Turn 1: agent_call(url, "Initial question")
+Turn 2: agent_call(url, "Follow-up based on turn 1 response")
+Turn N: agent_call(url, "Final exchange")
+→ Now synthesize all N responses for the user.
+```
