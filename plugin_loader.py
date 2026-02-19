@@ -289,6 +289,13 @@ class PluginLoader:
         enabled_plugins = self.config.get('enabled_plugins', [])
 
         for plugin_name in enabled_plugins:
+            # Respect explicit enabled: false in plugin_config (allows disabling
+            # without removing from enabled_plugins list, e.g. llama proxy)
+            plugin_cfg = self.config.get('plugin_config', {}).get(plugin_name, {})
+            if plugin_cfg.get('enabled') is False:
+                log.info(f"  Skipping '{plugin_name}' (enabled: false in plugin_config)")
+                continue
+
             plugin = self.load_plugin(plugin_name)
             if plugin:
                 self.loaded_plugins[plugin_name] = plugin
