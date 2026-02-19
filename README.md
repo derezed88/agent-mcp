@@ -234,6 +234,7 @@ python plugin-manager.py disable <plugin_name>
 | [docs/PLUGIN_DEVELOPMENT.md](docs/PLUGIN_DEVELOPMENT.md) | How to write new plugins and add new models |
 | [docs/setup_services.md](docs/setup_services.md) | systemd, tmux, screen, and tunnel deployment |
 | [docs/plugin-client-api.md](docs/plugin-client-api.md) | API plugin — programmatic access and swarm setup |
+| [docs/SWARMDESIGN.md](docs/SWARMDESIGN.md) | Swarm foundation and discovery design options |
 | [docs/plugin-*.md](docs/) | Per-plugin setup and configuration |
 
 ---
