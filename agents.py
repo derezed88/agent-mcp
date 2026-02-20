@@ -72,21 +72,45 @@ def _load_outbound_agent_filters() -> None:
 _load_outbound_agent_filters()
 
 
+def _match_outbound_pattern(msg_lower: str, pattern: str) -> bool:
+    """
+    Match a lowercased, stripped message against a filter pattern.
+
+    Special commands have multiple forms:
+      !reset                       (no args)
+      !model / !model gemini25     (optional args after space)
+      !tmux new foo / !tmux ls     (subcommand + optional args)
+
+    Rules:
+    - If pattern ends with a space: raw prefix match (caller controls boundary).
+    - Otherwise: match if msg == pattern OR msg starts with pattern + " ".
+      This prevents "!mod" from matching "!model" while still matching
+      "!model", "!model gemini25", and "!model list".
+    - Non-! patterns (plain text prefixes) use the same boundary logic.
+    """
+    if pattern.endswith(" "):
+        return msg_lower.startswith(pattern)
+    return msg_lower == pattern or msg_lower.startswith(pattern + " ")
+
+
 def _check_outbound_agent_message(message: str) -> str | None:
     """
     Apply outbound agent message filters.
     Returns None if permitted, or an error string if blocked.
-    Matching is against the lowercased message prefix.
+
+    Patterns are lowercased at load time. Matching is word-boundary aware:
+    pattern '!model' matches '!model' and '!model gemini25' but NOT '!modelx'.
+    To match any prefix including mid-word, end the pattern with a space.
     """
     msg_lower = message.strip().lower()
     if _outbound_agent_allowed:
-        if not any(msg_lower.startswith(p) for p in _outbound_agent_allowed):
+        if not any(_match_outbound_pattern(msg_lower, p) for p in _outbound_agent_allowed):
             return (
                 f"BLOCKED by OUTBOUND_AGENT_ALLOWED_COMMANDS: message does not match "
                 f"any allowed prefix. Allowed: {', '.join(_outbound_agent_allowed)}"
             )
     for pattern in _outbound_agent_blocked:
-        if msg_lower.startswith(pattern):
+        if _match_outbound_pattern(msg_lower, pattern):
             return (
                 f"BLOCKED by OUTBOUND_AGENT_BLOCKED_COMMANDS: message matches "
                 f"blocked pattern '{pattern}'."
