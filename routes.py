@@ -72,6 +72,7 @@ async def cmd_help(client_id: str):
         "\n"
         "Shell Sessions (tmux):\n"
         "  !tmux new <name>                          - create a new PTY shell session\n"
+        "  !tmux exec <session> <command>            - run a command in a session\n"
         "  !tmux ls                                  - list active sessions\n"
         "  !tmux kill-session <name>                 - terminate a session\n"
         "  !tmux kill-server                         - terminate all sessions\n"
@@ -480,6 +481,7 @@ async def cmd_tmux(client_id: str, args: str):
     Dispatch !tmux subcommands to the tmux plugin.
     Usage:
       !tmux new <name>              - create a new shell session
+      !tmux exec <session> <cmd>    - run a command in a session
       !tmux ls                      - list active sessions
       !tmux kill-session <name>     - terminate a session
       !tmux kill-server             - terminate all sessions
@@ -497,6 +499,7 @@ async def cmd_tmux(client_id: str, args: str):
         await push_tok(client_id,
             "Usage: !tmux <subcommand> [args]\n"
             "  !tmux new <name>              - create a new shell session\n"
+            "  !tmux exec <session> <cmd>    - run a command in a session\n"
             "  !tmux ls                      - list active sessions\n"
             "  !tmux kill-session <name>     - terminate a session\n"
             "  !tmux kill-server             - terminate all sessions\n"

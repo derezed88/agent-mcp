@@ -656,6 +656,14 @@ async def tmux_command(subcommand: str, args: str) -> str:
             )
         return await _do_create(name)
 
+    elif sub == "exec":
+        # !tmux exec <session> <command>
+        parts = args.split(None, 1)
+        if len(parts) < 2:
+            return "Usage: !tmux exec <session> <command>"
+        session_name, command = parts[0], parts[1]
+        return await tmux_exec_executor(session_name, command)
+
     elif sub == "ls":
         return _do_ls()
 
@@ -692,7 +700,7 @@ async def tmux_command(subcommand: str, args: str) -> str:
     else:
         return (
             f"Unknown tmux subcommand: '{sub}'\n"
-            "Available: new, ls, kill-session, kill-server, a, history-limit, filters"
+            "Available: new, exec, ls, kill-session, kill-server, a, history-limit, filters"
         )
 
 
