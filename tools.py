@@ -246,8 +246,9 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "stream":                "system",
     "tool_preview_length":   "system",
     "gate_list":             "system",
-    "limit_list":            "system",
-    "limit_set":             "system",
+    "limit_list":               "system",
+    "limit_set":                "system",
+    "outbound_agent_filters":   "system",
 }
 
 
@@ -889,6 +890,43 @@ async def _limit_set_exec(key: str, value: int) -> str:
     return f"ERROR: Failed to persist {key}={value} to llm-models.json."
 
 
+async def _outbound_agent_filters_exec() -> str:
+    """Return the current OUTBOUND_AGENT_ALLOWED/BLOCKED_COMMANDS configuration."""
+    import json as _json, os as _os
+    try:
+        path = _os.path.join(_os.path.dirname(__file__), "plugins-enabled.json")
+        with open(path, "r") as f:
+            cfg = _json.load(f)
+        api_cfg = cfg.get("plugin_config", {}).get("plugin_client_api", {})
+        allowed = api_cfg.get("OUTBOUND_AGENT_ALLOWED_COMMANDS", [])
+        blocked = api_cfg.get("OUTBOUND_AGENT_BLOCKED_COMMANDS", [])
+    except Exception as e:
+        return f"ERROR: Could not read outbound agent filters: {e}"
+
+    lines = ["Outbound agent message filters (applied to agent_call messages):"]
+    if allowed:
+        lines.append(f"  OUTBOUND_AGENT_ALLOWED_COMMANDS ({len(allowed)} entries):")
+        for p in allowed:
+            lines.append(f"    - {p}")
+        lines.append("  → Messages must start with one of the above prefixes.")
+    else:
+        lines.append("  OUTBOUND_AGENT_ALLOWED_COMMANDS: [] (empty — all messages permitted)")
+
+    if blocked:
+        lines.append(f"  OUTBOUND_AGENT_BLOCKED_COMMANDS ({len(blocked)} entries):")
+        for p in blocked:
+            lines.append(f"    - {p}")
+        lines.append("  → Messages must NOT start with any of the above prefixes.")
+    else:
+        lines.append("  OUTBOUND_AGENT_BLOCKED_COMMANDS: [] (empty — nothing blocked)")
+
+    return "\n".join(lines)
+
+
+class _OutboundAgentFiltersArgs(BaseModel):
+    pass
+
+
 def _make_core_lc_tools() -> list:
     """Build CORE_LC_TOOLS after agents module is available (avoids circular import)."""
     import agents as _agents
@@ -1145,6 +1183,18 @@ def _make_core_lc_tools() -> list:
                 "Requires write gate approval (controlled by !limit_set_gate_write, default: gated)."
             ),
             args_schema=_LimitSetArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_outbound_agent_filters_exec,
+            name="outbound_agent_filters",
+            description=(
+                "Show the current outbound agent message filter configuration. "
+                "Returns OUTBOUND_AGENT_ALLOWED_COMMANDS and OUTBOUND_AGENT_BLOCKED_COMMANDS lists "
+                "that are applied to messages sent via agent_call to remote agents. "
+                "Call this before using agent_call if you want to ensure your message will pass the filters. "
+                "Always allowed — no gate required."
+            ),
+            args_schema=_OutboundAgentFiltersArgs,
         ),
     ]
 
