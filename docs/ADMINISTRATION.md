@@ -89,6 +89,7 @@ python plugin-manager.py disable <plugin_name>   # disable a plugin
 | `plugin_search_xai` | data_tool | `xai_search` tool |
 | `plugin_search_google` | data_tool | `google_search` tool |
 | `plugin_urlextract_tavily` | data_tool | `url_extract` tool |
+| `plugin_tmux` | data_tool | PTY shell sessions (`tmux_new`, `tmux_exec`, etc.) |
 
 ### Slack Plugin Tuning
 
@@ -149,7 +150,45 @@ python plugin-manager.py ratelimit-set <type> <n> <secs>   # set limit
 python plugin-manager.py ratelimit-autodisable <type> <t|f> # set auto-disable
 ```
 
-Tool types: `llm_call`, `search`, `extract`, `drive`, `db`, `system`
+Tool types: `llm_call`, `search`, `extract`, `drive`, `db`, `system`, `tmux`
+
+---
+
+## API Client Trust Model
+
+**All clients connecting to the API port (`plugin_client_api`, default 8767) are treated as trusted administrators.**
+
+There is no inbound command ACL — any client that can reach the port can send any message, including `!commands`. The gate system is the enforcement layer: LLMs must pass gate checks for sensitive tool calls, but the human-facing command interface has no restrictions for API clients.
+
+This is intentional. The API port is for trusted orchestrators: other agent-mcp instances, automation scripts, and inter-agent swarms. Inbound restriction is out of scope; network-level controls (firewall, SSH tunnel, VPN) are expected to restrict who can reach the port at all.
+
+### Outbound Agent Message Filters (`OUTBOUND_AGENT_*`)
+
+When an LLM makes an `agent_call` to a remote agent, the outbound message text can be filtered
+before it is sent. This is a secondary safeguard for operators who want to restrict what
+instructions their agent forwards to other agents.
+
+Configure in `plugins-enabled.json` under `plugin_config.plugin_client_api`:
+
+```json
+"plugin_client_api": {
+  "OUTBOUND_AGENT_ALLOWED_COMMANDS": [],
+  "OUTBOUND_AGENT_BLOCKED_COMMANDS": [
+    "rm -rf",
+    "shutdown",
+    "reboot"
+  ]
+}
+```
+
+**Semantics:**
+- `OUTBOUND_AGENT_ALLOWED_COMMANDS`: empty `[]` = all outbound messages permitted (no check).
+  Non-empty = message must start with one of the listed prefixes, otherwise blocked.
+- `OUTBOUND_AGENT_BLOCKED_COMMANDS`: always checked when non-empty; empty `[]` = nothing blocked.
+  Message must not start with any listed prefix.
+
+**Default:** both lists are empty — all agent-to-agent messages are permitted. These filters exist
+for operators who want an extra layer of control over what one agent forwards to another.
 
 ---
 
@@ -254,6 +293,105 @@ Gate pop-up preview length (shell.py only):
 When enabled (default), remote agent tokens are relayed via push_tok in real-time —
 Slack sees each remote turn as it completes rather than as a batch at the end.
 Set to `false` to suppress streaming and return only the final result.
+
+---
+
+### PTY Shell Sessions (`plugin_tmux`)
+
+The tmux plugin provides persistent PTY (pseudo-terminal) shell sessions. LLMs interact via
+tool calls; humans manage sessions via `!tmux` commands.
+
+> **Advanced users only.** PTY sessions give an LLM direct shell access. Output is captured
+> after a silence timeout — long-running commands should be backgrounded with `&` and polled.
+> See the "Advanced: PTY Session Semantics" section below.
+
+#### Gate Control
+
+All tmux tool calls are **write-gated by default** — the human must approve each call. No
+read gate exists: `tmux_ls` and `tmux_history` are also write-gated because they expose
+session topology (PIDs, names) and command history including credentials.
+
+```
+!tmux_gate_write <true|false>              — group gate covering all tmux tools
+!tmux_new_gate_write <true|false>          — per-tool override
+!tmux_exec_gate_write <true|false>         — per-tool override
+!tmux_ls_gate_write <true|false>           — per-tool override
+!tmux_history_gate_write <true|false>      — per-tool override
+!tmux_kill_session_gate_write <true|false> — per-tool override
+!tmux_kill_server_gate_write <true|false>  — per-tool override
+!tmux_history_limit_gate_write <true|false>— per-tool override
+!tmux_call_limit_gate_read <true|false>    — rate limit read gate
+!tmux_call_limit_gate_write <true|false>   — rate limit write gate
+```
+
+`true` = gate OFF (auto-allow). `false` = gate ON (requires human approval).
+
+#### Session Commands
+
+```
+!tmux new <name>              — create a new PTY session
+!tmux ls                      — list active sessions
+!tmux kill-session <name>     — terminate one session
+!tmux kill-server             — terminate all sessions
+!tmux a <name>                — show session history (attach view)
+!tmux history-limit [n]       — show or set rolling history line limit
+!tmux filters                 — show current command filter configuration
+```
+
+#### Rate Limiting
+
+```
+!tmux_call_limit                        — show current rate limit
+!tmux_call_limit <calls> <window_secs>  — set rate limit
+```
+
+Default: 30 calls per 60 seconds. `auto_disable=true` — on breach, all tmux tools are
+disabled until agent restart. Configure base values in `plugins-enabled.json`:
+
+```json
+"rate_limits": {
+  "tmux": { "calls": 30, "window_seconds": 60, "auto_disable": true }
+}
+```
+
+#### Command Filtering
+
+Two filter lists in `plugin_config.plugin_tmux` control which commands can be sent to PTY sessions:
+
+```json
+"plugin_tmux": {
+  "TMUX_ALLOWED_COMMANDS": [],
+  "TMUX_BLOCKED_COMMANDS": ["rm -rf", "dd if=", "mkfs", "shutdown", "reboot"]
+}
+```
+
+**Semantics:**
+- `TMUX_ALLOWED_COMMANDS`: empty `[]` = all commands permitted. Non-empty = command must
+  match a listed prefix, otherwise blocked.
+- `TMUX_BLOCKED_COMMANDS`: always checked; empty `[]` = nothing blocked.
+
+Additionally, `OUTBOUND_AGENT_BLOCKED_COMMANDS` (from `plugin_client_api`) is also applied
+inside `tmux_exec` — so the same patterns that block outbound agent messages also block PTY
+commands when configured.
+
+#### Advanced: PTY Session Semantics
+
+PTY sessions are true pseudo-terminals with persistent state (cwd, environment, background
+jobs). Key behaviors to understand:
+
+- **Output capture:** output is drained after a configurable silence timeout (default 10s).
+  If a command produces no output for 10 seconds, the call returns with what was captured so far.
+- **Long-running commands:** background with `&` and tee to a log file. Poll with
+  `tail logfile` + `jobs` in subsequent `tmux_exec` calls.
+- **Credential exposure:** any secrets printed to the terminal (API keys, passwords, tokens)
+  will appear in the captured output and be visible to the LLM. Use `.env` files and avoid
+  echoing secrets.
+- **Prompt injection risk:** malicious content in command output (e.g. from a web response
+  stored in a file and cat'd) could attempt to manipulate the LLM. Review outputs before
+  passing them back to untrusted LLMs.
+- **No interactive prompts:** PTY commands that pause for interactive input (sudo password,
+  confirmation prompts) will hang until the timeout expires. Use `-y` flags, `yes |`, or
+  pre-configure passwordless sudo for commands the LLM needs to run.
 
 ---
 

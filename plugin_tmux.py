@@ -68,6 +68,11 @@ _history_limit: int = 200
 _allowed_commands: List[str] = []   # empty = allow all
 _blocked_commands: List[str] = []   # empty = block none
 
+# Outbound agent blocked commands — loaded from plugin_client_api.OUTBOUND_AGENT_BLOCKED_COMMANDS.
+# Applied in tmux_exec_executor in addition to TMUX_BLOCKED_COMMANDS.
+# Empty [] = nothing extra blocked. Always checked when non-empty.
+_outbound_blocked_commands: List[str] = []
+
 # Rate limit config (mirrors plugins-enabled.json rate_limits.tmux section at runtime)
 # Updated by tmux_call_limit_executor / tmux_command("call-limit", ...).
 _rate_limit_calls: int = 30
@@ -332,10 +337,21 @@ async def tmux_exec_executor(session: str, command: str, timeout: float = 10.0) 
             f"Kill and recreate: tmux_kill_session(name='{session}') then tmux_new(name='{session}')"
         )
 
-    # Command filter check
+    # Command filter check (TMUX_ALLOWED/BLOCKED_COMMANDS)
     block_reason = _check_command(command)
     if block_reason:
         return f"ERROR: {block_reason}\nCommand was NOT sent to the session."
+
+    # Outbound agent blocked command check (OUTBOUND_AGENT_BLOCKED_COMMANDS)
+    if _outbound_blocked_commands:
+        cmd_lower = command.strip().lower()
+        for pattern in _outbound_blocked_commands:
+            if cmd_lower.startswith(pattern):
+                return (
+                    f"ERROR: BLOCKED by OUTBOUND_AGENT_BLOCKED_COMMANDS: "
+                    f"command matches blocked pattern '{pattern}'.\n"
+                    f"Command was NOT sent to the session."
+                )
 
     timeout = max(1.0, min(float(timeout or 10.0), 120.0))
     sess = _sessions[session]
@@ -471,6 +487,7 @@ class TmuxPlugin(BasePlugin):
     def init(self, config: dict) -> bool:
         global _history_limit, _allowed_commands, _blocked_commands
         global _rate_limit_calls, _rate_limit_window
+        global _outbound_blocked_commands
 
         # History limit
         try:
@@ -483,6 +500,21 @@ class TmuxPlugin(BasePlugin):
         raw_blocked = config.get("TMUX_BLOCKED_COMMANDS", [])
         _allowed_commands = [s.strip().lower() for s in raw_allowed if s.strip()]
         _blocked_commands = [s.strip().lower() for s in raw_blocked if s.strip()]
+
+        # Outbound agent blocked commands — from plugin_client_api config
+        try:
+            import json as _json
+            _path = os.path.join(os.path.dirname(__file__), "plugins-enabled.json")
+            with open(_path, "r") as _f:
+                _full = _json.load(_f)
+            raw_outbound_blocked = (
+                _full.get("plugin_config", {})
+                     .get("plugin_client_api", {})
+                     .get("OUTBOUND_AGENT_BLOCKED_COMMANDS", [])
+            )
+            _outbound_blocked_commands = [s.strip().lower() for s in raw_outbound_blocked if s.strip()]
+        except Exception:
+            _outbound_blocked_commands = []
 
         # Rate limit — read from plugins-enabled.json rate_limits.tmux if present
         try:

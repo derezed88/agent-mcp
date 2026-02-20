@@ -35,8 +35,8 @@
       "enabled": true,
       "api_port": 8767,
       "api_host": "0.0.0.0",
-      "INTER_AGENT_ALLOWED_COMMANDS": [],
-      "INTER_AGENT_BLOCKED_COMMANDS": [
+      "OUTBOUND_AGENT_ALLOWED_COMMANDS": [],
+      "OUTBOUND_AGENT_BLOCKED_COMMANDS": [
         "rm -rf",
         "rm -f /",
         "dd if=",
