@@ -7,7 +7,7 @@ from config import log
 from database import execute_sql
 from drive import run_drive_op
 from search import run_google_search
-from prompt import apply_prompt_operation, get_current_prompt, get_section, list_sections
+from prompt import get_section
 
 mcp_server = FastMCP("AIOps-DB-Tools")
 
@@ -16,64 +16,6 @@ mcp_server = FastMCP("AIOps-DB-Tools")
 async def db_query(sql: str) -> str:
     """Execute SQL against mymcp MySQL database."""
     return await execute_sql(sql)
-
-
-@mcp_server.tool()
-async def update_system_prompt(
-    section_name: str,
-    operation: str,
-    content: str = "",
-    target: str = "",
-    confirm_overwrite: bool = False,
-) -> str:
-    """
-    Surgically edit a specific section of the .system_prompt file.
-
-    section_name   : REQUIRED - one of: memory-hierarchy, tool-guardrails, tools,
-                     tool-logging, time-bypass, db-guardrails, behavior
-    operation      : append | prepend | replace | delete | overwrite
-    content        : text to add / replacement text (not needed for delete)
-    target         : exact substring to find (required for replace and delete)
-    confirm_overwrite : must be True to use the overwrite operation
-    """
-    try:
-        _, msg = apply_prompt_operation(
-            section_name=section_name,
-            operation=operation,
-            content=content,
-            target=target,
-            confirm_overwrite=confirm_overwrite,
-        )
-        log.info("System prompt operation '%s' on section '%s': %s", operation, section_name, msg)
-        return msg
-    except ValueError as exc:
-        return f"Prompt update rejected: {exc}"
-    except Exception as exc:
-        return f"Error updating system prompt: {exc}"
-
-
-@mcp_server.tool()
-async def read_system_prompt(section: str = "") -> str:
-    """
-    Return the system prompt or a specific section.
-
-    section : optional - empty for full prompt, or specify:
-              - Integer index (e.g., "0", "1", "2") for section at that position
-              - Section name (e.g., "tools", "behavior") for specific section
-    """
-    if not section:
-        return get_current_prompt()
-
-    section_content = get_section(section)
-    if section_content is None:
-        sections_info = list_sections()
-        section_list = "\n".join(
-            f"  [{s['index']}] {s['short-section-name']}: {s['description']}"
-            for s in sections_info
-        )
-        return f"Section '{section}' not found.\n\nAvailable sections:\n{section_list}"
-
-    return section_content
 
 
 @mcp_server.tool()
@@ -209,8 +151,6 @@ def get_core_tools():
     return {
         'lc': CORE_LC_TOOLS,
         'executors': {
-            'update_system_prompt':  update_system_prompt,
-            'read_system_prompt':    read_system_prompt,
             'get_system_info':       get_system_info,
             'llm_clean_text':        _agents.llm_clean_text,
             'llm_clean_tool':        _agents.llm_clean_tool,
@@ -222,10 +162,14 @@ def get_core_tools():
             'sysprompt_delete':      _sysprompt_delete_exec,
             'sysprompt_copy_dir':    _sysprompt_copy_dir_exec,
             'sysprompt_set_dir':     _sysprompt_set_dir_exec,
-            'session_tool':          _session_tool_exec,
-            'model_tool':            _model_tool_exec,
-            'reset_tool':            _reset_tool_exec,
-            'help_tool':             _help_tool_exec,
+            'session':               _session_exec,
+            'model':                 _model_exec,
+            'reset':                 _reset_exec,
+            'help':                  _help_exec,
+            'llm_call':              _llm_call_exec,
+            'llm_timeout':           _llm_timeout_exec,
+            'stream':                _stream_exec,
+            'tool_preview_length':   _tool_preview_length_exec,
         }
     }
 
@@ -278,8 +222,6 @@ def _lc_tool_to_openai_dict(tool: StructuredTool) -> dict:
 # Plugin tools declare their type via get_gate_tools() metadata.
 # Used by execute_tool() for universal rate limiting.
 _CORE_TOOL_TYPES: dict[str, str] = {
-    "update_system_prompt":  "system",
-    "read_system_prompt":    "system",
     "get_system_info":       "system",
     "llm_clean_text":        "llm_call",
     "llm_clean_tool":        "llm_call",
@@ -291,10 +233,14 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "sysprompt_delete":      "system",
     "sysprompt_copy_dir":    "system",
     "sysprompt_set_dir":     "system",
-    "session_tool":          "system",
-    "model_tool":            "system",
-    "reset_tool":            "system",
-    "help_tool":             "system",
+    "session":               "system",
+    "model":                 "system",
+    "reset":                 "system",
+    "help":                  "system",
+    "llm_call":              "system",
+    "llm_timeout":           "system",
+    "stream":                "system",
+    "tool_preview_length":   "system",
 }
 
 
@@ -317,8 +263,6 @@ def get_tool_executor(tool_name: str):
     import agents as _agents
 
     core_executors = {
-        'update_system_prompt':  update_system_prompt,
-        'read_system_prompt':    read_system_prompt,
         'get_system_info':       get_system_info,
         'llm_clean_text':        _agents.llm_clean_text,
         'llm_clean_tool':        _agents.llm_clean_tool,
@@ -330,10 +274,14 @@ def get_tool_executor(tool_name: str):
         'sysprompt_delete':      _sysprompt_delete_exec,
         'sysprompt_copy_dir':    _sysprompt_copy_dir_exec,
         'sysprompt_set_dir':     _sysprompt_set_dir_exec,
-        'session_tool':          _session_tool_exec,
-        'model_tool':            _model_tool_exec,
-        'reset_tool':            _reset_tool_exec,
-        'help_tool':             _help_tool_exec,
+        'session':               _session_exec,
+        'model':                 _model_exec,
+        'reset':                 _reset_exec,
+        'help':                  _help_exec,
+        'llm_call':              _llm_call_exec,
+        'llm_timeout':           _llm_timeout_exec,
+        'stream':                _stream_exec,
+        'tool_preview_length':   _tool_preview_length_exec,
     }
 
     if tool_name in core_executors:
@@ -354,35 +302,6 @@ def get_tool_executor(tool_name: str):
 
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-
-
-class _UpdateSystemPromptArgs(BaseModel):
-    section_name: Literal[
-        "memory-hierarchy", "tool-guardrails", "tools",
-        "tool-logging", "time-bypass", "db-guardrails", "behavior"
-    ] = Field(description="REQUIRED: The section to edit.")
-    operation: Literal["append", "prepend", "replace", "delete", "overwrite"] = Field(
-        description="The edit operation to perform."
-    )
-    content: str = Field(
-        default="",
-        description="The text to add or the replacement text. Pass ONLY the user-specified text — do not invent additional content.",
-    )
-    target: str = Field(
-        default="",
-        description="Exact substring to find (required for replace and delete operations).",
-    )
-    confirm_overwrite: bool = Field(
-        default=False,
-        description="Must be true to use the overwrite operation. Do not set true unless the user explicitly asked to replace the entire section.",
-    )
-
-
-class _ReadSystemPromptArgs(BaseModel):
-    section: str = Field(
-        default="",
-        description="Optional: Integer index or section name. Omit for full prompt.",
-    )
 
 
 class _GetSystemInfoArgs(BaseModel):
@@ -467,7 +386,7 @@ class _SyspromptSetDirArgs(BaseModel):
 # Session / model / reset / help tool arg schemas
 # ---------------------------------------------------------------------------
 
-class _SessionToolArgs(BaseModel):
+class _SessionArgs(BaseModel):
     action: Literal["list", "delete"] = Field(
         description="'list' to show all sessions, 'delete' to remove a session."
     )
@@ -477,7 +396,7 @@ class _SessionToolArgs(BaseModel):
     )
 
 
-class _ModelToolArgs(BaseModel):
+class _ModelArgs(BaseModel):
     action: Literal["list", "set"] = Field(
         description="'list' to show available models, 'set' to switch the active model."
     )
@@ -487,12 +406,64 @@ class _ModelToolArgs(BaseModel):
     )
 
 
-class _ResetToolArgs(BaseModel):
+class _ResetArgs(BaseModel):
     pass  # No arguments
 
 
-class _HelpToolArgs(BaseModel):
+class _HelpArgs(BaseModel):
     pass  # No arguments
+
+
+# ---------------------------------------------------------------------------
+# Meta-command tool arg schemas (llm_call, llm_timeout, stream, tool_preview_length)
+# ---------------------------------------------------------------------------
+
+class _LlmCallArgs(BaseModel):
+    action: Literal["list", "set"] = Field(
+        description="'list' to show tool_call_available status for all models, 'set' to change it."
+    )
+    model_key: str = Field(
+        default="",
+        description="Model key to change. Omit (or use '*') to apply to ALL models. Required when action='set'.",
+    )
+    enabled: Optional[bool] = Field(
+        default=None,
+        description="True to enable tool_call_available, False to disable. Required when action='set'.",
+    )
+
+
+class _LlmTimeoutArgs(BaseModel):
+    action: Literal["list", "set"] = Field(
+        description="'list' to show current timeouts, 'set' to change."
+    )
+    model_key: str = Field(
+        default="",
+        description="Model key to set timeout for. Omit (or use '*') to apply to ALL models.",
+    )
+    seconds: Optional[int] = Field(
+        default=None,
+        description="Timeout in seconds. Required when action='set'.",
+    )
+
+
+class _StreamArgs(BaseModel):
+    action: Literal["get", "set"] = Field(
+        description="'get' to show current streaming setting, 'set' to change it."
+    )
+    enabled: Optional[bool] = Field(
+        default=None,
+        description="True to enable streaming, False to disable. Required when action='set'.",
+    )
+
+
+class _ToolPreviewLengthArgs(BaseModel):
+    action: Literal["get", "set"] = Field(
+        description="'get' to show current preview length, 'set' to change it."
+    )
+    length: Optional[int] = Field(
+        default=None,
+        description="Number of characters to show (0 = unlimited). Required when action='set'.",
+    )
 
 
 class _AgentCallArgs(BaseModel):
@@ -598,7 +569,7 @@ async def _sysprompt_set_dir_exec(model: str, dir: str) -> str:
 # Session / model / reset / help tool executors
 # ---------------------------------------------------------------------------
 
-async def _session_tool_exec(action: str, session_id: str = "") -> str:
+async def _session_exec(action: str, session_id: str = "") -> str:
     from state import sessions, get_or_create_shorthand_id, get_session_by_shorthand, remove_shorthand_mapping, current_client_id
     cid = current_client_id.get("")
 
@@ -638,7 +609,7 @@ async def _session_tool_exec(action: str, session_id: str = "") -> str:
     return f"Unknown action '{action}'. Valid: list, delete"
 
 
-async def _model_tool_exec(action: str, model_key: str = "") -> str:
+async def _model_exec(action: str, model_key: str = "") -> str:
     from config import LLM_REGISTRY
     from state import current_client_id, sessions, cancel_active_task
 
@@ -668,7 +639,7 @@ async def _model_tool_exec(action: str, model_key: str = "") -> str:
     return f"Unknown action '{action}'. Valid: list, set"
 
 
-async def _reset_tool_exec() -> str:
+async def _reset_exec() -> str:
     from state import current_client_id, sessions
     cid = current_client_id.get("")
     if not cid or cid not in sessions:
@@ -678,8 +649,8 @@ async def _reset_tool_exec() -> str:
     return f"Conversation history cleared ({history_len} messages removed)."
 
 
-async def _help_tool_exec() -> str:
-    from tools import get_all_gate_tools, get_gate_tools_by_type
+async def _help_exec() -> str:
+    from tools import get_all_gate_tools
     gate_tools = get_all_gate_tools()
     tool_lines = []
     for tool_name, meta in sorted(gate_tools.items(), key=lambda x: (x[1].get("type",""), x[0])):
@@ -694,9 +665,9 @@ async def _help_tool_exec() -> str:
         "  sysprompt_delete(model, file) - delete file or entire folder\n"
         "  sysprompt_copy_dir(model, new_dir) - copy prompt folder\n"
         "  sysprompt_set_dir(model, dir) - assign prompt folder to model\n"
-        "  session_tool(action, ...)     - list or delete sessions\n"
-        "  model_tool(action, ...)       - list or switch models\n"
-        "  reset_tool()                  - clear conversation history\n"
+        "  session(action, ...)          - list or delete sessions\n"
+        "  model(action, ...)            - list or switch models\n"
+        "  reset()                       - clear conversation history\n"
         "  db_query(sql)                 - run SQL\n"
         "  search_ddgs/search_tavily/search_xai/search_google(query) - web search\n"
         "  url_extract(method, url)      - extract web page content\n"
@@ -705,51 +676,102 @@ async def _help_tool_exec() -> str:
         "  llm_list()                    - list LLM models\n"
         "  llm_clean_text(model, prompt) - call LLM with no context\n"
         "  llm_clean_tool(model, tool, arguments) - delegate tool call\n"
+        "  llm_call(action, ...)         - manage model delegation\n"
+        "  llm_timeout(action, ...)      - manage delegation timeouts\n"
+        "  stream(action, ...)           - control streaming mode\n"
+        "  tool_preview_length(action, ...) - control tool output display\n"
         "  agent_call(agent_url, message) - call remote agent\n"
         "\nGated tools (listed below require human approval unless gate is off):\n"
         + "\n".join(tool_lines)
     )
 
 
+async def _llm_call_exec(action: str, model_key: str = "", enabled: bool = None) -> str:
+    from config import LLM_REGISTRY, save_llm_model_field
+    if action == "list":
+        lines = ["LLM tool_call_available status:"]
+        for name, cfg in sorted(LLM_REGISTRY.items()):
+            available = "YES" if cfg.get("tool_call_available", False) else "NO"
+            timeout = cfg.get("llm_call_timeout", 60)
+            desc = cfg.get("description", "")
+            lines.append(f"  {name:<14} tool_call={available}  timeout={timeout}s  {desc}")
+        return "\n".join(lines)
+    if action == "set":
+        if enabled is None:
+            return "ERROR: 'enabled' required for action='set'."
+        targets = [model_key] if model_key and model_key != "*" else list(LLM_REGISTRY.keys())
+        changed = []
+        for name in targets:
+            if name not in LLM_REGISTRY:
+                return f"ERROR: Unknown model '{name}'."
+            LLM_REGISTRY[name]["tool_call_available"] = enabled
+            if save_llm_model_field(name, "tool_call_available", enabled):
+                changed.append(name)
+        status = "enabled" if enabled else "disabled"
+        return f"tool_call_available={status} for: {', '.join(changed)}. Persisted to llm-models.json."
+    return f"Unknown action '{action}'. Valid: list, set"
+
+
+async def _llm_timeout_exec(action: str, model_key: str = "", seconds: int = None) -> str:
+    from config import LLM_REGISTRY, save_llm_model_field
+    if action == "list":
+        lines = ["LLM delegation timeouts:"]
+        for name, cfg in sorted(LLM_REGISTRY.items()):
+            t = cfg.get("llm_call_timeout", 60)
+            available = "YES" if cfg.get("tool_call_available", False) else "NO"
+            lines.append(f"  {name:<14} timeout={t}s  tool_call={available}")
+        return "\n".join(lines)
+    if action == "set":
+        if seconds is None or seconds < 1:
+            return "ERROR: 'seconds' must be a positive integer for action='set'."
+        targets = [model_key] if model_key and model_key != "*" else list(LLM_REGISTRY.keys())
+        changed = []
+        for name in targets:
+            if name not in LLM_REGISTRY:
+                return f"ERROR: Unknown model '{name}'."
+            LLM_REGISTRY[name]["llm_call_timeout"] = seconds
+            if save_llm_model_field(name, "llm_call_timeout", seconds):
+                changed.append(name)
+        return f"llm_call_timeout={seconds}s for: {', '.join(changed)}. Persisted to llm-models.json."
+    return f"Unknown action '{action}'. Valid: list, set"
+
+
+async def _stream_exec(action: str, enabled: bool = None) -> str:
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    if not cid or cid not in sessions:
+        return "ERROR: No active session context."
+    if action == "get":
+        current = sessions[cid].get("agent_call_stream", True)
+        return f"agent_call streaming: {'enabled' if current else 'disabled'}"
+    if action == "set":
+        if enabled is None:
+            return "ERROR: 'enabled' required for action='set'."
+        sessions[cid]["agent_call_stream"] = enabled
+        return f"agent_call streaming {'enabled' if enabled else 'disabled'}."
+    return f"Unknown action '{action}'. Valid: get, set"
+
+
+async def _tool_preview_length_exec(action: str, length: int = None) -> str:
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    if not cid or cid not in sessions:
+        return "ERROR: No active session context."
+    if action == "get":
+        current = sessions[cid].get("tool_preview_length", 500)
+        return f"Tool preview length: {'unlimited' if current == 0 else f'{current} chars'}"
+    if action == "set":
+        if length is None or length < 0:
+            return "ERROR: 'length' must be >= 0 (0 = unlimited) for action='set'."
+        sessions[cid]["tool_preview_length"] = length
+        return f"Tool preview length set to {'unlimited' if length == 0 else f'{length} chars'}."
+    return f"Unknown action '{action}'. Valid: get, set"
+
+
 def _make_core_lc_tools() -> list:
     """Build CORE_LC_TOOLS after agents module is available (avoids circular import)."""
     import agents as _agents
     return [
-        StructuredTool.from_function(
-            coroutine=update_system_prompt,
-            name="update_system_prompt",
-            description=(
-                "Surgically edit a specific section of the system prompt file using a named operation. "
-                "NEVER reconstruct the full prompt yourself — only pass the specific "
-                "text the user asked to add, change, or remove.\n\n"
-                "REQUIRED: section_name must be one of: memory-hierarchy, tool-guardrails, tools, "
-                "tool-logging, time-bypass, db-guardrails, behavior. "
-                "You CANNOT create new sections.\n\n"
-                "Operations:\n"
-                "  append    – add `content` to the end of the section.\n"
-                "  prepend   – add `content` to the beginning of the section.\n"
-                "  replace   – swap exact `target` string with `content`.\n"
-                "  delete    – remove all lines containing `target` substring.\n"
-                "  overwrite – replace entire section; ONLY with confirm_overwrite=true "
-                "and only when user explicitly requests a full replacement.\n\n"
-                "For 'add/append/include/insert' requests → use append.\n"
-                "For 'change X to Y' → use replace with target=X, content=Y.\n"
-                "For 'remove/delete a rule' → use delete with target=that rule text.\n"
-                "NEVER use overwrite unless instructed and confirm_overwrite is true."
-            ),
-            args_schema=_UpdateSystemPromptArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=read_system_prompt,
-            name="read_system_prompt",
-            description=(
-                "Return the system prompt or a specific section. "
-                "Call with no parameters for full prompt. "
-                "Or specify section by integer index (0, 1, 2...) or name "
-                "(e.g., 'tools', 'behavior')."
-            ),
-            args_schema=_ReadSystemPromptArgs,
-        ),
         StructuredTool.from_function(
             coroutine=get_system_info,
             name="get_system_info",
@@ -875,39 +897,85 @@ def _make_core_lc_tools() -> list:
         ),
         # --- Session / model / reset / help tools ---
         StructuredTool.from_function(
-            coroutine=_session_tool_exec,
-            name="session_tool",
+            coroutine=_session_exec,
+            name="session",
             description=(
                 "Manage agent sessions. action='list' shows all active sessions. "
                 "action='delete' removes a session (requires session_id, can be shorthand integer or full ID). "
                 "List requires read gate approval; delete requires write gate approval."
             ),
-            args_schema=_SessionToolArgs,
+            args_schema=_SessionArgs,
         ),
         StructuredTool.from_function(
-            coroutine=_model_tool_exec,
-            name="model_tool",
+            coroutine=_model_exec,
+            name="model",
             description=(
                 "Manage the active LLM model. action='list' shows all available models. "
                 "action='set' switches the active model for this session (requires model_key). "
                 "List is always allowed; set requires write gate approval."
             ),
-            args_schema=_ModelToolArgs,
+            args_schema=_ModelArgs,
         ),
         StructuredTool.from_function(
-            coroutine=_reset_tool_exec,
-            name="reset_tool",
+            coroutine=_reset_exec,
+            name="reset",
             description=(
                 "Clear conversation history for the current session. "
                 "Requires write gate approval."
             ),
-            args_schema=_ResetToolArgs,
+            args_schema=_ResetArgs,
         ),
         StructuredTool.from_function(
-            coroutine=_help_tool_exec,
-            name="help_tool",
+            coroutine=_help_exec,
+            name="help",
             description="Return a summary of available commands and tool calls.",
-            args_schema=_HelpToolArgs,
+            args_schema=_HelpArgs,
+        ),
+        # --- Meta-command tools (also accessible via !commands) ---
+        StructuredTool.from_function(
+            coroutine=_llm_call_exec,
+            name="llm_call",
+            description=(
+                "Manage the tool_call_available flag for LLM models. "
+                "action='list' shows all models with their tool_call_available status. "
+                "action='set' enables/disables delegation for a model (or all models if model_key is omitted). "
+                "Always allowed (no gate)."
+            ),
+            args_schema=_LlmCallArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_llm_timeout_exec,
+            name="llm_timeout",
+            description=(
+                "Manage llm_call_timeout for LLM delegation. "
+                "action='list' shows current timeouts. "
+                "action='set' updates the timeout in seconds (omit model_key to set all models). "
+                "Always allowed (no gate)."
+            ),
+            args_schema=_LlmTimeoutArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_stream_exec,
+            name="stream",
+            description=(
+                "Control agent_call streaming for the current session. "
+                "action='get' shows current setting. "
+                "action='set' enables or disables real-time token relay. "
+                "Always allowed (no gate)."
+            ),
+            args_schema=_StreamArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_tool_preview_length_exec,
+            name="tool_preview_length",
+            description=(
+                "Control how many characters of tool output are shown in chat. "
+                "The full result is always sent to the LLM regardless. "
+                "action='get' shows current setting. "
+                "action='set' changes it (0 = unlimited). "
+                "Always allowed (no gate)."
+            ),
+            args_schema=_ToolPreviewLengthArgs,
         ),
     ]
 

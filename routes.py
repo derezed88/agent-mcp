@@ -72,10 +72,10 @@ async def cmd_help(client_id: str):
         "\n"
         "Gate Management (per-tool):\n"
         "  !sysprompt_gate_write <t|f>               - toggle write gate for sysprompt_* write ops\n"
-        "  !session_gate_read <t|f>                  - toggle gate for session_tool list\n"
-        "  !session_gate_write <t|f>                 - toggle gate for session_tool delete\n"
-        "  !model_gate_write <t|f>                   - toggle gate for model_tool set\n"
-        "  !reset_gate_write <t|f>                   - toggle gate for reset_tool\n"
+        "  !session_gate_read <t|f>                  - toggle gate for session list\n"
+        "  !session_gate_write <t|f>                 - toggle gate for session delete\n"
+        "  !model_gate_write <t|f>                   - toggle gate for model set\n"
+        "  !reset_gate_write <t|f>                   - toggle gate for reset\n"
         "\n"
         "Session:\n"
         "  !session                                  - list all active sessions\n"
@@ -104,7 +104,7 @@ async def cmd_help(client_id: str):
         "  llm_list()                                - auto-allowed\n"
         "  sysprompt_list/read                       - auto-allowed\n"
         "  sysprompt_write/delete/copy_dir/set_dir   - write gate\n"
-        "  session_tool/model_tool/reset_tool        - per-action gate\n"
+        "  session/model/reset                       - per-action gate\n"
     )
     await push_tok(client_id, help_text)
     await conditional_push_done(client_id)
