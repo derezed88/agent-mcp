@@ -170,8 +170,7 @@
       "tools": [
         "url_extract"
       ]
-    }
-  },
+    },
     "plugin_tmux": {
       "type": "data_tool",
       "file": "plugin_tmux.py",
