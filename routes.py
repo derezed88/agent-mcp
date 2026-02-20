@@ -6,7 +6,7 @@ from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from config import log, LLM_REGISTRY, DEFAULT_MODEL, save_llm_model_field
-from state import sessions, get_queue, push_tok, push_done, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task
+from state import sessions, get_queue, push_tok, push_done, push_model, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task
 from database import execute_sql
 from prompt import (sp_list_files, sp_read_prompt, sp_read_file, sp_write_file,
                     sp_delete_file, sp_delete_directory, sp_copy_directory, sp_set_directory,
@@ -49,8 +49,8 @@ async def cmd_help(client_id: str):
         "\n"
         "Database:\n"
         "  !db_query <sql>                           - run SQL directly (no LLM)\n"
-        "  !db_query_gate_read [table|*] <t|f>       - toggle read gate for DB table\n"
-        "  !db_query_gate_write [table|*] <t|f>      - toggle write gate for DB table\n"
+        "  !db_query_gate_read [table|*] <t|f>       - gate DB reads: true=gated, false=auto-allow\n"
+        "  !db_query_gate_write [table|*] <t|f>      - gate DB writes: true=gated, false=auto-allow\n"
         "  !db_query_gate_status                     - show DB gate settings\n"
         "\n"
         "Search & Extract:\n"
@@ -59,23 +59,25 @@ async def cmd_help(client_id: str):
         "  !search_tavily <query>                    - search via Tavily AI\n"
         "  !search_xai <query>                       - search via xAI Grok\n"
         "  !url_extract <url> [query]                - extract web page content\n"
-        "  !search_ddgs_gate_read <t|f>              - toggle gate for search_ddgs\n"
-        "  !search_google_gate_read <t|f>            - toggle gate for search_google\n"
-        "  !search_tavily_gate_read <t|f>            - toggle gate for search_tavily\n"
-        "  !search_xai_gate_read <t|f>               - toggle gate for search_xai\n"
-        "  !url_extract_gate_read <t|f>              - toggle gate for url_extract\n"
+        "  !search_ddgs_gate_read <t|f>              - gate search_ddgs: true=gated, false=auto-allow\n"
+        "  !search_google_gate_read <t|f>            - gate search_google: true=gated, false=auto-allow\n"
+        "  !search_tavily_gate_read <t|f>            - gate search_tavily: true=gated, false=auto-allow\n"
+        "  !search_xai_gate_read <t|f>               - gate search_xai: true=gated, false=auto-allow\n"
+        "  !url_extract_gate_read <t|f>              - gate url_extract: true=gated, false=auto-allow\n"
         "\n"
         "Google Drive:\n"
         "  !google_drive <operation> [args...]       - Drive CRUD operation\n"
-        "  !google_drive_gate_read <t|f>             - toggle read gate for google_drive\n"
-        "  !google_drive_gate_write <t|f>            - toggle write gate for google_drive\n"
+        "  !google_drive_gate_read <t|f>             - gate Drive reads: true=gated, false=auto-allow\n"
+        "  !google_drive_gate_write <t|f>            - gate Drive writes: true=gated, false=auto-allow\n"
         "\n"
         "Gate Management (per-tool):\n"
-        "  !sysprompt_gate_write <t|f>               - toggle write gate for sysprompt_* write ops\n"
-        "  !session_gate_read <t|f>                  - toggle gate for session list\n"
-        "  !session_gate_write <t|f>                 - toggle gate for session delete\n"
-        "  !model_gate_write <t|f>                   - toggle gate for model set\n"
-        "  !reset_gate_write <t|f>                   - toggle gate for reset\n"
+        "  !gate_list                                - show live gate status for all tools\n"
+        "  !gate_list_gate_read <t|f>                - gate gate_list: true=gated, false=auto-allow\n"
+        "  !sysprompt_gate_write <t|f>               - gate sysprompt writes: true=gated, false=auto-allow\n"
+        "  !session_gate_read <t|f>                  - gate session list: true=gated, false=auto-allow\n"
+        "  !session_gate_write <t|f>                 - gate session delete: true=gated, false=auto-allow\n"
+        "  !model_gate_write <t|f>                   - gate model set: true=gated, false=auto-allow\n"
+        "  !reset_gate_write <t|f>                   - gate reset: true=gated, false=auto-allow\n"
         "\n"
         "Session:\n"
         "  !session                                  - list all active sessions\n"
@@ -95,12 +97,14 @@ async def cmd_help(client_id: str):
         "  !llm_timeout <model> <seconds>            - set llm_call_timeout for a model\n"
         "  !llm_timeout <seconds>                    - set timeout for ALL models\n"
         "  !stream <true|false>                      - enable/disable agent_call streaming\n"
+        "  !at_llm_gate_write <t|f>                  - gate at_llm: true=gated (default), false=auto-allow\n"
         "\n"
         "AI tools (gated unless noted):\n"
         + "\n".join(tool_lines) + "\n"
         + "  get_system_info()                         - auto-allowed, no gate\n"
         "  llm_clean_text(model, prompt)             - rate limited\n"
         "  llm_clean_tool(model, tool, args)         - rate limited\n"
+        "  at_llm(model, prompt)                     - write-gated; full context call\n"
         "  llm_list()                                - auto-allowed\n"
         "  sysprompt_list/read                       - auto-allowed\n"
         "  sysprompt_write/delete/copy_dir/set_dir   - write gate\n"
@@ -245,7 +249,7 @@ async def cmd_gate(client_id: str, tool_name: str, perm_type: str, flag_arg: str
             await conditional_push_done(client_id)
             return
 
-        is_auto = parse_bool(flag)
+        is_auto = not parse_bool(flag)
         if table not in auto_aidb_state:
             auto_aidb_state[table] = {"read": False, "write": False}
         auto_aidb_state[table][perm_type] = is_auto
@@ -294,12 +298,20 @@ async def cmd_gate(client_id: str, tool_name: str, perm_type: str, flag_arg: str
         await conditional_push_done(client_id)
         return
 
-    is_auto = parse_bool(flag)
+    is_auto = not parse_bool(flag)
     if tool_name not in tool_gate_state:
         tool_gate_state[tool_name] = {"read": False, "write": False}
     tool_gate_state[tool_name][perm_type] = is_auto
     status = "auto-allow (gate OFF)" if is_auto else "gated (gate ON)"
     await push_tok(client_id, f"{tool_name}_gate_{perm_type}: {status}")
+    await conditional_push_done(client_id)
+
+
+async def cmd_gate_list(client_id: str):
+    """Show live gate status for all tools and DB tables."""
+    from tools import _gate_list_exec
+    result = await _gate_list_exec()
+    await push_tok(client_id, result)
     await conditional_push_done(client_id)
 
 
@@ -490,6 +502,7 @@ async def cmd_set_model(client_id: str, key: str, session: dict):
     if key in LLM_REGISTRY:
         await cancel_active_task(client_id)
         session["model"] = key
+        await push_model(client_id, key)
         await push_tok(client_id, f"Model set to '{key}'.")
     else:
         available = ", ".join(LLM_REGISTRY.keys())
@@ -851,6 +864,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_reset(client_id, session)
                 elif cmd == "db_query":
                     await cmd_db_query(client_id, arg)
+                elif cmd == "gate_list":
+                    await cmd_gate_list(client_id)
                 elif cmd == "db_query_gate_status":
                     await cmd_db_query_gate_status(client_id)
                 elif cmd in ("db_query_gate_read", "db_query_gate_write"):
@@ -940,6 +955,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "db_query":
             await cmd_db_query(client_id, arg)
+            return
+        if cmd == "gate_list":
+            await cmd_gate_list(client_id)
             return
         if cmd == "db_query_gate_status":
             await cmd_db_query_gate_status(client_id)
@@ -1102,6 +1120,8 @@ async def endpoint_stream(request: Request):
         sessions[client_id]["peer_ip"] = peer_ip
 
     q = await get_queue(client_id)
+    # Push current model so client knows what model is active immediately
+    q.put_nowait({"t": "model", "d": sessions[client_id]["model"]})
 
     async def generator() -> AsyncGenerator[dict, None]:
         while True:
@@ -1117,6 +1137,7 @@ async def endpoint_stream(request: Request):
             elif t == "done": yield {"event": "done", "data": ""}
             elif t == "err": yield {"event": "error", "data": json.dumps({"error": item["d"]})}
             elif t == "gate": yield {"event": "gate_request", "data": json.dumps(item["d"])}
+            elif t == "model": yield {"event": "model", "data": item["d"]}
 
     return EventSourceResponse(generator())
 

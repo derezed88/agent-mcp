@@ -187,12 +187,40 @@ FALLBACK_LLM_REGISTRY = {
     },
 }
 
+def load_limits() -> dict:
+    """Load depth/iteration limits from llm-models.json 'limits' section."""
+    try:
+        with open(LLM_MODELS_FILE, "r") as f:
+            data = json.load(f)
+        return data.get("limits", {})
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_limit_field(key: str, value: int) -> bool:
+    """Persist a single limits field to llm-models.json."""
+    try:
+        with open(LLM_MODELS_FILE, "r") as f:
+            data = json.load(f)
+        data.setdefault("limits", {})[key] = value
+        with open(LLM_MODELS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception as e:
+        log.error(f"save_limit_field failed: key={key} value={value} err={e}")
+        return False
+
+
 # Load LLM Registry from JSON (only enabled models)
 LLM_REGISTRY = load_llm_registry()
 
 # Load default model from plugins-enabled.json
 DEFAULT_MODEL = load_default_model()
 MAX_TOOL_ITERATIONS = 10
+
+_limits = load_limits()
+MAX_AT_LLM_DEPTH = int(_limits.get("max_at_llm_depth", 1))
+MAX_AGENT_CALL_DEPTH = int(_limits.get("max_agent_call_depth", 1))
 
 # Rate limits by tool type — loaded from plugins-enabled.json
 RATE_LIMITS = load_rate_limits()

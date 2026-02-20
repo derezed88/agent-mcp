@@ -23,7 +23,7 @@ from langchain_core.messages import (
 
 import time
 
-from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, save_llm_model_field
+from config import log, MAX_TOOL_ITERATIONS, MAX_AT_LLM_DEPTH, MAX_AGENT_CALL_DEPTH, LLM_REGISTRY, RATE_LIMITS, save_llm_model_field
 from state import push_tok, push_done, push_err, current_client_id, sessions
 from prompt import get_current_prompt, load_prompt_for_folder
 from gate import check_human_gate
@@ -694,9 +694,16 @@ async def agent_call(
 
     calling_client = current_client_id.get("")
 
-    # Depth guard — api-swarm- prefix signals this is already a delegated call
-    if calling_client.startswith("api-swarm-"):
-        return "[agent_call] Max swarm depth reached (1 hop). Call rejected to prevent recursion."
+    # Depth guard — track nesting depth in the calling session
+    calling_session = sessions.get(calling_client, {})
+    agent_call_depth = calling_session.get("_agent_call_depth", 0)
+    if agent_call_depth >= MAX_AGENT_CALL_DEPTH:
+        msg = (
+            f"[agent_call] Depth limit reached (max={MAX_AGENT_CALL_DEPTH}). "
+            f"Call rejected to prevent recursion. Do NOT retry."
+        )
+        log.warning(f"agent_call depth limit: client={calling_client} depth={agent_call_depth}")
+        return msg
 
     # Session-level streaming override: !stream true|false takes precedence over
     # the LLM-supplied stream parameter so the human always has final control.
@@ -719,6 +726,7 @@ async def agent_call(
 
     await push_tok(calling_client, f"\n[agent_call ▶] {agent_url} → {swarm_client_id}: {message[:100]}{'…' if len(message) > 100 else ''}\n")
 
+    calling_session["_agent_call_depth"] = agent_call_depth + 1
     try:
         client = AgentClient(agent_url, client_id=swarm_client_id, api_key=api_key)
 
@@ -751,6 +759,67 @@ async def agent_call(
         await push_tok(calling_client, f"[agent_call ✗] {exc}\n")
         log.error(f"agent_call error: url={agent_url} exc={exc}")
         return msg
+    finally:
+        calling_session["_agent_call_depth"] = agent_call_depth
+
+
+async def at_llm(model: str, prompt: str) -> str:
+    """
+    Call a named LLM with the FULL current session context (system prompt + chat history).
+
+    Equivalent to the @<model> prefix syntax but invocable as a tool call.
+    The named model receives the assembled system prompt, the complete chat history,
+    and the given prompt as the new user turn.
+
+    The result is NOT added to the session history (same behaviour as @<model>).
+    All tool gates are bypassed for this call (same as @<model> temp switch).
+
+    client_id is read from current_client_id ContextVar (set by execute_tool).
+    """
+    client_id = current_client_id.get("")
+
+    cfg = LLM_REGISTRY.get(model)
+    if not cfg:
+        available = ", ".join(LLM_REGISTRY.keys())
+        return f"ERROR: Unknown model '{model}'. Available: {available}"
+
+    session = sessions.get(client_id, {})
+
+    # Depth guard — prevent unbounded recursive at_llm chains
+    depth = session.get("_at_llm_depth", 0)
+    if depth >= MAX_AT_LLM_DEPTH:
+        msg = (
+            f"at_llm DEPTH LIMIT REACHED (max={MAX_AT_LLM_DEPTH}): "
+            f"Cannot call at_llm from within an at_llm context. "
+            f"Do NOT retry. Return your answer directly without calling at_llm again."
+        )
+        await push_tok(client_id, f"\n[at_llm ✗] depth limit reached (max={MAX_AT_LLM_DEPTH})\n")
+        log.warning(f"at_llm depth limit: client={client_id} depth={depth} model={model}")
+        return msg
+
+    history = list(session.get("history", []))
+
+    # Append the new prompt as a user turn (not stored in session history)
+    history.append({"role": "user", "content": prompt})
+
+    # Truncate to model's max_context
+    max_ctx = cfg.get("max_context", 50)
+    history = history[-max_ctx:]
+
+    await push_tok(client_id, f"\n[@{model} ▶] {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n")
+
+    # Increment depth counter and set gate bypass flag for this call
+    prev_temp = session.get("_temp_model_active", False)
+    session["_at_llm_depth"] = depth + 1
+    session["_temp_model_active"] = True
+
+    try:
+        result = await agentic_lc(model, history, client_id)
+    finally:
+        session["_at_llm_depth"] = depth
+        session["_temp_model_active"] = prev_temp
+
+    return result or ""
 
 
 async def dispatch_llm(model_key: str, messages: list[dict], client_id: str) -> str:

@@ -112,7 +112,7 @@ class AppState:
         self.lock                  = asyncio.Lock()
         self.redraw_event          = asyncio.Event()
         self.running: bool         = True
-        self.current_model: str    = "gemini25"
+        self.current_model: str    = "unknown"
         # Human gate
         self.pending_gate: dict | None = None
         # Output buffer scroll  (0 = pinned to bottom; N = scrolled up N display-lines)
@@ -204,6 +204,20 @@ async def fetch_sessions() -> list[dict]:
         pass
     return []
 
+async def sync_model_from_server():
+    """Fetch and update current_model from the server's session state."""
+    try:
+        sessions = await fetch_sessions()
+        for s in sessions:
+            if s["client_id"] == CLIENT_ID:
+                model = s.get("model", "")
+                if model:
+                    async with state.lock:
+                        state.current_model = model
+                return
+    except Exception:
+        pass
+
 async def resolve_session_id(token: str) -> str | None:
     """
     Resolve a session token to a full session ID.
@@ -271,7 +285,8 @@ async def attach_session(session_id: str):
         await state.append_output("[shell] Already attached to this session.")
         return
 
-    # Verify session exists
+    # Verify session exists and grab its model
+    target_model = None
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(f"{SERVER_HOST}/sessions?client_id={session_id}")
@@ -281,12 +296,17 @@ async def attach_session(session_id: str):
                 if not sessions:
                     await state.append_output(f"[ERROR] Session {session_id[:8]}... not found.")
                     return
+                target_model = sessions[0].get("model")
             else:
                 await state.append_output(f"[ERROR] Failed to verify session: {resp.text}")
                 return
     except Exception as exc:
         await state.append_output(f"[ERROR] Failed to verify session: {exc}")
         return
+
+    if target_model:
+        async with state.lock:
+            state.current_model = target_model
 
     # Initiate switch
     await state.append_output(f"[shell] Switching to session {session_id[:8]}...")
@@ -361,6 +381,16 @@ async def sse_listener():
                         if raw.startswith(" "):
                             raw = raw[1:]
                         if not raw:
+                            continue
+
+                        # ---- model change ----------------------------------
+                        if current_event == "model":
+                            model_name = raw.strip()
+                            if model_name:
+                                async with state.lock:
+                                    state.current_model = model_name
+                                await state.set_status(f"Connected  model={model_name}")
+                            current_event = "message"
                             continue
 
                         # ---- error ----------------------------------------
@@ -558,7 +588,12 @@ async def user_input_handler(text: str) -> bool:
             return True
 
         if cmd == "model" and arg:
-            state.current_model = arg
+            # Forward to server — the server will push a "model" SSE event back
+            ts = datetime.now().strftime("%H:%M:%S")
+            await state.append_output(f"\n[{ts}] You: {stripped}")
+            await state.append_output("")
+            await submit_to_server(stripped)
+            return True
 
     ts = datetime.now().strftime("%H:%M:%S")
     await state.append_output(f"\n[{ts}] You: {stripped}")
@@ -993,7 +1028,7 @@ async def async_main(stdscr):
         "AIOps Shell  |  PgUp/PgDn=scroll  !mouse=selection toggle  !help=commands  !exit=quit"
     )
     await state.append_output(
-        f"Session: {CLIENT_ID[:8]}…   Server: {SERVER_HOST}   Model: {state.current_model}"
+        f"Session: {CLIENT_ID[:8]}…   Server: {SERVER_HOST}"
     )
     await state.append_output("")
 

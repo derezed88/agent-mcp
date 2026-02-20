@@ -118,6 +118,9 @@ async def push_err(client_id: str, msg: str):
 async def push_gate(client_id: str, gate_data: dict):
     (await get_queue(client_id)).put_nowait({"t": "gate", "d": gate_data})
 
+async def push_model(client_id: str, model_key: str):
+    (await get_queue(client_id)).put_nowait({"t": "model", "d": model_key})
+
 async def cancel_active_task(client_id: str) -> bool:
     """
     Cancel any in-flight request task for this client and drain its output queue.

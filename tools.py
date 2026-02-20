@@ -170,6 +170,7 @@ def get_core_tools():
             'llm_timeout':           _llm_timeout_exec,
             'stream':                _stream_exec,
             'tool_preview_length':   _tool_preview_length_exec,
+            'gate_list':             _gate_list_exec,
         }
     }
 
@@ -225,6 +226,7 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "get_system_info":       "system",
     "llm_clean_text":        "llm_call",
     "llm_clean_tool":        "llm_call",
+    "at_llm":                "llm_call",
     "llm_list":              "system",
     "agent_call":            "agent_call",
     "sysprompt_list":        "system",
@@ -241,6 +243,7 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "llm_timeout":           "system",
     "stream":                "system",
     "tool_preview_length":   "system",
+    "gate_list":             "system",
 }
 
 
@@ -266,6 +269,7 @@ def get_tool_executor(tool_name: str):
         'get_system_info':       get_system_info,
         'llm_clean_text':        _agents.llm_clean_text,
         'llm_clean_tool':        _agents.llm_clean_tool,
+        'at_llm':                _agents.at_llm,
         'llm_list':              _agents.llm_list,
         'agent_call':            _agents.agent_call,
         'sysprompt_list':        _sysprompt_list_exec,
@@ -282,6 +286,7 @@ def get_tool_executor(tool_name: str):
         'llm_timeout':           _llm_timeout_exec,
         'stream':                _stream_exec,
         'tool_preview_length':   _tool_preview_length_exec,
+        'gate_list':             _gate_list_exec,
     }
 
     if tool_name in core_executors:
@@ -414,6 +419,10 @@ class _HelpArgs(BaseModel):
     pass  # No arguments
 
 
+class _GateListArgs(BaseModel):
+    pass  # No arguments
+
+
 # ---------------------------------------------------------------------------
 # Meta-command tool arg schemas (llm_call, llm_timeout, stream, tool_preview_length)
 # ---------------------------------------------------------------------------
@@ -463,6 +472,15 @@ class _ToolPreviewLengthArgs(BaseModel):
     length: Optional[int] = Field(
         default=None,
         description="Number of characters to show (0 = unlimited). Required when action='set'.",
+    )
+
+
+class _AtLlmArgs(BaseModel):
+    model: str = Field(
+        description="Model key name (e.g., 'gemini25', 'grok4'). Use llm_list() to see valid names."
+    )
+    prompt: str = Field(
+        description="The prompt to send. The model receives the full chat history plus this prompt as a new user turn."
     )
 
 
@@ -768,6 +786,52 @@ async def _tool_preview_length_exec(action: str, length: int = None) -> str:
     return f"Unknown action '{action}'. Valid: get, set"
 
 
+async def _gate_list_exec() -> str:
+    from state import auto_aidb_state, tool_gate_state
+    from tools import get_all_gate_tools
+    lines = ["Gate status (true=auto-allow/gate OFF, false=gated/requires approval):"]
+
+    # DB gates
+    lines.append("\ndb_query (per-table):")
+    if not auto_aidb_state:
+        lines.append("  (all tables gated by default)")
+    else:
+        for table in sorted(auto_aidb_state.keys()):
+            perms = auto_aidb_state[table]
+            label = "(default *)" if table == "*" else ("(metadata)" if table == "__meta__" else table)
+            r = "auto-allow" if perms.get("read", False) else "gated"
+            w = "auto-allow" if perms.get("write", False) else "gated"
+            lines.append(f"  {label:<20} read={r}  write={w}")
+
+    # Tool gates — iterate all gate-able tools from registry
+    lines.append("\nTool gates:")
+    gate_tools = get_all_gate_tools()
+    # Also include core gated tools not in plugin registry
+    _CORE_GATED = {
+        "at_llm":          ["write"],
+        "sysprompt_write": ["write"],
+        "session":         ["read", "write"],
+        "model":           ["write"],
+        "reset":           ["write"],
+        "gate_list":       ["read"],
+    }
+    all_tools = dict(_CORE_GATED)
+    for name, meta in gate_tools.items():
+        ops = meta.get("operations", ["read"])
+        all_tools[name] = ops
+    for tool in sorted(all_tools.keys()):
+        ops = all_tools[tool]
+        perms = tool_gate_state.get(tool, {})
+        default_perms = tool_gate_state.get("*", {})
+        parts = []
+        for op in ops:
+            val = perms.get(op, default_perms.get(op, False))
+            parts.append(f"{op}={'auto-allow' if val else 'gated'}")
+        lines.append(f"  {tool:<25} {' '.join(parts)}")
+
+    return "\n".join(lines)
+
+
 def _make_core_lc_tools() -> list:
     """Build CORE_LC_TOOLS after agents module is available (avoids circular import)."""
     import agents as _agents
@@ -836,6 +900,23 @@ def _make_core_lc_tools() -> list:
                 "Set stream=False to suppress streaming and return only the final result."
             ),
             args_schema=_AgentCallArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_agents.at_llm,
+            name="at_llm",
+            description=(
+                "Call a named LLM model using the FULL current session context "
+                "(system prompt + complete chat history + the given prompt as a new user turn). "
+                "Equivalent to the @<model> prefix syntax but usable as a tool call. "
+                "The result is NOT added to the session history. "
+                "All tool gates are bypassed for the called model (same as @<model>). "
+                "Use this to get a second opinion, delegate a sub-question, or query "
+                "a specialised model mid-conversation without switching models permanently. "
+                "Subject to rate limiting (same bucket as llm_clean_text). "
+                "Requires at_llm write gate approval (controlled by !at_llm_gate_write). "
+                "Default: gated."
+            ),
+            args_schema=_AtLlmArgs,
         ),
         # --- Sysprompt management tools ---
         StructuredTool.from_function(
@@ -976,6 +1057,16 @@ def _make_core_lc_tools() -> list:
                 "Always allowed (no gate)."
             ),
             args_schema=_ToolPreviewLengthArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_gate_list_exec,
+            name="gate_list",
+            description=(
+                "List the current live gate status for all tools and DB tables. "
+                "Shows whether each tool requires human approval (gated) or is auto-allowed (gate OFF). "
+                "Read-only. Requires read gate approval (controlled by !gate_list_gate_read)."
+            ),
+            args_schema=_GateListArgs,
         ),
     ]
 

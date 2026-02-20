@@ -32,7 +32,7 @@ except ImportError:
 
 # Import agent infrastructure
 from config import log
-from state import sessions, get_queue, push_tok, push_done
+from state import sessions, get_queue, push_tok, push_done, active_tasks, cancel_active_task
 from routes import process_request
 
 
@@ -295,10 +295,16 @@ class SlackClientPlugin(BasePlugin):
         # Cancel any previous consumer for this client_id before starting a new one.
         # Without this, rapid messages spawn multiple consumers that race on the same
         # queue — causing responses from conversation N to appear during conversation N+1.
-        # We fire-and-forget the cancel (don't await) to avoid blocking the event handler.
         old_task = self._consumer_tasks.get(client_id)
         if old_task and not old_task.done():
             old_task.cancel()
+
+        # Also cancel any in-flight process_request for this client and drain its queue,
+        # mirroring what endpoint_submit does.  Without this the old agent task keeps
+        # running after the consumer is cancelled and its tok/done items pile up in the
+        # queue; the next consumer then picks them up as if they were responses to the
+        # new message.  We await so the drain completes before the new consumer starts.
+        await cancel_active_task(client_id)
 
         task = asyncio.create_task(self._consume_agent_responses(client_id, channel_id, thread_ts))
         self._consumer_tasks[client_id] = task
@@ -313,8 +319,10 @@ class SlackClientPlugin(BasePlugin):
             "thread_ts": thread_ts
         }
 
-        # Process through agent (imported from routes.py)
-        asyncio.create_task(process_request(client_id, text, payload))
+        # Process through agent and register the task so the next incoming message
+        # can cancel it via cancel_active_task (same pattern as endpoint_submit).
+        pr_task = asyncio.create_task(process_request(client_id, text, payload))
+        active_tasks[client_id] = pr_task
 
     # Two-pass regexes to strip push_tok bracket status lines from agent output.
     #
@@ -535,11 +543,15 @@ class SlackClientPlugin(BasePlugin):
                     timeout = FIRST_TIMEOUT  # reset to long timeout while active
 
                 elif item_type == "done":
-                    # One turn complete — post immediately, then wait for next turn
+                    # One turn complete — post immediately, then wait for next turn.
+                    # If the agent task is still running, use FIRST_TIMEOUT so a slow
+                    # LLM thinking between turns (e.g. after a tool call) doesn't cause
+                    # the consumer to exit before the final response arrives.
                     await _stop_heartbeat()
                     await _flush_turn("turn complete")
                     received_done = True
-                    timeout = INTER_TURN_TIMEOUT
+                    agent_task = active_tasks.get(client_id)
+                    timeout = FIRST_TIMEOUT if (agent_task and not agent_task.done()) else INTER_TURN_TIMEOUT
                     # Start heartbeat for next inter-turn wait
                     first_token_received = False
                     heartbeat_ts = None

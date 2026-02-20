@@ -1043,6 +1043,8 @@ class PluginManager:
     # All known gate-able tools and the permission types they support.
     # db_query is handled separately (per-table keys in the "db" section).
     _GATE_TOOLS: dict[str, list[str]] = {
+        "at_llm":         ["write"],
+        "gate_list":      ["read"],
         "search_ddgs":    ["read"],
         "search_google":  ["read"],
         "search_tavily":  ["read"],
@@ -1202,6 +1204,75 @@ class PluginManager:
                 return True
             return False
 
+    # ------------------------------------------------------------------
+    # Depth limit management
+    # ------------------------------------------------------------------
+
+    _LIMIT_KEYS: dict[str, str] = {
+        "max_at_llm_depth":    "Max nested at_llm hops before rejection (1 = no recursion)",
+        "max_agent_call_depth": "Max nested agent_call hops before rejection (1 = no recursion)",
+    }
+
+    def _load_limits(self) -> dict:
+        """Load limits section from llm-models.json."""
+        try:
+            with open(self.models_path, "r") as f:
+                data = json.load(f)
+            return data.get("limits", {})
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_limit(self, key: str, value: int) -> bool:
+        """Persist a single limit key to llm-models.json."""
+        try:
+            with open(self.models_path, "r") as f:
+                data = json.load(f)
+            data.setdefault("limits", {})[key] = value
+            with open(self.models_path, "w") as f:
+                json.dump(data, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"{Colors.RED}Error saving limit: {e}{Colors.RESET}")
+            return False
+
+    def limit_list(self):
+        """List all depth/iteration limits from llm-models.json."""
+        limits = self._load_limits()
+
+        print(f"\n{Colors.BOLD}Depth / Iteration Limits{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
+        print(f"  {'Key':<26} {'Value':>6}  Description")
+        print(f"  {'-'*26} {'-'*6}  {'-'*40}")
+
+        for key, desc in sorted(self._LIMIT_KEYS.items()):
+            val = limits.get(key, "(not set — using default: 1)")
+            print(f"  {key:<26} {str(val):>6}  {Colors.GRAY}{desc}{Colors.RESET}")
+
+        print()
+        print(f"  Set: {Colors.BOLD}limit-set <key> <value>{Colors.RESET}")
+        print(f"  {Colors.CYAN}Changes take effect after restarting agent-mcp.py{Colors.RESET}")
+        print()
+
+    def limit_set(self, key: str, value: int) -> bool:
+        """Set a depth limit in llm-models.json."""
+        if key not in self._LIMIT_KEYS:
+            print(f"{Colors.RED}Unknown limit key '{key}'{Colors.RESET}")
+            print(f"  Valid keys: {', '.join(sorted(self._LIMIT_KEYS.keys()))}")
+            return False
+
+        if value < 0:
+            print(f"{Colors.RED}Value must be >= 0{Colors.RESET}")
+            return False
+
+        limits = self._load_limits()
+        old = limits.get(key, 1)
+
+        if self._save_limit(key, value):
+            print(f"{Colors.GREEN}✓ {key}: {old} → {value}{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            return True
+        return False
+
     def gate_reset(self) -> bool:
         """Reset all gate defaults to gated (false) — delete gate-defaults.json."""
         if self._save_gate_defaults({"db": {}, "tools": {}}):
@@ -1240,6 +1311,10 @@ class PluginManager:
         print("  ratelimit-set <type> <calls> <window>     - Set rate limit (calls=0 = unlimited)")
         print("  ratelimit-autodisable <type> <true|false> - Set auto_disable flag")
         print(f"  Valid types: llm_call, search, extract, drive, db, system")
+        print(f"\n{Colors.BOLD}Depth Limit Commands:{Colors.RESET}")
+        print("  limit-list                        - Show depth/iteration limits")
+        print("  limit-set <key> <value>           - Set a depth limit")
+        print(f"  Valid keys: {', '.join(sorted(PluginManager._LIMIT_KEYS.keys()))}")
         print(f"\n{Colors.BOLD}Gate Default Commands:{Colors.RESET}")
         print("  gate-list                                         - Show all gate defaults")
         print("  gate-set db <table|*> <read|write> <true|false>  - Set DB gate default")
@@ -1414,6 +1489,18 @@ class PluginManager:
                         self.port_set(args[0], int(args[1]))
                     except ValueError:
                         print(f"{Colors.RED}Port must be an integer{Colors.RESET}")
+            elif action == "limit-list":
+                self.limit_list()
+            elif action == "limit-set":
+                args = arg.split()
+                if len(args) != 2:
+                    print(f"{Colors.RED}Usage: limit-set <key> <value>{Colors.RESET}")
+                    print(f"  Valid keys: {', '.join(sorted(self._LIMIT_KEYS.keys()))}")
+                else:
+                    try:
+                        self.limit_set(args[0], int(args[1]))
+                    except ValueError:
+                        print(f"{Colors.RED}Value must be an integer{Colors.RESET}")
             elif action == "gate-list":
                 self.gate_list()
             elif action == "gate-set":
@@ -1565,6 +1652,16 @@ def main():
                 print(f"{Colors.RED}✗ Value must be true or false{Colors.RESET}")
                 return 1
             manager.ratelimit_auto_disable(sys.argv[2], val in ("true", "1", "yes"))
+
+        # Depth limit commands
+        elif cmd == "limit-list":
+            manager.limit_list()
+        elif cmd == "limit-set" and len(sys.argv) > 3:
+            try:
+                manager.limit_set(sys.argv[2], int(sys.argv[3]))
+            except ValueError:
+                print(f"{Colors.RED}✗ Value must be an integer{Colors.RESET}")
+                return 1
 
         # Gate commands
         elif cmd == "gate-list":
