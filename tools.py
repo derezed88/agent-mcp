@@ -385,6 +385,13 @@ class _AgentCallArgs(BaseModel):
         description="Optional: session name to use on the target agent. "
                     "Omit to auto-generate an isolated swarm session."
     )
+    stream: bool = Field(
+        default=True,
+        description="If True (default), relay the remote agent's tokens in real-time as they "
+                    "arrive so Slack and other clients see per-turn progress. "
+                    "Set to False to suppress streaming and return only the final result — "
+                    "useful when the intermediate tokens would be noisy or are not needed."
+    )
 
 
 def _make_core_lc_tools() -> list:
@@ -482,7 +489,10 @@ def _make_core_lc_tools() -> list:
                 "Swarm depth is limited to 1 hop to prevent recursion. "
                 "Gate approval on the target agent follows that agent's own gate policy — "
                 "configure auto_approve_gates on the AgentClient if the target needs tool access. "
-                "Rate limited: 5 calls per 60 seconds per session."
+                "Rate limited: 5 calls per 60 seconds per session. "
+                "By default (stream=True) the remote agent's tokens are relayed in real-time, "
+                "giving Slack and other clients live per-turn progress. "
+                "Set stream=False to suppress streaming and return only the final result."
             ),
             args_schema=_AgentCallArgs,
         ),

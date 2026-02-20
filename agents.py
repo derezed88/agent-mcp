@@ -450,13 +450,17 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
             for tc in ai_msg.tool_calls:
                 if tc["name"] != "agent_call":
                     has_visible_output = True
+                elif tc["args"].get("stream", True):
+                    # Streaming agent_call relays remote tokens via push_tok in
+                    # real-time, so it does produce visible output for this turn.
+                    has_visible_output = True
                 result = await execute_tool(client_id, tc["name"], tc["args"])
                 ctx.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
             # Signal end of this tool-call round trip so streaming clients
             # (e.g. Slack) can post intermediate progress before the next turn.
-            # Skip for agent_call-only turns: agent_call blocks for the full remote
-            # conversation duration, so emitting done would fire INTER_TURN_TIMEOUT
-            # before the call returns and cause the Slack consumer to exit early.
+            # Non-streaming agent_call-only turns are still skipped: they block
+            # silently for the full remote conversation duration, so emitting done
+            # would fire INTER_TURN_TIMEOUT before the call returns.
             if has_visible_output:
                 await push_done(client_id)
 
@@ -645,13 +649,23 @@ async def llm_list() -> str:
     return "\n".join(lines)
 
 
-async def agent_call(agent_url: str, message: str, target_client_id: str = None) -> str:
+async def agent_call(
+    agent_url: str,
+    message: str,
+    target_client_id: str = None,
+    stream: bool = True,
+) -> str:
     """
     Call another agent-mcp instance (swarm/multi-agent coordination).
 
     Sends `message` to a remote agent at `agent_url` using the API client plugin.
     The remote agent processes it through its full stack (LLM, tools, gates).
     Returns the complete text response.
+
+    When stream=True (default), remote tokens are relayed via push_tok in real-time
+    so Slack and other clients see per-turn progress as it arrives.
+    When stream=False, the call blocks silently until the remote agent finishes and
+    returns only the final result (original behaviour).
 
     Depth guard: calls originating from an api-swarm- prefixed client_id are
     rejected immediately to prevent unbounded recursion (max 1 hop).
@@ -686,16 +700,25 @@ async def agent_call(agent_url: str, message: str, target_client_id: str = None)
 
     try:
         client = AgentClient(agent_url, client_id=swarm_client_id, api_key=api_key)
-        result = await asyncio.wait_for(
-            client.send(message, timeout=timeout),
-            timeout=timeout + 5,
-        )
 
-        # No ◀ preview push_tok here — the LLM always narrates the remote agent's
-        # response in its own words, so echoing the raw result would double it in
-        # every client (Slack, open-webui, etc.). The ▶ dispatch line above is
-        # sufficient for shell.py operators to see the call was made.
-        return result
+        if stream:
+            # Streaming path: relay each remote token via push_tok so Slack and
+            # other clients see the remote agent's output as it arrives, rather
+            # than waiting for the full response before seeing anything.
+            accumulated = []
+            async for chunk in client.stream(message, timeout=timeout):
+                accumulated.append(chunk)
+                await push_tok(calling_client, chunk)
+            return "".join(accumulated)
+        else:
+            # Non-streaming path: block until remote agent finishes, return full result.
+            # The LLM narrates the result itself; no push_tok preview here to avoid
+            # double-echo in Slack and other clients.
+            result = await asyncio.wait_for(
+                client.send(message, timeout=timeout),
+                timeout=timeout + 5,
+            )
+            return result
 
     except asyncio.TimeoutError:
         msg = f"ERROR: agent_call timed out after {timeout}s waiting for {agent_url}."
