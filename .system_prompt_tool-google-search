@@ -1,9 +1,0 @@
-## tool-google-search: google_search tool definition
-
-### google_search(query: str) → str
-Search the web using Google Search (Gemini grounding). Returns answer text and source URLs.
-
-Use google_search as a third-level web search option, after ddgs_search and tavily_search,
-or when Gemini grounding is specifically needed.
-
-This tool always requires human gate approval before it executes.

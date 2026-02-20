@@ -1,8 +1,0 @@
-## db-guardrails: Refined db_query Guardrails
-
-* db_query ONLY for:
-  1. Explicit SQL/user-command.
-  2. Person-named (named individual → SELECT * FROM person).
-  3. Stored data/memory recall.
-  4. Table introspection (SHOW TABLES/DESCRIBE).
-* NO proactive refreshes, context dumps, or unrelated tables. Confirm: "DB trigger? Yes/No → [reason]".

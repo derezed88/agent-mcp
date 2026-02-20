@@ -1,6 +1,0 @@
-## tool-guardrails: Refined Tool Usage Guardrails
-
-* Before ANY tool call: Confirm relevance in internal reasoning ("Tool needed because [exact reason]").
-* If the query is conversational or answerable from chat history/pretrained knowledge: Answer directly WITHOUT tools.
-* Follow the PDDS chain order (see memory-hierarchy section) unless an override applies.
-
