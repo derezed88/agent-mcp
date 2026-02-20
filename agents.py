@@ -29,8 +29,7 @@ from prompt import get_current_prompt, load_prompt_for_folder
 from gate import check_human_gate
 from database import execute_sql
 from tools import (
-    update_system_prompt, get_system_info,
-    read_system_prompt,
+    get_system_info,
     get_all_lc_tools, get_all_openai_tools, get_tool_executor,
     get_tool_type,
 )
@@ -244,9 +243,9 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
         if tool_name == "db_query":
             sql = tool_args.get("sql", "")
             await push_tok(client_id, f"\n[db ▶] {sql}\n")
-        elif tool_name == "update_system_prompt":
-            await push_tok(client_id, f"\n[sysprompt ▶] updating…\n")
-        elif tool_name == "read_system_prompt":
+        elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
+            await push_tok(client_id, f"\n[sysprompt ▶] {tool_name}…\n")
+        elif tool_name in ("sysprompt_list", "sysprompt_read"):
             await push_tok(client_id, "\n[sysprompt ▶] reading…\n")
         elif tool_name == "get_system_info":
             await push_tok(client_id, "\n[sysinfo ▶] fetching…\n")
@@ -276,9 +275,9 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
 
         if tool_name == "db_query":
             await push_tok(client_id, f"[db ◀]\n{preview}\n")
-        elif tool_name == "update_system_prompt":
+        elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
             await push_tok(client_id, f"[sysprompt ◀] {result}\n")
-        elif tool_name == "read_system_prompt":
+        elif tool_name in ("sysprompt_list", "sysprompt_read"):
             await push_tok(client_id, f"[sysprompt ◀]\n{preview}\n")
         elif tool_name == "get_system_info":
             await push_tok(client_id, f"[sysinfo ◀] {result}\n")
