@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 from contextvars import ContextVar
 
 # Current client ID context variable — set in execute_tool() so executors can
@@ -52,6 +54,36 @@ auto_aidb_state: dict[str, dict[str, bool]] = {}
 # Tool gate state { tool_name -> {"read": bool, "write": bool} }
 # True = gate OFF (auto-allow), False = gate ON (requires approval)
 tool_gate_state: dict[str, dict[str, bool]] = {}
+
+_GATE_DEFAULTS_FILE = os.path.join(os.path.dirname(__file__), "gate-defaults.json")
+
+def load_gate_defaults():
+    """Load gate defaults from gate-defaults.json into auto_aidb_state and tool_gate_state."""
+    try:
+        with open(_GATE_DEFAULTS_FILE, "r") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return  # No defaults file — start with all gates ON (secure by default)
+    except (json.JSONDecodeError, OSError):
+        return
+
+    db_defaults = data.get("db", {})
+    for table, perms in db_defaults.items():
+        if isinstance(perms, dict):
+            auto_aidb_state[table] = {
+                "read":  bool(perms.get("read",  False)),
+                "write": bool(perms.get("write", False)),
+            }
+
+    tool_defaults = data.get("tools", {})
+    for tool, perms in tool_defaults.items():
+        if isinstance(perms, dict):
+            tool_gate_state[tool] = {
+                "read":  bool(perms.get("read",  False)),
+                "write": bool(perms.get("write", False)),
+            }
+
+load_gate_defaults()
 
 async def get_queue(client_id: str) -> asyncio.Queue:
     async with queue_lock:
