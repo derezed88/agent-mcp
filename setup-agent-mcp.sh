@@ -88,7 +88,7 @@ if [ -z "$SOURCE_DIR" ]; then
     echo "  Remote:  --source-host <host> --source-dir /path/to/dev/install"
     echo ""
     echo "  Tip: the reference install is the directory containing your .env,"
-    echo "       credentials.json, llm-models.json, and .system_prompt* files."
+    echo "       credentials.json, llm-models.json, and system_prompt/ folder."
     exit 1
 fi
 
@@ -120,15 +120,6 @@ copy_file() {
     fi
 }
 
-# ── Helper: list files matching a glob on source (local or remote) ───────────
-list_source_files() {
-    local pattern="$1"
-    if [ -n "$SOURCE_HOST" ]; then
-        ssh "${SOURCE_USER}@${SOURCE_HOST}" "ls ${SOURCE_DIR}/${pattern} 2>/dev/null || true"
-    else
-        ls ${SOURCE_DIR}/${pattern} 2>/dev/null || true
-    fi
-}
 
 # ── 0a. System package preflight ─────────────────────────────────────────────
 # Only needed when falling back to the system Python (not pyenv).
@@ -254,13 +245,14 @@ copy_file "llm-models.json"
 copy_file "gate-defaults.json"
 
 # Service account JSON referenced in .env (SERVICE_ACCOUNT_FILE=./gen-lang-*.json)
-# Extract the filename from .env if present, then copy it too.
+# Extract the filename from .env — handles quoted and unquoted values.
+# Pattern: SERVICE_ACCOUNT_FILE=["']?./FILENAME["']?
 SA_FILE=""
+_sa_grep='grep -oP "(?<=SERVICE_ACCOUNT_FILE=[\"'"'"']?\./)([^\s\"'"'"']+)" '"${SOURCE_DIR}/.env"' 2>/dev/null | head -1 || true'
 if [ -n "$SOURCE_HOST" ]; then
-    SA_FILE=$(ssh "${SOURCE_USER}@${SOURCE_HOST}" \
-        "grep -oP 'SERVICE_ACCOUNT_FILE=\"\./\K[^\"]+' ${SOURCE_DIR}/.env 2>/dev/null || true")
+    SA_FILE=$(ssh "${SOURCE_USER}@${SOURCE_HOST}" "$_sa_grep")
 else
-    SA_FILE=$(grep -oP 'SERVICE_ACCOUNT_FILE="\./\K[^"]+' "${SOURCE_DIR}/.env" 2>/dev/null || true)
+    SA_FILE=$(eval "$_sa_grep")
 fi
 if [ -n "$SA_FILE" ]; then
     copy_file "$SA_FILE"
@@ -277,13 +269,18 @@ fi
 echo ""
 echo "Syncing system_prompt/ folders from reference..."
 if [ -n "$SOURCE_HOST" ]; then
-    # rsync from remote: --ignore-existing preserves repo's 000_default files
-    if rsync -a --ignore-existing \
-             "${SOURCE_USER}@${SOURCE_HOST}:${SOURCE_DIR}/system_prompt/" \
-             "$TARGET_DIR/system_prompt/" 2>/dev/null; then
-        echo "  ✓ system_prompt/ synced from ${SOURCE_USER}@${SOURCE_HOST}"
+    # Check the directory exists on the remote before rsync to avoid confusing errors
+    if ssh "${SOURCE_USER}@${SOURCE_HOST}" "test -d '${SOURCE_DIR}/system_prompt'" 2>/dev/null; then
+        # --ignore-existing preserves repo's 000_default files
+        if rsync -a --ignore-existing \
+                 "${SOURCE_USER}@${SOURCE_HOST}:${SOURCE_DIR}/system_prompt/" \
+                 "$TARGET_DIR/system_prompt/"; then
+            echo "  ✓ system_prompt/ synced from ${SOURCE_USER}@${SOURCE_HOST}"
+        else
+            echo "  ✗ system_prompt/ rsync failed (skipping)"
+        fi
     else
-        echo "  ✗ system_prompt/ sync failed or no extra folders on source (skipping)"
+        echo "  ✗ system_prompt/ not found on source (skipping)"
     fi
 else
     if [ -d "${SOURCE_DIR}/system_prompt" ]; then
