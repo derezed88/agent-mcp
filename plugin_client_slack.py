@@ -58,6 +58,10 @@ class SlackClientPlugin(BasePlugin):
         # Format: {"thread_ts_or_channel_ts": {"session_id": "sess_xyz", "channel_id": "C123"}}
         self.slack_sessions: Dict[str, Dict[str, str]] = {}
 
+        # One active consumer task per client_id — prevents queue bleed when
+        # rapid messages arrive before the previous consumer has exited.
+        self._consumer_tasks: Dict[str, asyncio.Task] = {}
+
         # Background task for Socket Mode listener
         self._socket_task: Optional[asyncio.Task] = None
 
@@ -288,8 +292,16 @@ class SlackClientPlugin(BasePlugin):
 
         session_info = self.slack_sessions[thread_ts]
 
-        # Create task to consume agent responses and send to Slack
-        asyncio.create_task(self._consume_agent_responses(client_id, channel_id, thread_ts))
+        # Cancel any previous consumer for this client_id before starting a new one.
+        # Without this, rapid messages spawn multiple consumers that race on the same
+        # queue — causing responses from conversation N to appear during conversation N+1.
+        # We fire-and-forget the cancel (don't await) to avoid blocking the event handler.
+        old_task = self._consumer_tasks.get(client_id)
+        if old_task and not old_task.done():
+            old_task.cancel()
+
+        task = asyncio.create_task(self._consume_agent_responses(client_id, channel_id, thread_ts))
+        self._consumer_tasks[client_id] = task
 
         # Submit message to agent (same as shell.py does via /submit)
         # This will trigger process_request which handles !commands and LLM
@@ -530,6 +542,15 @@ class SlackClientPlugin(BasePlugin):
         except Exception as e:
             log.error(f"Error consuming agent responses for {client_id}: {e}", exc_info=True)
             await _stop_heartbeat("_(error)_")
+        finally:
+            # Drain any items left in the queue so they don't bleed into the
+            # next conversation's consumer (happens after normal completion too,
+            # not just on error — the queue persists but the consumer does not).
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
     @staticmethod
     def _close_open_backticks(text: str) -> str:
