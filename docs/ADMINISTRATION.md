@@ -240,6 +240,23 @@ Gate pop-up preview length (shell.py only):
 !gate_preview_length [n]        get/set gate approval preview char limit
 ```
 
+### Agent Streaming Control
+
+```
+!stream                 show current agent_call streaming setting (default: enabled)
+!stream <true|false>    enable/disable real-time token relay from remote agent
+```
+
+> **Note:** The primary node is always the orchestrator. The remote agent responds
+> to single messages — it does not itself call agent_call back. Multi-turn conversations
+> are conducted by the primary node making repeated agent_call invocations, one per turn.
+
+When enabled (default), remote agent tokens are relayed via push_tok in real-time —
+Slack sees each remote turn as it completes rather than as a batch at the end.
+Set to `false` to suppress streaming and return only the final result.
+
+---
+
 ### LLM Tool Calls
 
 Control which models the session LLM can delegate to via `llm_call_clean`:
