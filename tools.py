@@ -376,9 +376,16 @@ class _AgentCallArgs(BaseModel):
                     "The target must have the API client plugin (plugin_client_api) enabled."
     )
     message: str = Field(
-        description="The message or command to send to the target agent. "
-                    "Can be any text, !command, or @model prefix. "
-                    "The full response from the target agent is returned."
+        description=(
+            "The message or command to send to the target agent. "
+            "Can be any text, !command, or @model prefix. "
+            "The full response from the target agent is returned.\n\n"
+            "CRITICAL: You are the ORCHESTRATOR. Send ONE direct conversational prompt per call. "
+            "The remote agent only RESPONDS — it cannot itself call agent_call (depth guard blocks it). "
+            "NEVER embed multi-turn instructions in the message (e.g. 'have a 3-turn conversation with me'). "
+            "That causes Max swarm depth errors. "
+            "For N-turn conversations: make N separate agent_call invocations, each with a single question."
+        )
     )
     target_client_id: str = Field(
         default="",
@@ -482,16 +489,18 @@ def _make_core_lc_tools() -> list:
             coroutine=_agents.agent_call,
             name="agent_call",
             description=(
-                "Send a message or command to another agent-mcp instance and return its response. "
+                "Send a single direct message to another agent-mcp instance and return its response. "
                 "Use for multi-agent coordination (swarm): delegate tasks, verify answers, or "
-                "parallelize work across agent instances. "
-                "The target agent processes the message through its full stack (LLM, tools, gates). "
-                "Swarm depth is limited to 1 hop to prevent recursion. "
-                "Gate approval on the target agent follows that agent's own gate policy — "
-                "configure auto_approve_gates on the AgentClient if the target needs tool access. "
+                "gather perspectives across agent instances.\n\n"
+                "ORCHESTRATION MODEL: YOU are the orchestrator. YOU make repeated agent_call "
+                "invocations — one per conversation turn. The remote agent ONLY RESPONDS to the "
+                "single message you send; it does NOT itself call agent_call (depth guard blocks "
+                "recursion at 1 hop). For an N-turn conversation, make N separate agent_call "
+                "calls, then synthesize all responses. NEVER embed multi-turn orchestration in "
+                "the message field (e.g. 'have a 5-turn conversation') — that causes immediate "
+                "Max swarm depth errors.\n\n"
                 "Rate limited: 5 calls per 60 seconds per session. "
-                "By default (stream=True) the remote agent's tokens are relayed in real-time, "
-                "giving Slack and other clients live per-turn progress. "
+                "By default (stream=True) remote tokens are relayed in real-time for live Slack progress. "
                 "Set stream=False to suppress streaming and return only the final result."
             ),
             args_schema=_AgentCallArgs,

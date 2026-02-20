@@ -59,6 +59,20 @@ async def get_queue(client_id: str) -> asyncio.Queue:
             sse_queues[client_id] = asyncio.Queue()
         return sse_queues[client_id]
 
+async def drain_queue(client_id: str) -> int:
+    """Discard all pending items in the client's SSE queue. Returns count drained."""
+    if client_id not in sse_queues:
+        return 0
+    q = sse_queues[client_id]
+    count = 0
+    while not q.empty():
+        try:
+            q.get_nowait()
+            count += 1
+        except asyncio.QueueEmpty:
+            break
+    return count
+
 async def push_tok(client_id: str, text: str):
     (await get_queue(client_id)).put_nowait({"t": "tok", "d": text.replace("\n", "\\n")})
 

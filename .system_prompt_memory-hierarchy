@@ -18,6 +18,4 @@ Special tools (bypass chain entirely):
 - Behaviour change request → update_system_prompt only
 - Prompt inspection → read_system_prompt only
 
-MULTI-STEP SEQUENCES: When a user request implies multiple steps (e.g., "list then read"), execute ALL steps before responding. Do not stop after the first tool call.
-
 Auto-store valuable information (INSERT/append to DB or Drive as appropriate).

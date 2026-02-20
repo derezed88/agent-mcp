@@ -446,22 +446,28 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 return final
 
             # Execute all tool calls in this turn
-            has_visible_output = False
+            has_non_agent_call_output = False
             for tc in ai_msg.tool_calls:
+                is_streaming_agent_call = (
+                    tc["name"] == "agent_call"
+                    and tc["args"].get("stream", True)
+                )
                 if tc["name"] != "agent_call":
-                    has_visible_output = True
-                elif tc["args"].get("stream", True):
-                    # Streaming agent_call relays remote tokens via push_tok in
-                    # real-time, so it does produce visible output for this turn.
-                    has_visible_output = True
+                    has_non_agent_call_output = True
                 result = await execute_tool(client_id, tc["name"], tc["args"])
                 ctx.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
-            # Signal end of this tool-call round trip so streaming clients
-            # (e.g. Slack) can post intermediate progress before the next turn.
-            # Non-streaming agent_call-only turns are still skipped: they block
-            # silently for the full remote conversation duration, so emitting done
-            # would fire INTER_TURN_TIMEOUT before the call returns.
-            if has_visible_output:
+                # Flush immediately after each streaming agent_call so Slack posts
+                # per-turn progress as it arrives rather than batching all turns.
+                # Without this, when the LLM issues N agent_calls in one batch
+                # (grok4 batches all turns), a single push_done at the end causes
+                # the Slack consumer to post the entire N-turn conversation as one
+                # block — the batch behaviour observed in Test 6 (5-turn).
+                if is_streaming_agent_call:
+                    await push_done(client_id)
+            # Signal end of this tool-call round trip for any non-agent_call tools
+            # (db_query, google_drive, etc.) so streaming clients see intermediate
+            # results before the LLM's next thinking step.
+            if has_non_agent_call_output:
                 await push_done(client_id)
 
         await push_tok(client_id, "\n[Max iterations]\n")

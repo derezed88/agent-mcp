@@ -318,13 +318,16 @@ class SlackClientPlugin(BasePlugin):
 
     # Two-pass regexes to strip push_tok bracket status lines from agent output.
     #
-    # Pass 1 — "owned body" tags: bracket lines whose content ends with ":"
-    # own the body lines that immediately follow (e.g. "[agent_call ◀] url:\nbody").
-    # Both the tag line and the body are removed because the LLM always writes
-    # its own summary of the result afterwards.
+    # Pass 1 — "owned body" tags: bracket lines that own the body lines immediately
+    # following them.  Two sub-cases:
+    #   a) Tag line ends with ":" — e.g. "[agent_call ◀] url:\nbody text"
+    #   b) Tag line contains "◀" (close/result tag) — e.g. "[search ddgs ◀]\nresults…"
+    # Both the tag line and its body are removed because the LLM always writes its
+    # own summary of the result afterwards.
     _STATUS_OWNED_RE = re.compile(
         r'\[(?:agent_call|tool_call|llm_clean_text|llm_clean_tool'
-        r'|db|search\s+\w+|sysprompt|sysinfo|drive)[^\]]*\][^\n]*:\n'
+        r'|db|search\s+\w+|sysprompt|sysinfo|drive)[^\]]*\]'
+        r'[^\n]*(?::|◀)[^\n]*\n'
         r'(?:(?!\[)[^\n]+\n?)*',
         re.MULTILINE,
     )
@@ -458,16 +461,40 @@ class SlackClientPlugin(BasePlugin):
         async def _update_slack_message(ch: str, ts: str, text: str) -> None:
             await self._update_slack_message(ch, ts, text)
 
+        # ts of the first turn's Slack message — kept so we can retroactively
+        # prepend "_(turn 1)_" when a second turn arrives, without labeling
+        # single-turn responses at all.
+        first_turn_ts: Optional[str] = None
+        first_turn_text: Optional[str] = None
+
         async def _flush_turn(label: str) -> None:
             """Post the current turn's accumulated text to Slack and reset."""
-            nonlocal response_parts, turn_index
+            nonlocal response_parts, turn_index, first_turn_ts, first_turn_text
             if response_parts:
-                turn_text = self._filter_status_lines("".join(response_parts))
+                # push_tok encodes newlines as \\n literals; restore them before
+                # filtering so the line-anchored regexes work correctly.
+                turn_text = self._filter_status_lines(
+                    "".join(response_parts).replace("\\n", "\n")
+                )
                 if turn_text:
-                    if turn_index > 0:
-                        # Prefix intermediate turns so the user knows more is coming
-                        turn_text = f"_(turn {turn_index + 1})_\n{turn_text}"
-                    await self._send_slack_message(channel_id, thread_ts, turn_text)
+                    if turn_index == 0:
+                        # First turn: post without a label for now.  If a second
+                        # turn arrives we'll retroactively edit this message to add
+                        # "_(turn 1)_" so single-turn responses stay clean.
+                        first_turn_ts = await self._send_slack_message(channel_id, thread_ts, turn_text)
+                        first_turn_text = turn_text
+                    else:
+                        if turn_index == 1 and first_turn_ts and first_turn_text:
+                            # Second turn arriving — retroactively label turn 1
+                            await _update_slack_message(
+                                channel_id, first_turn_ts,
+                                f"_(turn 1)_\n{first_turn_text}"
+                            )
+                        # Post this turn with its label
+                        await self._send_slack_message(
+                            channel_id, thread_ts,
+                            f"_(turn {turn_index + 1})_\n{turn_text}"
+                        )
                     log.info(f"Slack: posted {label} for {client_id} (turn {turn_index + 1})")
                     turn_index += 1  # only advance on visible output
             response_parts = []
@@ -592,16 +619,19 @@ class SlackClientPlugin(BasePlugin):
             return text + '`'
         return text
 
-    async def _send_slack_message(self, channel_id: str, thread_ts: str, text: str) -> None:
+    async def _send_slack_message(self, channel_id: str, thread_ts: str, text: str) -> Optional[str]:
         """
         Send message to Slack channel/thread via Web API (chat.postMessage).
 
         Authenticated via SLACK_BOT_TOKEN. Supports threaded replies and
         automatic chunking for messages exceeding Slack's ~4000 char limit.
+
+        Returns the Slack message ts of the first posted chunk, or None on error.
+        The ts can be used with _update_slack_message() to retroactively edit the message.
         """
         if not self.slack_client:
             log.error("Slack client not initialized")
-            return
+            return None
 
         try:
             # Clean up text for Slack rendering
@@ -611,15 +641,17 @@ class SlackClientPlugin(BasePlugin):
             # Slack has a ~4000 character limit for messages
             # Split into chunks if needed
             max_chunk_size = 3500
+            first_ts: Optional[str] = None
 
             if len(cleaned_text) <= max_chunk_size:
                 # Close any unclosed backtick spans before sending
                 cleaned_text = self._close_open_backticks(cleaned_text)
-                await self.slack_client.chat_postMessage(
+                resp = await self.slack_client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
                     text=cleaned_text
                 )
+                first_ts = resp.get("ts")
                 log.info(f"Sent Slack message to {channel_id}/{thread_ts} ({len(cleaned_text)} chars)")
             else:
                 # Split into chunks
@@ -630,17 +662,22 @@ class SlackClientPlugin(BasePlugin):
                     prefix = f"(Part {i+1}/{len(chunks)})\n" if len(chunks) > 1 else ""
                     # Close any unclosed backtick spans at chunk boundary
                     chunk = self._close_open_backticks(chunk)
-                    await self.slack_client.chat_postMessage(
+                    resp = await self.slack_client.chat_postMessage(
                         channel=channel_id,
                         thread_ts=thread_ts,
                         text=prefix + chunk
                     )
+                    if i == 0:
+                        first_ts = resp.get("ts")
                     # Small delay between chunks to avoid rate limits
                     if i < len(chunks) - 1:
                         await asyncio.sleep(0.5)
 
+            return first_ts
+
         except Exception as e:
             log.error(f"Error sending Slack message: {e}", exc_info=True)
+            return None
 
     # =========================================================================
     # Status endpoints

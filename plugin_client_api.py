@@ -39,7 +39,7 @@ from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from plugin_loader import BasePlugin
-from state import get_queue, push_done, sessions, pending_gates, sse_queues, remove_shorthand_mapping, get_or_create_shorthand_id
+from state import get_queue, push_done, sessions, pending_gates, sse_queues, remove_shorthand_mapping, get_or_create_shorthand_id, drain_queue
 from routes import process_request, cancel_active_task
 from state import active_tasks
 
@@ -97,6 +97,7 @@ async def endpoint_api_submit(request: Request) -> JSONResponse:
     peer_ip = request.client.host if request.client else None
 
     await cancel_active_task(client_id)
+    await drain_queue(client_id)
 
     if wait:
         # Sync mode: accumulate all tokens until done, then return

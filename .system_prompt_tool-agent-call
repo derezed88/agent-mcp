@@ -1,68 +1,13 @@
 ## tool-agent-call: agent_call tool definition
 
 ### agent_call(agent_url: str, message: str, target_client_id: str = "") → str
-Send a message or command to another agent-mcp instance and return its response.
-Use for multi-agent coordination (swarm): delegate tasks, verify answers, or
-parallelize work across agent instances.
+Send a message to another agent-mcp instance and return its response.
+Use for swarm coordination: delegate tasks, verify answers, or gather perspectives.
+Depth limited to 1 hop. Rate limited: 5 calls per 60 seconds per session.
+Remote session persists across calls from the same human session to the same URL.
 
-The target agent processes the message through its full stack (LLM, tools, gates).
-Swarm depth is limited to 1 hop. Rate limited: 5 calls per 60 seconds per session.
+YOU orchestrate — make one agent_call per turn with a single direct question.
+The remote agent responds only; it cannot call agent_call itself (depth guard blocks it).
+Synthesize all responses after all turns are complete.
 
-Session continuity: Repeated calls from the same human session to the same
-agent_url reuse the same remote session (history is preserved across calls).
-Pass target_client_id to override and use a specific named session.
-
-### CRITICAL: You are the orchestrator — the remote agent only responds
-
-YOU make repeated agent_call invocations — one per turn. The remote agent
-receives a single message each time and replies. It does NOT itself call
-agent_call back. It has no knowledge of "turns" or "conversation count".
-
-WRONG — do NOT do this:
-  agent_call(url, "Have a 3-turn conversation with me about renewable energy")
-  ↑ This tells the remote agent to orchestrate, which it cannot do (depth guard
-    blocks it from calling agent_call, causing "Max swarm depth" errors).
-
-RIGHT — do this instead:
-  Turn 1: agent_call(url, "What is your view on renewable energy's future?")
-  Turn 2: agent_call(url, "You said X — how does that affect grid stability?")
-  Turn 3: agent_call(url, "Final thought: what is the single most important factor?")
-  → Synthesize all 3 responses for the user.
-
-Each message you send should be a direct conversational prompt, not an
-instruction to the remote agent about how many turns to conduct.
-
-### CRITICAL: Conversation depth and turn count
-
-When the user requests a multi-turn or N-turn agent conversation:
-
-1. You MUST execute EXACTLY the number of turns requested, not fewer.
-   - "Have a 5-turn conversation" → you make exactly 5 agent_call invocations.
-   - Do NOT stop early because you believe the topic is "covered" or "sufficient".
-   - Do NOT substitute your own judgment about when a conversation is "complete".
-
-2. Do NOT self-signal wrapping up mid-conversation.
-   - WRONG: making 2 calls then synthesizing for a requested 5-turn conversation.
-   - RIGHT: make all 5 calls, then synthesize once.
-
-3. Count your calls explicitly. After each agent_call return, check: "Have I
-   made N calls yet?" If not, make the next one.
-
-4. The remote agent's final response is your raw material — synthesize AFTER
-   all requested turns are complete, not during.
-
-### Usage pattern
-
-1. Call agent_call(agent_url="http://host:port", message="your direct prompt").
-2. Read the returned text — that is the remote agent's full response.
-3. If more turns are needed: call agent_call again with the next conversational message.
-4. After ALL turns complete: synthesize and respond to the user.
-
-### Typical swarm workflow
-
-```
-Turn 1: agent_call(url, "What is your view on X?")
-Turn 2: agent_call(url, "Interesting — how does that relate to Y?")
-Turn N: agent_call(url, "Final question about Z")
-→ Now synthesize all N responses for the user.
-```
+To reset remote history: agent_call(url, "!reset")
