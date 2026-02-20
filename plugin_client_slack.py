@@ -472,6 +472,7 @@ class SlackClientPlugin(BasePlugin):
                     turn_index += 1  # only advance on visible output
             response_parts = []
 
+        cancelled = False
         try:
             # Start heartbeat immediately — covers the initial wait before any token
             # arrives (e.g. during a long blocking agent_call sequence).
@@ -539,18 +540,26 @@ class SlackClientPlugin(BasePlugin):
                     received_done = False
                     # Continue listening for more responses
 
+        except asyncio.CancelledError:
+            # Cancelled by a new incoming message — do NOT drain the queue.
+            # The new consumer will pick up whatever process_request already
+            # put there for the next message.
+            cancelled = True
+            await _stop_heartbeat()
+            raise
         except Exception as e:
             log.error(f"Error consuming agent responses for {client_id}: {e}", exc_info=True)
             await _stop_heartbeat("_(error)_")
         finally:
-            # Drain any items left in the queue so they don't bleed into the
-            # next conversation's consumer (happens after normal completion too,
-            # not just on error — the queue persists but the consumer does not).
-            while not queue.empty():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            # Drain stale queue items on normal or error exit — but NOT on cancel,
+            # because the cancelling message's process_request may have already
+            # put its tok+done into the queue for the new consumer to pick up.
+            if not cancelled:
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
     @staticmethod
     def _close_open_backticks(text: str) -> str:
