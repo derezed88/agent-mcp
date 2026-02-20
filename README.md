@@ -28,7 +28,7 @@ class _SearchArgs(BaseModel):
 
 StructuredTool.from_function(
     coroutine=search_executor,
-    name="ddgs_search",
+    name="search_ddgs",
     description="Search the web via DuckDuckGo.",
     args_schema=_SearchArgs,
 )
@@ -74,12 +74,16 @@ Every tool call passes through `check_human_gate()` before execution. Gates are 
 
 | Gate type | Command | Granularity |
 |---|---|---|
-| `search` / `extract` | `!autogate search true/false` | Per tool or all at once |
-| `drive` | `!autogate drive read/write true/false` | Separate read and write |
-| `db` | `!autoAIdb <table> read/write true/false` | Per-table, per-operation |
-| `system` | `!autoAISysPrompt write true/false` | System prompt writes |
+| `search` tools | `!search_ddgs_gate_read true/false` | Per search engine |
+| `url_extract` | `!url_extract_gate_read true/false` | Read gate |
+| `google_drive` | `!google_drive_gate_read/write true/false` | Separate read and write |
+| `db_query` | `!db_query_gate_read/write [table\|*] true/false` | Per-table, per-operation |
+| `sysprompt_write` | `!sysprompt_gate_write true/false` | System prompt writes |
+| `session` / `model` / `reset` | `!session_gate_read/write true/false` etc. | Per operation |
 
-Non-interactive clients (llama proxy, Slack) auto-reject gated calls immediately with an instructive message to the LLM.
+Gate defaults persist across restarts via `gate-defaults.json` (managed with `plugin-manager.py gate-set`).
+
+Non-interactive clients (llama proxy, Slack) auto-reject gated calls immediately with an instructive message to the LLM. API clients get a 2-second window for programmatic approval.
 
 ### LLM Delegation
 
@@ -120,7 +124,9 @@ The API plugin and `api_client.py` are also the transport layer used internally 
 
 ### Modular System Prompt
 
-The system prompt is a recursive tree of `.system_prompt_<section>` files, assembled at runtime. Sections are editable by the LLM via the `update_system_prompt` tool or directly by the operator. All sections are addressable by name or index from the client (`!read_system_prompt behavior`).
+The system prompt is assembled at runtime from section files stored in `system_prompt/<folder>/`. Each model can have its own folder, configured via `system_prompt_folder` in `llm-models.json`. The default folder is `system_prompt/000_default/`.
+
+Sections are editable by the LLM via `sysprompt_write` / `sysprompt_delete` tools or by the operator via `!sysprompt_*` commands. The full prompt or any section can be read with `!sysprompt_read <model> [section]`.
 
 ---
 
@@ -162,10 +168,12 @@ python shell.py
 Type `!help` to see all commands. Some useful ones to start:
 
 ```
-!model                   list available LLMs (* = current)
-!model <name>            switch active model
-!autogate search true    auto-allow web searches (no gate pop-ups)
-!reset                   clear conversation history
+!model                          list available LLMs (* = current)
+!model <name>                   switch active model
+!search_ddgs_gate_read true     auto-allow DuckDuckGo searches (no gate pop-ups)
+!db_query_gate_read * true      auto-allow all DB reads
+!reset                          clear conversation history
+!session                        list all active sessions
 ```
 
 ---
@@ -208,10 +216,10 @@ Agent B ────HTTP──►    │   ChatOpenAI              │──► 
 | `plugin_client_api` | client_interface | JSON/SSE HTTP API for programmatic access and swarm (port 8767) |
 | `plugin_database_mysql` | data_tool | `db_query` — SQL against MySQL |
 | `plugin_storage_googledrive` | data_tool | `google_drive` — CRUD within authorised folder |
-| `plugin_search_ddgs` | data_tool | `ddgs_search` — DuckDuckGo (no API key) |
-| `plugin_search_tavily` | data_tool | `tavily_search` — AI-curated results |
-| `plugin_search_xai` | data_tool | `xai_search` — Grok x_search (web + X/Twitter) |
-| `plugin_search_google` | data_tool | `google_search` — Gemini grounding |
+| `plugin_search_ddgs` | data_tool | `search_ddgs` — DuckDuckGo (no API key) |
+| `plugin_search_tavily` | data_tool | `search_tavily` — AI-curated results |
+| `plugin_search_xai` | data_tool | `search_xai` — Grok x_search (web + X/Twitter) |
+| `plugin_search_google` | data_tool | `search_google` — Gemini grounding |
 | `plugin_urlextract_tavily` | data_tool | `url_extract` — web page content extraction |
 
 Manage plugins:
@@ -244,6 +252,7 @@ python plugin-manager.py disable <plugin_name>
 | File | Purpose |
 |---|---|
 | `.env` | API keys and credentials (never commit) |
-| `llm-models.json` | Model registry — `type`, `host`, `env_key`, `enabled`, `tool_call_available` |
+| `llm-models.json` | Model registry — `type`, `host`, `env_key`, `enabled`, `tool_call_available`, `system_prompt_folder` |
 | `plugins-enabled.json` | Active plugins, rate limits, per-plugin config |
-| `.system_prompt*` | Modular system prompt sections (recursive tree) |
+| `gate-defaults.json` | Gate auto-allow defaults loaded at startup (managed via `plugin-manager.py gate-set`) |
+| `system_prompt/<folder>/` | Modular system prompt sections; `000_default/` ships with the repo |

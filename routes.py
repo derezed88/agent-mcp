@@ -368,6 +368,9 @@ async def cmd_url_extract(client_id: str, args: str):
         await conditional_push_done(client_id)
         return
     url = parts[0].strip()
+    # Slack wraps URLs in angle brackets: <https://example.com> or <https://example.com|display>
+    if url.startswith("<") and url.endswith(">"):
+        url = url[1:-1].split("|")[0]
     query = parts[1].strip() if len(parts) > 1 else ""
     executor = get_tool_executor("url_extract")
     if executor is None:

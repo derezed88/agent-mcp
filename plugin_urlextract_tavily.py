@@ -144,6 +144,10 @@ async def _run_tavily_extract(client, url: str, query: str = "") -> str:
     if client is None:
         return "Tavily extract client not initialized. Check TAVILY_API_KEY in .env."
 
+    # Tavily requires a fully-qualified URL with scheme
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
     if query:
         def _sync_extract():
             return client.extract(
