@@ -171,6 +171,8 @@ def get_core_tools():
             'stream':                _stream_exec,
             'tool_preview_length':   _tool_preview_length_exec,
             'gate_list':             _gate_list_exec,
+            'limit_list':            _limit_list_exec,
+            'limit_set':             _limit_set_exec,
         }
     }
 
@@ -244,6 +246,8 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "stream":                "system",
     "tool_preview_length":   "system",
     "gate_list":             "system",
+    "limit_list":            "system",
+    "limit_set":             "system",
 }
 
 
@@ -287,6 +291,8 @@ def get_tool_executor(tool_name: str):
         'stream':                _stream_exec,
         'tool_preview_length':   _tool_preview_length_exec,
         'gate_list':             _gate_list_exec,
+        'limit_list':            _limit_list_exec,
+        'limit_set':             _limit_set_exec,
     }
 
     if tool_name in core_executors:
@@ -481,6 +487,22 @@ class _AtLlmArgs(BaseModel):
     )
     prompt: str = Field(
         description="The prompt to send. The model receives the full chat history plus this prompt as a new user turn."
+    )
+
+
+class _LimitListArgs(BaseModel):
+    pass  # No arguments
+
+
+class _LimitSetArgs(BaseModel):
+    key: str = Field(
+        description=(
+            "Limit key to update. Valid keys: 'max_at_llm_depth', 'max_agent_call_depth'. "
+            "Use limit_list() first to see current values and descriptions."
+        )
+    )
+    value: int = Field(
+        description="New integer value. Must be >= 0. (1 = no recursion/nesting, 0 = fully disabled)"
     )
 
 
@@ -814,6 +836,8 @@ async def _gate_list_exec() -> str:
         "model":           ["write"],
         "reset":           ["write"],
         "gate_list":       ["read"],
+        "limit_list":      ["read"],
+        "limit_set":       ["write"],
     }
     all_tools = dict(_CORE_GATED)
     for name, meta in gate_tools.items():
@@ -830,6 +854,39 @@ async def _gate_list_exec() -> str:
         lines.append(f"  {tool:<25} {' '.join(parts)}")
 
     return "\n".join(lines)
+
+
+_LIMIT_KEY_DESCRIPTIONS: dict[str, str] = {
+    "max_at_llm_depth":    "Max nested at_llm hops before rejection (1 = no recursion)",
+    "max_agent_call_depth": "Max nested agent_call hops before rejection (1 = no recursion)",
+}
+
+
+async def _limit_list_exec() -> str:
+    from config import load_limits
+    limits = load_limits()
+    lines = ["Depth / Iteration Limits:"]
+    lines.append(f"  {'Key':<26} {'Value':>6}  Description")
+    lines.append(f"  {'-'*26} {'-'*6}  {'-'*40}")
+    for key, desc in sorted(_LIMIT_KEY_DESCRIPTIONS.items()):
+        val = limits.get(key, "(default: 1)")
+        lines.append(f"  {key:<26} {str(val):>6}  {desc}")
+    lines.append("\nChanges take effect after restarting agent-mcp.py")
+    return "\n".join(lines)
+
+
+async def _limit_set_exec(key: str, value: int) -> str:
+    from config import save_limit_field, load_limits
+    if key not in _LIMIT_KEY_DESCRIPTIONS:
+        valid = ", ".join(sorted(_LIMIT_KEY_DESCRIPTIONS.keys()))
+        return f"ERROR: Unknown limit key '{key}'. Valid keys: {valid}"
+    if value < 0:
+        return "ERROR: Value must be >= 0."
+    limits = load_limits()
+    old = limits.get(key, 1)
+    if save_limit_field(key, value):
+        return f"{key}: {old} → {value}. Persisted to llm-models.json. Restart agent-mcp.py for changes to take effect."
+    return f"ERROR: Failed to persist {key}={value} to llm-models.json."
 
 
 def _make_core_lc_tools() -> list:
@@ -1067,6 +1124,27 @@ def _make_core_lc_tools() -> list:
                 "Read-only. Requires read gate approval (controlled by !gate_list_gate_read)."
             ),
             args_schema=_GateListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_limit_list_exec,
+            name="limit_list",
+            description=(
+                "List all configurable depth and iteration limits (e.g. max_at_llm_depth, max_agent_call_depth). "
+                "Shows current values and descriptions. Read-only. "
+                "Requires read gate approval (controlled by !limit_list_gate_read, default: gated)."
+            ),
+            args_schema=_LimitListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_limit_set_exec,
+            name="limit_set",
+            description=(
+                "Update a configurable depth or iteration limit and persist it to llm-models.json. "
+                "Changes take effect after agent restart. "
+                "Valid keys: max_at_llm_depth, max_agent_call_depth. "
+                "Requires write gate approval (controlled by !limit_set_gate_write, default: gated)."
+            ),
+            args_schema=_LimitSetArgs,
         ),
     ]
 

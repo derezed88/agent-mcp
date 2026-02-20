@@ -1045,6 +1045,8 @@ class PluginManager:
     _GATE_TOOLS: dict[str, list[str]] = {
         "at_llm":         ["write"],
         "gate_list":      ["read"],
+        "limit_list":     ["read"],
+        "limit_set":      ["write"],
         "search_ddgs":    ["read"],
         "search_google":  ["read"],
         "search_tavily":  ["read"],

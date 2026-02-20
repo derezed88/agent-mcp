@@ -99,12 +99,20 @@ async def cmd_help(client_id: str):
         "  !stream <true|false>                      - enable/disable agent_call streaming\n"
         "  !at_llm_gate_write <t|f>                  - gate at_llm: true=gated (default), false=auto-allow\n"
         "\n"
+        "Limits:\n"
+        "  !limit_list                               - show depth/iteration limits\n"
+        "  !limit_set <key> <value>                  - set a limit (persists to llm-models.json)\n"
+        "  !limit_list_gate_read <t|f>               - gate limit_list: true=gated (default), false=auto-allow\n"
+        "  !limit_set_gate_write <t|f>               - gate limit_set: true=gated (default), false=auto-allow\n"
+        "\n"
         "AI tools (gated unless noted):\n"
         + "\n".join(tool_lines) + "\n"
         + "  get_system_info()                         - auto-allowed, no gate\n"
         "  llm_clean_text(model, prompt)             - rate limited\n"
         "  llm_clean_tool(model, tool, args)         - rate limited\n"
         "  at_llm(model, prompt)                     - write-gated; full context call\n"
+        "  limit_list()                              - read-gated; show limits\n"
+        "  limit_set(key, value)                     - write-gated; update a limit\n"
         "  llm_list()                                - auto-allowed\n"
         "  sysprompt_list/read                       - auto-allowed\n"
         "  sysprompt_write/delete/copy_dir/set_dir   - write gate\n"
@@ -311,6 +319,41 @@ async def cmd_gate_list(client_id: str):
     """Show live gate status for all tools and DB tables."""
     from tools import _gate_list_exec
     result = await _gate_list_exec()
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_limit_list(client_id: str):
+    """Show all configurable depth/iteration limits."""
+    from tools import _limit_list_exec
+    result = await _limit_list_exec()
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_limit_set(client_id: str, args: str):
+    """Set a depth/iteration limit."""
+    parts = args.split()
+    if len(parts) != 2:
+        await push_tok(client_id,
+            "Usage: !limit_set <key> <value>\n"
+            "  key: max_at_llm_depth | max_agent_call_depth\n"
+            "  value: integer >= 0  (1 = no nesting/recursion)\n"
+            "Example: !limit_set max_at_llm_depth 2")
+        await conditional_push_done(client_id)
+        return
+    key, val_str = parts[0], parts[1]
+    try:
+        value = int(val_str)
+        if value < 0:
+            raise ValueError
+    except ValueError:
+        await push_tok(client_id,
+            f"ERROR: Invalid value '{val_str}' — must be an integer >= 0")
+        await conditional_push_done(client_id)
+        return
+    from tools import _limit_set_exec
+    result = await _limit_set_exec(key=key, value=value)
     await push_tok(client_id, result)
     await conditional_push_done(client_id)
 
@@ -913,6 +956,10 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_tool_preview_length(client_id, arg, session)
                 elif cmd == "stream":
                     await cmd_stream(client_id, arg, session)
+                elif cmd == "limit_list":
+                    await cmd_limit_list(client_id)
+                elif cmd == "limit_set":
+                    await cmd_limit_set(client_id, arg)
                 elif cmd.endswith("_gate_read") or cmd.endswith("_gate_write"):
                     # Generic per-tool gate command: !<toolname>_gate_read / !<toolname>_gate_write
                     if cmd.endswith("_gate_read"):
@@ -1026,6 +1073,12 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "stream":
             await cmd_stream(client_id, arg, session)
+            return
+        if cmd == "limit_list":
+            await cmd_limit_list(client_id)
+            return
+        if cmd == "limit_set":
+            await cmd_limit_set(client_id, arg)
             return
         # Generic per-tool gate command: !<toolname>_gate_read / !<toolname>_gate_write
         if cmd.endswith("_gate_read") or cmd.endswith("_gate_write"):
