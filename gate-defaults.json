@@ -1,0 +1,42 @@
+{
+  "db": {
+    "*": {
+      "read": true,
+      "write": false
+    },
+    "__meta__": {
+      "read": true,
+      "write": false
+    }
+  },
+  "tools": {
+    "search_ddgs": {
+      "read": true
+    },
+    "search_google": {
+      "read": true
+    },
+    "search_tavily": {
+      "read": true
+    },
+    "search_xai": {
+      "read": true
+    },
+    "session": {
+      "read": true
+    },
+    "url_extract": {
+      "read": true
+    },
+    "google_drive": {
+      "read": true
+    },
+    "limit_list": {
+      "read": false
+    },
+    "tmux": {
+      "read": false,
+      "write": false
+    }
+  }
+}

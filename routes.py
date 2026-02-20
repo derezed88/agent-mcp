@@ -70,6 +70,16 @@ async def cmd_help(client_id: str):
         "  !google_drive_gate_read <t|f>             - gate Drive reads: true=gated, false=auto-allow\n"
         "  !google_drive_gate_write <t|f>            - gate Drive writes: true=gated, false=auto-allow\n"
         "\n"
+        "Shell Sessions (tmux):\n"
+        "  !tmux new <name>                          - create a new PTY shell session\n"
+        "  !tmux ls                                  - list active sessions\n"
+        "  !tmux kill-session <name>                 - terminate a session\n"
+        "  !tmux kill-server                         - terminate all sessions\n"
+        "  !tmux a <name>                            - show recent history for a session\n"
+        "  !tmux history-limit [n]                   - get/set rolling history line limit\n"
+        "  !tmux_gate_read <t|f>                     - gate tmux reads (ls, history): true=gated\n"
+        "  !tmux_gate_write <t|f>                    - gate tmux writes (new, exec, kill): true=gated\n"
+        "\n"
         "Gate Management (per-tool):\n"
         "  !gate_list                                - show live gate status for all tools\n"
         "  !gate_list_gate_read <t|f>                - gate gate_list: true=gated, false=auto-allow\n"
@@ -457,6 +467,48 @@ async def cmd_google_drive(client_id: str, args: str):
         await push_tok(client_id, result)
     except Exception as exc:
         await push_tok(client_id, f"ERROR: google_drive failed: {exc}")
+    await conditional_push_done(client_id)
+
+
+async def cmd_tmux(client_id: str, args: str):
+    """
+    Dispatch !tmux subcommands to the tmux plugin.
+    Usage:
+      !tmux new <name>              - create a new shell session
+      !tmux ls                      - list active sessions
+      !tmux kill-session <name>     - terminate a session
+      !tmux kill-server             - terminate all sessions
+      !tmux a <name>                - show recent history for a session
+      !tmux history-limit [n]       - get/set rolling history limit
+    """
+    from tools import get_tool_executor
+    if get_tool_executor("tmux_exec") is None:
+        await push_tok(client_id, "ERROR: tmux plugin not loaded.")
+        await conditional_push_done(client_id)
+        return
+
+    parts = args.split(maxsplit=1)
+    if not parts:
+        await push_tok(client_id,
+            "Usage: !tmux <subcommand> [args]\n"
+            "  !tmux new <name>              - create a new shell session\n"
+            "  !tmux ls                      - list active sessions\n"
+            "  !tmux kill-session <name>     - terminate a session\n"
+            "  !tmux kill-server             - terminate all sessions\n"
+            "  !tmux a <name>                - show recent history for a session\n"
+            "  !tmux history-limit [n]       - get/set rolling history limit")
+        await conditional_push_done(client_id)
+        return
+
+    subcommand = parts[0].strip()
+    sub_args = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        from plugin_tmux import tmux_command
+        result = await tmux_command(subcommand, sub_args)
+        await push_tok(client_id, result)
+    except Exception as exc:
+        await push_tok(client_id, f"ERROR: !tmux {subcommand} failed: {exc}")
     await conditional_push_done(client_id)
 
 
@@ -933,6 +985,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_url_extract(client_id, arg)
                 elif cmd == "google_drive":
                     await cmd_google_drive(client_id, arg)
+                elif cmd == "tmux":
+                    await cmd_tmux(client_id, arg)
                 elif cmd == "get_system_info":
                     await cmd_get_system_info(client_id)
                 elif cmd == "llm_list":
@@ -1040,6 +1094,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "google_drive":
             await cmd_google_drive(client_id, arg)
+            return
+        if cmd == "tmux":
+            await cmd_tmux(client_id, arg)
             return
         if cmd == "get_system_info":
             await cmd_get_system_info(client_id)

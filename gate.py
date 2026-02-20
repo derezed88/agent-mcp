@@ -315,6 +315,56 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         pending_gates.pop(gate_id, None)
         return decision == "allow"
 
+    # tmux read tools: tmux_ls, tmux_history — gated via tmux_gate_read
+    if tool_name in ("tmux_ls", "tmux_history"):
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("tmux", {})
+        if tool_perms.get("read", default_perms.get("read", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "read"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
+    # tmux write tools: tmux_new, tmux_exec, tmux_kill_session, tmux_kill_server,
+    #                   tmux_history_limit — gated via tmux_gate_write
+    if tool_name in ("tmux_new", "tmux_exec", "tmux_kill_session",
+                     "tmux_kill_server", "tmux_history_limit"):
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("tmux", {})
+        if tool_perms.get("write", default_perms.get("write", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "write"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
     # All registered extract tools are read-only — checked dynamically from plugin registry
     if tool_name in get_gate_tools_by_type("extract"):
         default_perms = tool_gate_state.get("*", {})

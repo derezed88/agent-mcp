@@ -11,16 +11,17 @@
     "plugin_search_xai",
     "plugin_proxy_llama",
     "plugin_client_slack",
-    "plugin_urlextract_tavily"
+    "plugin_urlextract_tavily",
+    "plugin_tmux"
   ],
   "plugin_config": {
     "plugin_proxy_llama": {
-      "enabled": false,
+      "enabled": true,
       "llama_port": 11434,
       "llama_host": "0.0.0.0"
     },
     "plugin_client_slack": {
-      "enabled": false,
+      "enabled": true,
       "slack_port": 8766,
       "slack_host": "0.0.0.0",
       "inter_turn_timeout": 30
@@ -34,6 +35,10 @@
       "enabled": true,
       "api_port": 8767,
       "api_host": "0.0.0.0"
+    },
+    "plugin_tmux": {
+      "enabled": true,
+      "TMUX_HISTORY_LIMIT": 200
     }
   },
   "rate_limits": {
@@ -76,5 +81,6 @@
   "metadata": {
     "last_modified": "2026-02-18",
     "notes": "Configuration for enabled plugins. Modified by plugin-manager.py"
-  }
+  },
+  "default_model": "gemini25fl"
 }
