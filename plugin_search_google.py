@@ -15,7 +15,7 @@ class _GoogleSearchArgs(BaseModel):
     query: str = Field(description="Search query")
 
 
-async def google_search_executor(query: str) -> str:
+async def search_google_executor(query: str) -> str:
     """Execute Google search."""
     return await run_google_search(query)
 
@@ -54,9 +54,9 @@ class GoogleSearchPlugin(BasePlugin):
         self.enabled = False
 
     def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare google_search as a read-only gated search tool."""
+        """Declare search_google as a read-only gated search tool."""
         return {
-            "google_search": {
+            "search_google": {
                 "type": "search",
                 "operations": ["read"],
                 "description": "web search via Gemini grounding (read-only)"
@@ -68,8 +68,8 @@ class GoogleSearchPlugin(BasePlugin):
         return {
             "lc": [
                 StructuredTool.from_function(
-                    coroutine=google_search_executor,
-                    name="google_search",
+                    coroutine=search_google_executor,
+                    name="search_google",
                     description="Search the web using Google Search (Gemini grounding). Third-level fallback.",
                     args_schema=_GoogleSearchArgs,
                 )

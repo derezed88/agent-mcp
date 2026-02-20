@@ -193,28 +193,54 @@ async def send_gate_response(gate_id: str, decision: str):
 # Session Management
 # ---------------------------------------------------------------------------
 
-async def list_sessions():
-    """Fetch and display all sessions from server."""
+async def fetch_sessions() -> list[dict]:
+    """Fetch raw session list from server. Returns [] on error."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(f"{SERVER_HOST}/sessions")
             if resp.status_code == 200:
-                data = resp.json()
-                sessions = data.get("sessions", [])
-                if not sessions:
-                    await state.append_output("\n[shell] No active sessions found.\n")
-                    return
-                await state.append_output("\nActive Sessions:")
-                for s in sessions:
-                    current = " (YOU)" if s["client_id"] == CLIENT_ID else ""
-                    cid_short = s["client_id"][:8] + "..."
-                    await state.append_output(
-                        f"  {cid_short}{current} - Model: {s['model']} - "
-                        f"History: {s['history_length']} messages"
-                    )
-                await state.append_output(f"\nCurrent session: {CLIENT_ID[:8]}...\n")
-            else:
-                await state.append_output(f"[ERROR] Server returned {resp.status_code}: {resp.text}")
+                return resp.json().get("sessions", [])
+    except Exception:
+        pass
+    return []
+
+async def resolve_session_id(token: str) -> str | None:
+    """
+    Resolve a session token to a full session ID.
+    If token is an integer, look it up as a shorthand ID via the server.
+    Otherwise treat it as a full session ID and return as-is.
+    Returns None if shorthand not found.
+    """
+    try:
+        shorthand = int(token)
+        sessions = await fetch_sessions()
+        for s in sessions:
+            if s.get("shorthand_id") == shorthand:
+                return s["client_id"]
+        return None
+    except ValueError:
+        return token
+
+async def list_sessions():
+    """Fetch and display all sessions from server."""
+    try:
+        sessions = await fetch_sessions()
+        if not sessions:
+            await state.append_output("\n[shell] No active sessions found.\n")
+            return
+        await state.append_output("\nActive sessions:")
+        for s in sessions:
+            current = " (current)" if s["client_id"] == CLIENT_ID else ""
+            shorthand = s.get("shorthand_id", "?")
+            cid = s["client_id"]
+            model = s["model"]
+            history = s["history_length"]
+            peer_ip = s.get("peer_ip")
+            ip_str = f", ip={peer_ip}" if peer_ip else ""
+            await state.append_output(
+                f"  ID [{shorthand}] {cid}: model={model}, history={history} messages{ip_str}{current}"
+            )
+        await state.append_output("")
     except Exception as exc:
         await state.append_output(f"[ERROR] Failed to list sessions: {exc}")
 
@@ -514,8 +540,14 @@ async def user_input_handler(text: str) -> bool:
                 await list_sessions()
             else:
                 parts = arg.split(maxsplit=1)
-                session_id = parts[0]
+                token = parts[0]
                 action = parts[1] if len(parts) > 1 else "attach"
+
+                # Resolve shorthand integer → full UUID
+                session_id = await resolve_session_id(token)
+                if session_id is None:
+                    await state.append_output(f"[shell] Session ID [{token}] not found.")
+                    return True
 
                 if action == "delete":
                     await delete_session(session_id)

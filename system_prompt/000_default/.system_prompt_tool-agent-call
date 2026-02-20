@@ -1,0 +1,13 @@
+## tool-agent-call: agent_call tool definition
+
+### agent_call(agent_url: str, message: str, target_client_id: str = "") → str
+Send a message to another agent-mcp instance and return its response.
+Use for swarm coordination: delegate tasks, verify answers, or gather perspectives.
+Depth limited to 1 hop. Rate limited: 5 calls per 60 seconds per session.
+Remote session persists across calls from the same human session to the same URL.
+
+YOU orchestrate — make one agent_call per turn with a single direct question.
+The remote agent responds only; it cannot call agent_call itself (depth guard blocks it).
+Synthesize all responses after all turns are complete.
+
+To reset remote history: agent_call(url, "!reset")

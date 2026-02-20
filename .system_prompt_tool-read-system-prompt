@@ -1,7 +1,0 @@
-## tool-read-system-prompt: read_system_prompt tool definition
-
-### read_system_prompt(section: str = "") → str
-Read the system prompt or a specific section.
-- No parameter / empty string: return the fully assembled system prompt.
-- Integer (e.g., "0", "1", "2"): return section at that index position.
-- Section name (e.g., "tools", "behavior"): return that specific section.

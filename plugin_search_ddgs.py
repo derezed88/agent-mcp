@@ -15,7 +15,7 @@ class _DdgsSearchArgs(BaseModel):
     max_results: Optional[int] = Field(default=10, description="Maximum number of results to return (default: 10)")
 
 
-async def ddgs_search_executor(query: str, max_results: int = 10) -> str:
+async def search_ddgs_executor(query: str, max_results: int = 10) -> str:
     """Execute DuckDuckGo search."""
     return await _run_ddgs_search(query, max_results)
 
@@ -48,9 +48,9 @@ class SearchDdgsPlugin(BasePlugin):
         self.enabled = False
 
     def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare ddgs_search as a read-only gated search tool."""
+        """Declare search_ddgs as a read-only gated search tool."""
         return {
-            "ddgs_search": {
+            "search_ddgs": {
                 "type": "search",
                 "operations": ["read"],
                 "description": "web search via DuckDuckGo (read-only)"
@@ -62,8 +62,8 @@ class SearchDdgsPlugin(BasePlugin):
         return {
             "lc": [
                 StructuredTool.from_function(
-                    coroutine=ddgs_search_executor,
-                    name="ddgs_search",
+                    coroutine=search_ddgs_executor,
+                    name="search_ddgs",
                     description=(
                         "Search the web using DuckDuckGo (no API key required). "
                         "Returns titles, URLs, and snippets for top results."

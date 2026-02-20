@@ -13,4 +13,4 @@ When to use:
 CRITICAL: Always invoke db_query as a structured tool call. Never write raw SQL in your reply text.
 
 MANDATORY — persons and named individuals:
-Any question about a person by name or asking you to "describe" someone REQUIRES a db_query call to SELECT * FROM person before you say anything else. The database is the only source of truth for person details.
+Any question about a person by name (Mark, Lee, etc.) or asking you to "describe" someone REQUIRES a db_query call to SELECT * FROM person before you say anything else. The database is the only source of truth for person details.

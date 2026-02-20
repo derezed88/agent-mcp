@@ -1,5 +1,6 @@
 {
   "version": "1.0.0",
+  "default_model": "gemini25",
   "models": {
     "nuc11": {
       "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
@@ -10,7 +11,8 @@
       "enabled": true,
       "description": "Remote llama.cpp server via SSH tunnel (e.g. Pinggy)",
       "tool_call_available": false,
-      "llm_call_timeout": 60
+      "llm_call_timeout": 60,
+      "system_prompt_folder": "system_prompt/000_default"
     },
     "nuc11Local": {
       "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
@@ -21,7 +23,8 @@
       "enabled": true,
       "description": "Local llama.cpp server on LAN",
       "tool_call_available": true,
-      "llm_call_timeout": 120
+      "llm_call_timeout": 120,
+      "system_prompt_folder": "system_prompt/000_default"
     },
     "gpt52": {
       "model_id": "gpt-5.2",
@@ -32,7 +35,8 @@
       "enabled": true,
       "description": "OpenAI GPT-5.2",
       "tool_call_available": false,
-      "llm_call_timeout": 60
+      "llm_call_timeout": 60,
+      "system_prompt_folder": "system_prompt/000_default"
     },
     "grok4": {
       "model_id": "grok-4-1-fast-reasoning",
@@ -43,7 +47,8 @@
       "enabled": true,
       "description": "xAI Grok-4 with fast reasoning",
       "tool_call_available": false,
-      "llm_call_timeout": 60
+      "llm_call_timeout": 60,
+      "system_prompt_folder": "system_prompt/000_default"
     },
     "gemini25": {
       "model_id": "gemini-2.5-flash",
@@ -54,11 +59,12 @@
       "enabled": true,
       "description": "Google Gemini 2.5 Flash",
       "tool_call_available": false,
-      "llm_call_timeout": 60
+      "llm_call_timeout": 60,
+      "system_prompt_folder": "system_prompt/000_default"
     }
   },
   "metadata": {
-    "last_modified": "2026-02-18",
+    "last_modified": "2026-02-19",
     "notes": "LLM model registry. Modified by plugin-manager.py model commands."
   }
 }

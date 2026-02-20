@@ -5,12 +5,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from config import log, LLM_REGISTRY, DEFAULT_MODEL, SYSTEM_PROMPT_FILE, save_llm_model_field
+from config import log, LLM_REGISTRY, DEFAULT_MODEL, save_llm_model_field
 from state import sessions, get_queue, push_tok, push_done, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task
 from database import execute_sql
-from prompt import get_current_prompt, load_system_prompt, get_section, list_sections
+from prompt import (sp_list_files, sp_read_prompt, sp_read_file, sp_write_file,
+                    sp_delete_file, sp_delete_directory, sp_copy_directory, sp_set_directory,
+                    sp_resolve_model)
 from agents import dispatch_llm
-from tools import get_gate_tools_by_type, get_all_gate_tools
+from tools import get_all_gate_tools, get_tool_executor
 
 # Context flag for batch command processing
 _batch_mode = {}  # client_id -> bool
@@ -21,61 +23,70 @@ async def conditional_push_done(client_id: str):
         await push_done(client_id)
 
 async def cmd_help(client_id: str):
-    # Build dynamic AI tools section from gate registry
     gate_tools = get_all_gate_tools()
     tool_lines = []
     for tool_name, meta in sorted(gate_tools.items(), key=lambda x: (x[1].get("type",""), x[0])):
         desc = meta.get("description", "")
         tool_lines.append(f"  {tool_name:<30} - {desc}")
-    tool_lines.append("  update_system_prompt           - edit specific section of system prompt (write gate)")
-    tool_lines.append("  read_system_prompt             - read full prompt or section (auto-allowed, no gate)")
-    tool_lines.append("  get_system_info                - read local date/time (auto-allowed, no gate)")
-
-    # Search/extract tool names for the autogate hint
-    search_tools = get_gate_tools_by_type("search")
-    extract_tools = get_gate_tools_by_type("extract")
-    search_hint = ""
-    if search_tools:
-        search_hint += f"  (use '!autogate search true' to toggle gate for: {', '.join(search_tools)})\n"
-    if extract_tools:
-        search_hint += f"  (use '!autogate extract true' to toggle gate for: {', '.join(extract_tools)})\n"
 
     help_text = (
         "Available commands:\n"
         "  !model                                    - list available models (current marked)\n"
         "  !model <key>                              - switch active LLM\n"
-        "  !input_lines <n>                          - resize input area (client-side)\n"
         "  !reset                                    - clear conversation history\n"
-        "  !db <sql>                                 - run SQL directly (no LLM, no gate)\n"
         "  !help                                     - this help\n"
-        "\n"
-        "Gate Management:\n"
-        "  !autoAIdb <table> [read|write] <t|f>      - toggle gate for specific DB table\n"
-        "  !autoAIdb <read|write> <t|f>              - set DEFAULT for all tables (wildcard)\n"
-        "  !autoAIdb \\_\\_meta\\_\\_ read <t|f>             - toggle gate for metadata tables\n"
-        "  !autoAIdb status                          - show current DB gate settings\n"
-        "  !autogate search <t|f>                    - toggle gate for ALL search tools\n"
-        "  !autogate <search_tool> <t|f>             - toggle gate for one search tool\n"
-        "  !autogate extract <t|f>                   - toggle gate for ALL extract tools\n"
-        "  !autogate <extract_tool> <t|f>            - toggle gate for one extract tool\n"
-        "  !autogate drive [read|write] <t|f>        - toggle gate for Drive (read/write separate)\n"
-        "  !autogate <read|write> <t|f>              - set DEFAULT for all tools (wildcard)\n"
-        "  !autogate status                          - show current tool gate settings\n"
-        "  !autoAISysPrompt [read|write] <t|f>       - toggle gate for system prompt operations\n"
-        "  !autoAISysPrompt                          - show current system prompt gate settings\n"
+        "  !input_lines <n>                          - resize input area (client-side only)\n"
         "\n"
         "System Prompt:\n"
-        "  !sysprompt                                - show the current live system prompt\n"
-        "  !sysprompt reload                         - reload .system_prompt from disk\n"
-        "  !read_system_prompt                       - show the full assembled system prompt\n"
-        "  !read_system_prompt <index>               - show section by index (0, 1, 2...)\n"
-        "  !read_system_prompt <name>                - show section by name (tools, behavior, etc.)\n"
+        "  !sysprompt_list <model|self>              - list system prompt files for a model\n"
+        "  !sysprompt_read <model|self>              - read full assembled prompt for a model\n"
+        "  !sysprompt_read <model|self> <file>       - read a specific file for a model\n"
+        "  !sysprompt_write <model|self> <file> <data> - write/create a file for a model\n"
+        "  !sysprompt_delete <model|self>            - delete entire prompt folder for model\n"
+        "  !sysprompt_delete <model|self> <file>     - delete a specific file for model\n"
+        "  !sysprompt_copy_dir <model|self> <newdir> - copy prompt folder to new directory\n"
+        "  !sysprompt_set_dir <model|self> <dir>     - assign prompt folder to model\n"
         "\n"
-        "Session Management:\n"
+        "Database:\n"
+        "  !db_query <sql>                           - run SQL directly (no LLM)\n"
+        "  !db_query_gate_read [table|*] <t|f>       - toggle read gate for DB table\n"
+        "  !db_query_gate_write [table|*] <t|f>      - toggle write gate for DB table\n"
+        "  !db_query_gate_status                     - show DB gate settings\n"
+        "\n"
+        "Search & Extract:\n"
+        "  !search_ddgs <query>                      - search via DuckDuckGo\n"
+        "  !search_google <query>                    - search via Google (Gemini grounding)\n"
+        "  !search_tavily <query>                    - search via Tavily AI\n"
+        "  !search_xai <query>                       - search via xAI Grok\n"
+        "  !url_extract <url> [query]                - extract web page content\n"
+        "  !search_ddgs_gate_read <t|f>              - toggle gate for search_ddgs\n"
+        "  !search_google_gate_read <t|f>            - toggle gate for search_google\n"
+        "  !search_tavily_gate_read <t|f>            - toggle gate for search_tavily\n"
+        "  !search_xai_gate_read <t|f>               - toggle gate for search_xai\n"
+        "  !url_extract_gate_read <t|f>              - toggle gate for url_extract\n"
+        "\n"
+        "Google Drive:\n"
+        "  !google_drive <operation> [args...]       - Drive CRUD operation\n"
+        "  !google_drive_gate_read <t|f>             - toggle read gate for google_drive\n"
+        "  !google_drive_gate_write <t|f>            - toggle write gate for google_drive\n"
+        "\n"
+        "Gate Management (per-tool):\n"
+        "  !sysprompt_gate_write <t|f>               - toggle write gate for sysprompt_* write ops\n"
+        "  !session_gate_read <t|f>                  - toggle gate for session list\n"
+        "  !session_gate_write <t|f>                 - toggle gate for session delete\n"
+        "  !model_gate_write <t|f>                   - toggle gate for model set\n"
+        "  !reset_gate_write <t|f>                   - toggle gate for reset\n"
+        "\n"
+        "Session:\n"
         "  !session                                  - list all active sessions\n"
         "  !session <ID> delete                      - delete a session from server\n"
         "  !tool_preview_length [n]                  - get/set tool result display limit (0=unlimited, default=500)\n"
-        "  !gate_preview_length [n]                  - get/set gate popup preview limit (client-side)\n"
+        "\n"
+        "Utilities:\n"
+        "  !get_system_info                          - show date/time/status\n"
+        "  !llm_list                                 - list LLM models\n"
+        "  !llm_clean_text <model> <prompt>          - call model with clean context\n"
+        "  !llm_clean_tool <model> <tool> <args>     - delegate tool call to model\n"
         "\n"
         "LLM Delegation:\n"
         "  !llm_call                                 - list models with tool_call_available status\n"
@@ -83,559 +94,377 @@ async def cmd_help(client_id: str):
         "  !llm_call <true|false>                    - set tool_call_available for ALL models\n"
         "  !llm_timeout <model> <seconds>            - set llm_call_timeout for a model\n"
         "  !llm_timeout <seconds>                    - set timeout for ALL models\n"
-        "  !llm_timeout                              - list current timeouts\n"
+        "  !stream <true|false>                      - enable/disable agent_call streaming\n"
         "\n"
-        "AI tools (require human gate approval unless noted):\n"
+        "AI tools (gated unless noted):\n"
         + "\n".join(tool_lines) + "\n"
-        + "  llm_clean_text(model, prompt)             - send prompt to target LLM with no context (text only)\n"
-        "  llm_clean_tool(model, tool, arguments)    - delegate one tool call to target LLM (gates apply)\n"
-        "  llm_list()                                - list models and tool_call_available status\n"
-        + search_hint
+        + "  get_system_info()                         - auto-allowed, no gate\n"
+        "  llm_clean_text(model, prompt)             - rate limited\n"
+        "  llm_clean_tool(model, tool, args)         - rate limited\n"
+        "  llm_list()                                - auto-allowed\n"
+        "  sysprompt_list/read                       - auto-allowed\n"
+        "  sysprompt_write/delete/copy_dir/set_dir   - write gate\n"
+        "  session/model/reset                       - per-action gate\n"
     )
     await push_tok(client_id, help_text)
     await conditional_push_done(client_id)
 
-async def cmd_sysprompt(client_id: str, arg: str):
-    """Show or reload the system prompt."""
-    arg = arg.strip()
-    if arg == "reload":
-        p = load_system_prompt()
-        await push_tok(client_id, f"System prompt reloaded from disk ({len(p)} chars).")
-    elif arg == "":
-        await push_tok(client_id, f"--- Current system prompt ---\n{get_current_prompt()}")
-    else:
-        await push_tok(client_id,
-            f"ERROR: Unknown argument '{arg}'\n"
-            "Usage: !sysprompt [reload]\n"
-            "  !sysprompt        - show current prompt\n"
-            "  !sysprompt reload - reload from .system_prompt file")
+async def cmd_sysprompt_list(client_id: str, model: str, session: dict):
+    """List system prompt files for a model."""
+    resolved = sp_resolve_model(model.strip(), session.get("model", ""))
+    result = sp_list_files(resolved, LLM_REGISTRY)
+    await push_tok(client_id, result)
     await conditional_push_done(client_id)
 
-async def cmd_autoaidb(client_id: str, args: str):
-    """
-    Toggle human gate for database operations per table.
-    Usage: !autoAIdb <table> [read|write] <true|false>
-    """
-    parts = args.split()
 
-    # Validation helpers
+async def cmd_sysprompt_read(client_id: str, args: str, session: dict):
+    """
+    Read system prompt for a model (full or specific file).
+    Usage: !sysprompt_read <model|self> [file]
+    """
+    parts = args.split(maxsplit=1)
+    if not parts:
+        await push_tok(client_id, "Usage: !sysprompt_read <model|self> [file]")
+        await conditional_push_done(client_id)
+        return
+    model = parts[0].strip()
+    file = parts[1].strip() if len(parts) > 1 else ""
+    resolved = sp_resolve_model(model, session.get("model", ""))
+    if file:
+        result = sp_read_file(resolved, file, LLM_REGISTRY)
+    else:
+        result = sp_read_prompt(resolved, LLM_REGISTRY)
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_sysprompt_write(client_id: str, args: str, session: dict):
+    """
+    Write/create a system prompt file for a model.
+    Usage: !sysprompt_write <model|self> <file> <data...>
+    """
+    parts = args.split(maxsplit=2)
+    if len(parts) < 3:
+        await push_tok(client_id,
+            "Usage: !sysprompt_write <model|self> <file> <data>\n"
+            "  data is everything after the file argument.")
+        await conditional_push_done(client_id)
+        return
+    model, file, data = parts[0].strip(), parts[1].strip(), parts[2]
+    resolved = sp_resolve_model(model, session.get("model", ""))
+    result = sp_write_file(resolved, file, data, LLM_REGISTRY)
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_sysprompt_delete(client_id: str, args: str, session: dict):
+    """
+    Delete system prompt file or entire folder for a model.
+    Usage: !sysprompt_delete <model|self> [file]
+    """
+    parts = args.split(maxsplit=1)
+    if not parts:
+        await push_tok(client_id, "Usage: !sysprompt_delete <model|self> [file]")
+        await conditional_push_done(client_id)
+        return
+    model = parts[0].strip()
+    file = parts[1].strip() if len(parts) > 1 else ""
+    resolved = sp_resolve_model(model, session.get("model", ""))
+    if file:
+        result = sp_delete_file(resolved, file, LLM_REGISTRY)
+    else:
+        result = sp_delete_directory(resolved, LLM_REGISTRY)
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_sysprompt_copy_dir(client_id: str, args: str, session: dict):
+    """
+    Copy model's prompt folder to a new directory.
+    Usage: !sysprompt_copy_dir <model|self> <newdir>
+    """
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        await push_tok(client_id, "Usage: !sysprompt_copy_dir <model|self> <newdir>")
+        await conditional_push_done(client_id)
+        return
+    model, new_dir = parts[0].strip(), parts[1].strip()
+    resolved = sp_resolve_model(model, session.get("model", ""))
+    result = sp_copy_directory(resolved, new_dir, LLM_REGISTRY)
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_sysprompt_set_dir(client_id: str, args: str, session: dict):
+    """
+    Set model's system_prompt_folder.
+    Usage: !sysprompt_set_dir <model|self> <dir>
+    """
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        await push_tok(client_id, "Usage: !sysprompt_set_dir <model|self> <dir>")
+        await conditional_push_done(client_id)
+        return
+    model, dir_name = parts[0].strip(), parts[1].strip()
+    resolved = sp_resolve_model(model, session.get("model", ""))
+    result = sp_set_directory(resolved, dir_name)
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+async def cmd_gate(client_id: str, tool_name: str, perm_type: str, flag_arg: str):
+    """
+    Generic gate toggle command.
+    tool_name: name used in tool_gate_state or auto_aidb_state
+    perm_type: "read" or "write"
+    flag_arg: <table|*> <true|false>  (for db_query) or just <true|false>
+    """
     def is_valid_bool(s: str) -> bool:
         return s in ("true", "1", "yes", "false", "0", "no")
 
     def parse_bool(s: str) -> bool:
         return s in ("true", "1", "yes")
 
-    # Show status
-    if len(parts) == 1 and parts[0].lower() == "status":
-        if not auto_aidb_state:
-            await push_tok(client_id, "No database gate settings configured (all tables gated by default)")
+    flag_parts = flag_arg.split()
+
+    # db_query gate: may have table name prefix
+    if tool_name == "db_query":
+        if len(flag_parts) == 2:
+            table, flag = flag_parts[0], flag_parts[1].lower()
+        elif len(flag_parts) == 1:
+            table, flag = "*", flag_parts[0].lower()
         else:
-            lines = ["Database gate settings (set this session — resets on restart):"]
-            for key, perms in auto_aidb_state.items():
-                label = "(wildcard — applies to all tables)" if key == "*" else \
-                        "(metadata: SHOW/DESCRIBE)" if key == "__meta__" else key
-                read_s = "auto-allow" if perms.get("read") else "gated"
-                write_s = "auto-allow" if perms.get("write") else "gated"
-                lines.append(f"  {label}: read={read_s}, write={write_s}")
-            await push_tok(client_id, "\n".join(lines))
-        await conditional_push_done(client_id)
-        return
-
-    # Format: !autoAIdb <table> <read|write> <true|false>
-    if len(parts) == 3:
-        table, perm_type, flag = parts[0].lower(), parts[1].lower(), parts[2].lower()
-
-        # Validate permission type
-        if perm_type not in ("read", "write"):
             await push_tok(client_id,
-                f"ERROR: Permission type must be 'read' or 'write', got '{perm_type}'\n"
-                f"Usage: !autoAIdb {table} <read|write> <true|false>")
+                f"Usage: !db_query_gate_{perm_type} [table|*] <true|false>\n"
+                "  Omit table to set wildcard default (*) for all tables.")
             await conditional_push_done(client_id)
             return
 
-        # Validate boolean
         if not is_valid_bool(flag):
             await push_tok(client_id,
-                f"ERROR: Invalid value '{flag}'. Must be one of: true, false, 1, 0, yes, no\n"
-                f"Usage: !autoAIdb {table} {perm_type} <true|false>")
+                f"ERROR: Invalid value '{flag}'. Must be true/false/1/0/yes/no")
             await conditional_push_done(client_id)
             return
 
+        is_auto = parse_bool(flag)
         if table not in auto_aidb_state:
             auto_aidb_state[table] = {"read": False, "write": False}
-
-        is_enabled = parse_bool(flag)
-        auto_aidb_state[table][perm_type] = is_enabled
-        status = "auto-allow (gate OFF)" if is_enabled else "gated (gate ON)"
-        await push_tok(client_id, f"autoAIdb {table} {perm_type}: {status}")
-
-    # Two arguments: Could be <table> <true|false> OR <read|write> <true|false>
-    elif len(parts) == 2:
-        arg1, arg2 = parts[0].lower(), parts[1].lower()
-
-        # Check if first arg is a permission type (read/write)
-        # Special case: Allow setting default for ALL tables
-        if arg1 in ("read", "write"):
-            # Validate boolean
-            if not is_valid_bool(arg2):
-                await push_tok(client_id,
-                    f"ERROR: Invalid value '{arg2}'. Must be one of: true, false, 1, 0, yes, no\n"
-                    f"Usage: !autoAIdb {arg1} <true|false>")
-                await conditional_push_done(client_id)
-                return
-
-            # Set default for ALL tables (using special "*" key)
-            perm_type = arg1
-            is_enabled = parse_bool(arg2)
-
-            # Apply to the default wildcard
-            if "*" not in auto_aidb_state:
-                auto_aidb_state["*"] = {"read": False, "write": False}
-            auto_aidb_state["*"][perm_type] = is_enabled
-
-            # Also apply to __meta__ (system queries like SHOW TABLES, DESCRIBE)
-            # This ensures metadata queries inherit the same permission
+        auto_aidb_state[table][perm_type] = is_auto
+        if table == "*":
+            # Also apply to __meta__
             if "__meta__" not in auto_aidb_state:
                 auto_aidb_state["__meta__"] = {"read": False, "write": False}
-            auto_aidb_state["__meta__"][perm_type] = is_enabled
+            auto_aidb_state["__meta__"][perm_type] = is_auto
+            label = "DEFAULT (*)"
+        else:
+            label = table
+        status = "auto-allow (gate OFF)" if is_auto else "gated (gate ON)"
+        await push_tok(client_id, f"db_query_gate_{perm_type} {label}: {status}")
+        await conditional_push_done(client_id)
+        return
 
-            status = "auto-allow (gate OFF)" if is_enabled else "gated (gate ON)"
-            await push_tok(client_id,
-                f"autoAIdb DEFAULT {perm_type}: {status}\n"
-                f"This affects all tables AND metadata queries (SHOW/DESCRIBE) without specific settings.\n"
-                f"To set specific tables: !autoAIdb <table> {perm_type} <true|false>")
-            await conditional_push_done(client_id)
-            return
+    # status command
+    if flag_arg.strip().lower() == "status":
+        if tool_name == "db_query":
+            lines = ["DB gate settings:"]
+            for t, perms in auto_aidb_state.items():
+                label = "(default)" if t == "*" else t
+                r = "auto-allow" if perms.get("read") else "gated"
+                w = "auto-allow" if perms.get("write") else "gated"
+                lines.append(f"  {label}: read={r}, write={w}")
+            await push_tok(client_id, "\n".join(lines))
+        else:
+            perms = tool_gate_state.get(tool_name, {})
+            r = "auto-allow" if perms.get("read", False) else "gated"
+            w = "auto-allow" if perms.get("write", False) else "gated"
+            await push_tok(client_id, f"Gate for '{tool_name}': read={r}, write={w}")
+        await conditional_push_done(client_id)
+        return
 
-        # Legacy format: !autoAIdb <table> <true|false> - sets both read and write
-        table, flag = arg1, arg2
-
-        # Validate boolean
-        if not is_valid_bool(flag):
-            await push_tok(client_id,
-                f"ERROR: Invalid value '{flag}'. Must be one of: true, false, 1, 0, yes, no\n"
-                f"Usage: !autoAIdb {table} <true|false>")
-            await conditional_push_done(client_id)
-            return
-
-        is_enabled = parse_bool(flag)
-        auto_aidb_state[table] = {"read": is_enabled, "write": is_enabled}
-        status = "auto-allow (gate OFF)" if is_enabled else "gated (gate ON)"
-        await push_tok(client_id, f"autoAIdb {table} read+write: {status}")
-
-    else:
+    # Standard tool gate
+    if len(flag_parts) != 1:
         await push_tok(client_id,
-            "ERROR: Invalid arguments\n"
-            "Usage: !autoAIdb <table> [read|write] <true|false>\n"
-            "   or: !autoAIdb status\n"
-            "Examples:\n"
-            "  !autoAIdb person read true        - auto-allow SELECT on person table\n"
-            "  !autoAIdb __meta__ read true      - auto-allow SHOW/DESCRIBE queries\n"
-            "  !autoAIdb users write false       - require gate for INSERT/UPDATE/DELETE\n"
-            "  !autoAIdb logs true               - auto-allow both read and write")
+            f"Usage: !{tool_name}_gate_{perm_type} <true|false>")
+        await conditional_push_done(client_id)
+        return
 
+    flag = flag_parts[0].lower()
+    if not is_valid_bool(flag):
+        await push_tok(client_id,
+            f"ERROR: Invalid value '{flag}'. Must be true/false/1/0/yes/no")
+        await conditional_push_done(client_id)
+        return
+
+    is_auto = parse_bool(flag)
+    if tool_name not in tool_gate_state:
+        tool_gate_state[tool_name] = {"read": False, "write": False}
+    tool_gate_state[tool_name][perm_type] = is_auto
+    status = "auto-allow (gate OFF)" if is_auto else "gated (gate ON)"
+    await push_tok(client_id, f"{tool_name}_gate_{perm_type}: {status}")
     await conditional_push_done(client_id)
 
-async def cmd_autogate(client_id: str, args: str):
-    """
-    Toggle human gate for search and drive tools.
 
-    Search tools are read-only — no read/write distinction:
-      !autogate search <true|false>            - toggle gate for ALL loaded search tools
-      !autogate <search_tool_name> <true|false> - toggle gate for one specific search tool
-      !autogate search                          - show status of all search tools
-
-    Drive has separate read/write gates:
-      !autogate drive [read|write] <true|false> - toggle gate for drive operations
-      !autogate drive                            - show drive gate status
-
-    Other:
-      !autogate status                           - show all tool gate settings
-      !autogate <read|write> <true|false>        - set DEFAULT for all tools (wildcard)
-    """
-    parts = args.split()
-
-    def is_valid_bool(s: str) -> bool:
-        return s in ("true", "1", "yes", "false", "0", "no")
-
-    def parse_bool(s: str) -> bool:
-        return s in ("true", "1", "yes")
-
-    # Resolve alias to list of canonical tool names.
-    # Returns (tool_names, tool_group) or (None, None) if unknown.
-    # tool_group: "search" | "extract" | "drive" | None (drive is not read-only)
-    def resolve_tools(alias: str):
-        alias = alias.lower()
-        search_tools = get_gate_tools_by_type("search")
-        extract_tools = get_gate_tools_by_type("extract")
-        if alias == "search":
-            return search_tools, "search"
-        if alias in search_tools:
-            return [alias], "search"
-        if alias == "extract":
-            return extract_tools, "extract"
-        if alias in extract_tools:
-            return [alias], "extract"
-        if alias in ("drive", "google_drive"):
-            return ["google_drive"], None
-        return None, None
-
-    def valid_tool_list() -> str:
-        """Build a human-readable list of valid tool names from the registry."""
-        search_tools = get_gate_tools_by_type("search")
-        extract_tools = get_gate_tools_by_type("extract")
-        drive_tools = get_gate_tools_by_type("drive")
-        parts_list = []
-        if search_tools:
-            parts_list.append(f"search (expands to: {', '.join(search_tools)})")
-            parts_list.extend(search_tools)
-        if extract_tools:
-            parts_list.append(f"extract (expands to: {', '.join(extract_tools)})")
-            parts_list.extend(extract_tools)
-        if drive_tools:
-            parts_list.append("drive (or google_drive)")
-        return ", ".join(parts_list) if parts_list else "(no tools registered)"
-
-    # --- status ---
-    if len(parts) == 1 and parts[0].lower() == "status":
-        default_perms = tool_gate_state.get("*", {})
-        lines = ["Tool gate settings:"]
-
-        search_tools = get_gate_tools_by_type("search")
-        extract_tools = get_gate_tools_by_type("extract")
-
-        # Search tools
-        if search_tools:
-            lines.append("  Search tools (read-only):")
-            for t in search_tools:
-                perms = tool_gate_state.get(t, {})
-                read_val = perms.get("read", default_perms.get("read", False))
-                src = "(specific)" if t in tool_gate_state else "(default)"
-                read_str = "auto-allow (gate OFF)" if read_val else "gated (gate ON)"
-                lines.append(f"    {t} {src}: {read_str}")
-
-        # Extract tools
-        if extract_tools:
-            lines.append("  Extract tools (read-only):")
-            for t in extract_tools:
-                perms = tool_gate_state.get(t, {})
-                read_val = perms.get("read", default_perms.get("read", False))
-                src = "(specific)" if t in tool_gate_state else "(default)"
-                read_str = "auto-allow (gate OFF)" if read_val else "gated (gate ON)"
-                lines.append(f"    {t} {src}: {read_str}")
-
-        # Drive tool
-        lines.append("  Drive tool (read+write):")
-        drive_perms = tool_gate_state.get("google_drive", {})
-        read_val  = drive_perms.get("read",  default_perms.get("read",  False))
-        write_val = drive_perms.get("write", default_perms.get("write", False))
-        src = "(specific)" if "google_drive" in tool_gate_state else "(default)"
-        read_str  = "auto-allow (gate OFF)" if read_val  else "gated (gate ON)"
-        write_str = "auto-allow (gate OFF)" if write_val else "gated (gate ON)"
-        lines.append(f"    google_drive {src}: read={read_str}, write={write_str}")
-
-        # System prompt tools
-        lines.append("  System prompt tools:")
-        for t in ("read_system_prompt", "update_system_prompt"):
-            perms = tool_gate_state.get(t, {})
-            r = perms.get("read",  default_perms.get("read",  False))
-            w = perms.get("write", default_perms.get("write", False))
-            src = "(specific)" if t in tool_gate_state else "(default)"
-            r_str = "auto-allow (gate OFF)" if r else "gated (gate ON)"
-            w_str = "auto-allow (gate OFF)" if w else "gated (gate ON)"
-            lines.append(f"    {t} {src}: read={r_str}, write={w_str}")
-
-        # Wildcard default (if set)
-        if "*" in tool_gate_state:
-            wc = tool_gate_state["*"]
-            r_str = "auto-allow (gate OFF)" if wc.get("read",  False) else "gated (gate ON)"
-            w_str = "auto-allow (gate OFF)" if wc.get("write", False) else "gated (gate ON)"
-            lines.append(f"  DEFAULT (*): read={r_str}, write={w_str}")
-
+async def cmd_db_query_gate_status(client_id: str):
+    """Show DB gate settings."""
+    if not auto_aidb_state:
+        await push_tok(client_id, "No DB gate settings configured (all tables gated by default).")
+    else:
+        lines = ["DB gate settings:"]
+        for t, perms in auto_aidb_state.items():
+            label = "(default *)" if t == "*" else ("(metadata)" if t == "__meta__" else t)
+            r = "auto-allow" if perms.get("read") else "gated"
+            w = "auto-allow" if perms.get("write") else "gated"
+            lines.append(f"  {label}: read={r}, write={w}")
         await push_tok(client_id, "\n".join(lines))
-        await conditional_push_done(client_id)
-        return
-
-    # --- group status: !autogate search  OR  !autogate extract  OR  !autogate drive ---
-    if len(parts) == 1 and parts[0].lower() in ("search", "extract", "drive"):
-        group = parts[0].lower()
-        if group == "search":
-            tools_to_show = get_gate_tools_by_type("search")
-        elif group == "extract":
-            tools_to_show = get_gate_tools_by_type("extract")
-        else:
-            tools_to_show = ["google_drive"]
-        default_perms = tool_gate_state.get("*", {})
-        lines = [f"Gate status for {group}:"]
-        for t in tools_to_show:
-            perms = tool_gate_state.get(t, {})
-            read_val = perms.get("read", default_perms.get("read", False))
-            src = "(specific)" if t in tool_gate_state else "(default)"
-            if group in ("search", "extract"):
-                read_str = "auto-allow (gate OFF)" if read_val else "gated (gate ON)"
-                lines.append(f"  {t} {src}: {read_str}")
-            else:
-                write_val = perms.get("write", default_perms.get("write", False))
-                read_str  = "auto-allow (gate OFF)" if read_val  else "gated (gate ON)"
-                write_str = "auto-allow (gate OFF)" if write_val else "gated (gate ON)"
-                lines.append(f"  {t} {src}: read={read_str}, write={write_str}")
-        await push_tok(client_id, "\n".join(lines))
-        await conditional_push_done(client_id)
-        return
-
-    # --- 3 parts: !autogate <tool> <read|write> <true|false>  (drive only needs read/write) ---
-    if len(parts) == 3:
-        tool_alias, perm_type, flag = parts[0].lower(), parts[1].lower(), parts[2].lower()
-
-        tool_names, tool_group = resolve_tools(tool_alias)
-        if not tool_names:
-            await push_tok(client_id,
-                f"ERROR: Unknown tool '{tool_alias}'\n"
-                f"Valid tools: {valid_tool_list()}")
-            await conditional_push_done(client_id)
-            return
-
-        # Search and extract tools are read-only — reject write specification
-        if tool_group in ("search", "extract"):
-            await push_tok(client_id,
-                f"ERROR: {tool_group.title()} tools are read-only. Use:\n"
-                f"  !autogate {tool_alias} <true|false>")
-            await conditional_push_done(client_id)
-            return
-
-        if perm_type not in ("read", "write"):
-            await push_tok(client_id,
-                f"ERROR: Permission type must be 'read' or 'write', got '{perm_type}'\n"
-                f"Usage: !autogate {tool_alias} <read|write> <true|false>")
-            await conditional_push_done(client_id)
-            return
-
-        if not is_valid_bool(flag):
-            await push_tok(client_id,
-                f"ERROR: Invalid value '{flag}'. Must be one of: true, false, 1, 0, yes, no\n"
-                f"Usage: !autogate {tool_alias} {perm_type} <true|false>")
-            await conditional_push_done(client_id)
-            return
-
-        is_auto = parse_bool(flag)
-        for tool_name in tool_names:
-            if tool_name not in tool_gate_state:
-                tool_gate_state[tool_name] = {"read": False, "write": False}
-            tool_gate_state[tool_name][perm_type] = is_auto
-
-        status_str = "auto-allow (gate OFF)" if is_auto else "gated (gate ON)"
-        await push_tok(client_id, f"autogate {tool_alias} {perm_type}: {status_str}")
-
-    # --- 2 parts: !autogate <tool|read|write> <true|false> ---
-    elif len(parts) == 2:
-        arg1, arg2 = parts[0].lower(), parts[1].lower()
-
-        # Wildcard default: !autogate <read|write> <true|false>
-        if arg1 in ("read", "write"):
-            if not is_valid_bool(arg2):
-                await push_tok(client_id,
-                    f"ERROR: Invalid value '{arg2}'. Must be one of: true, false, 1, 0, yes, no\n"
-                    f"Usage: !autogate {arg1} <true|false>")
-                await conditional_push_done(client_id)
-                return
-
-            perm_type = arg1
-            is_auto = parse_bool(arg2)
-            if "*" not in tool_gate_state:
-                tool_gate_state["*"] = {"read": False, "write": False}
-            tool_gate_state["*"][perm_type] = is_auto
-
-            status_str = "auto-allow (gate OFF)" if is_auto else "gated (gate ON)"
-            await push_tok(client_id,
-                f"autogate DEFAULT {perm_type}: {status_str}\n"
-                f"This affects all tools without specific settings.")
-            await conditional_push_done(client_id)
-            return
-
-        # Tool toggle: !autogate <tool> <true|false>
-        tool_alias, flag = arg1, arg2
-        tool_names, tool_group = resolve_tools(tool_alias)
-        if not tool_names:
-            await push_tok(client_id,
-                f"ERROR: Unknown tool '{tool_alias}'\n"
-                f"Valid tools: {valid_tool_list()}")
-            await conditional_push_done(client_id)
-            return
-
-        if not is_valid_bool(flag):
-            await push_tok(client_id,
-                f"ERROR: Invalid value '{flag}'. Must be one of: true, false, 1, 0, yes, no\n"
-                f"Usage: !autogate {tool_alias} <true|false>")
-            await conditional_push_done(client_id)
-            return
-
-        is_auto = parse_bool(flag)
-        if tool_group in ("search", "extract"):
-            # Search/extract tools: only toggle the read gate
-            for tool_name in tool_names:
-                if tool_name not in tool_gate_state:
-                    tool_gate_state[tool_name] = {"read": False, "write": False}
-                tool_gate_state[tool_name]["read"] = is_auto
-            status_str = "auto-allow (gate OFF)" if is_auto else "gated (gate ON)"
-            group_names = ", ".join(tool_names)
-            label = f"{tool_group} ({group_names})" if tool_alias == tool_group else tool_alias
-            await push_tok(client_id, f"autogate {label}: {status_str}")
-        else:
-            # Drive: toggle both read and write
-            for tool_name in tool_names:
-                tool_gate_state[tool_name] = {"read": is_auto, "write": is_auto}
-            status_str = "auto-allow (gate OFF)" if is_auto else "gated (gate ON)"
-            await push_tok(client_id, f"autogate {tool_alias} read+write: {status_str}")
-
-    else:
-        search_tools = get_gate_tools_by_type("search")
-        extract_tools = get_gate_tools_by_type("extract")
-        example_search = search_tools[0] if search_tools else "ddgs_search"
-        example_extract = extract_tools[0] if extract_tools else "url_extract"
-        await push_tok(client_id,
-            "ERROR: Invalid arguments\n"
-            "Search tools (read-only):\n"
-            "  !autogate search <true|false>        - toggle gate for ALL search tools\n"
-            f"  !autogate {example_search} <true|false>  - toggle gate for one search tool\n"
-            "  !autogate search                     - show search gate status\n"
-            "Extract tools (read-only):\n"
-            "  !autogate extract <true|false>       - toggle gate for ALL extract tools\n"
-            f"  !autogate {example_extract} <true|false>  - toggle gate for one extract tool\n"
-            "  !autogate extract                    - show extract gate status\n"
-            "Drive tool (read+write):\n"
-            "  !autogate drive [read|write] <true|false>\n"
-            "  !autogate drive                      - show drive gate status\n"
-            "Other:\n"
-            "  !autogate status                     - show all gate settings\n"
-            "  !autogate <read|write> <true|false>  - set DEFAULT for all tools")
-
-    await conditional_push_done(client_id)
-
-async def cmd_read_system_prompt(client_id: str, arg: str = ""):
-    """
-    Read system prompt or specific section.
-    No arg: full prompt
-    Arg = index or section name: specific section
-    """
-    if not arg:
-        await push_tok(client_id, f"--- Cached system prompt ---\n{get_current_prompt()}")
-    else:
-        section_content = get_section(arg)
-        if section_content is None:
-            sections_info = list_sections()
-            section_list = "\n".join(
-                f"  [{s['index']}] {s['short-section-name']}: {s['description']}"
-                for s in sections_info
-            )
-            await push_tok(
-                client_id,
-                f"Section '{arg}' not found.\n\nAvailable sections:\n{section_list}"
-            )
-        else:
-            await push_tok(client_id, f"--- Section: {arg} ---\n{section_content}")
     await conditional_push_done(client_id)
 
 
-async def cmd_autoaisysprompt(client_id: str, arg: str):
-    """
-    Toggle human gate for update_system_prompt and read_system_prompt tools.
-    Usage: !autoAISysPrompt [read|write] <true|false>
-    """
-    parts = arg.split()
+# --- New tool action commands ---
 
-    # Initialize if needed
-    if "update_system_prompt" not in tool_gate_state:
-        tool_gate_state["update_system_prompt"] = {"read": False, "write": False}
-    if "read_system_prompt" not in tool_gate_state:
-        tool_gate_state["read_system_prompt"] = {"read": False, "write": False}
-
-    # No args - show current status
-    if not arg:
-        read_perms = tool_gate_state.get("read_system_prompt", {})
-        write_perms = tool_gate_state.get("update_system_prompt", {})
-        read_status = "OFF (auto-allow)" if read_perms.get("read", False) else "ON (human gates)"
-        write_status = "OFF (auto-allow)" if write_perms.get("write", False) else "ON (human gates)"
+async def cmd_db_query(client_id: str, sql: str):
+    """Execute SQL directly without LLM or human gate."""
+    sql = sql.strip()
+    if not sql:
         await push_tok(client_id,
-            f"autoAISysPrompt read:  {read_status}\n"
-            f"autoAISysPrompt write: {write_status}")
-        await conditional_push_done(client_id)
-        return
-
-    # Validate boolean values
-    def is_valid_bool(s: str) -> bool:
-        return s in ("true", "1", "yes", "false", "0", "no")
-
-    def parse_bool(s: str) -> bool:
-        return s in ("true", "1", "yes")
-
-    # Format: !autoAISysPrompt <read|write> <true|false>
-    if len(parts) == 2:
-        perm_type, flag = parts[0].lower(), parts[1].lower()
-
-        # Validate permission type
-        if perm_type not in ("read", "write"):
-            await push_tok(client_id,
-                "ERROR: Permission type must be 'read' or 'write'\n"
-                "Usage: !autoAISysPrompt [read|write] <true|false>")
-            await conditional_push_done(client_id)
-            return
-
-        # Validate boolean
-        if not is_valid_bool(flag):
-            await push_tok(client_id,
-                f"ERROR: Invalid value '{flag}'. Must be one of: true, false, 1, 0, yes, no\n"
-                f"Usage: !autoAISysPrompt {perm_type} <true|false>")
-            await conditional_push_done(client_id)
-            return
-
-        is_enabled = parse_bool(flag)
-        gate_status = "OFF (auto-allow)" if is_enabled else "ON (human gates)"
-
-        if perm_type == "read":
-            tool_gate_state["read_system_prompt"]["read"] = is_enabled
-            await push_tok(client_id, f"autoAISysPrompt read: {gate_status}")
-        else:  # write
-            tool_gate_state["update_system_prompt"]["write"] = is_enabled
-            await push_tok(client_id, f"autoAISysPrompt write: {gate_status}")
-
-    # One argument: Could be <true|false> (legacy) OR <read|write> (error - missing bool)
-    elif len(parts) == 1:
-        arg = parts[0].lower()
-
-        # Check if this is a permission type without a boolean
-        if arg in ("read", "write"):
-            await push_tok(client_id,
-                f"ERROR: Missing boolean value\n"
-                f"Usage: !autoAISysPrompt {arg} <true|false>\n"
-                f"Example: !autoAISysPrompt {arg} true")
-            await conditional_push_done(client_id)
-            return
-
-        # Legacy format: !autoAISysPrompt <true|false> (sets write only)
-        flag = arg
-
-        if not is_valid_bool(flag):
-            await push_tok(client_id,
-                f"ERROR: Invalid value '{flag}'. Must be one of: true, false, 1, 0, yes, no\n"
-                "Usage: !autoAISysPrompt [read|write] <true|false>")
-            await conditional_push_done(client_id)
-            return
-
-        is_enabled = parse_bool(flag)
-        tool_gate_state["update_system_prompt"]["write"] = is_enabled
-        gate_status = "OFF (auto-allow)" if is_enabled else "ON (human gates)"
-        await push_tok(client_id, f"autoAISysPrompt write: {gate_status}")
-
-    else:
-        await push_tok(client_id,
-            "ERROR: Invalid arguments\n"
-            "Usage: !autoAISysPrompt [read|write] <true|false>\n"
+            "Usage: !db_query <SQL>\n"
             "Examples:\n"
-            "  !autoAISysPrompt read true   - auto-allow read_system_prompt\n"
-            "  !autoAISysPrompt write false - require gate for update_system_prompt\n"
-            "  !autoAISysPrompt             - show current settings")
-
+            "  !db_query SELECT * FROM person\n"
+            "  !db_query SHOW TABLES")
+        await conditional_push_done(client_id)
+        return
+    try:
+        result = await execute_sql(sql)
+        await push_tok(client_id, result)
+    except Exception as exc:
+        await push_tok(client_id, f"ERROR: Database query failed\n{exc}")
     await conditional_push_done(client_id)
+
+
+async def cmd_search(client_id: str, engine: str, query: str):
+    """Execute a search using the named engine's executor."""
+    from tools import get_tool_executor
+    executor = get_tool_executor(f"search_{engine}")
+    if executor is None:
+        await push_tok(client_id, f"ERROR: Search engine 'search_{engine}' not loaded.")
+        await conditional_push_done(client_id)
+        return
+    if not query.strip():
+        await push_tok(client_id, f"Usage: !search_{engine} <query>")
+        await conditional_push_done(client_id)
+        return
+    try:
+        result = await executor(query=query.strip())
+        await push_tok(client_id, result)
+    except Exception as exc:
+        await push_tok(client_id, f"ERROR: search_{engine} failed: {exc}")
+    await conditional_push_done(client_id)
+
+
+async def cmd_url_extract(client_id: str, args: str):
+    """Extract content from a URL using Tavily."""
+    from tools import get_tool_executor
+    parts = args.split(maxsplit=1)
+    if not parts:
+        await push_tok(client_id, "Usage: !url_extract <url> [query]")
+        await conditional_push_done(client_id)
+        return
+    url = parts[0].strip()
+    # Slack wraps URLs in angle brackets: <https://example.com> or <https://example.com|display>
+    if url.startswith("<") and url.endswith(">"):
+        url = url[1:-1].split("|")[0]
+    query = parts[1].strip() if len(parts) > 1 else ""
+    executor = get_tool_executor("url_extract")
+    if executor is None:
+        await push_tok(client_id, "ERROR: url_extract plugin not loaded.")
+        await conditional_push_done(client_id)
+        return
+    try:
+        result = await executor(method="tavily", url=url, query=query)
+        await push_tok(client_id, result)
+    except Exception as exc:
+        await push_tok(client_id, f"ERROR: url_extract failed: {exc}")
+    await conditional_push_done(client_id)
+
+
+async def cmd_google_drive(client_id: str, args: str):
+    """Execute a Google Drive operation."""
+    parts = args.split(maxsplit=1)
+    if not parts:
+        await push_tok(client_id,
+            "Usage: !google_drive <operation> [file_id] [file_name] [content] [folder_id]\n"
+            "Operations: list, read, create, append, delete")
+        await conditional_push_done(client_id)
+        return
+    operation = parts[0].strip()
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    from drive import run_drive_op
+    try:
+        result = await run_drive_op(operation, None, rest or None, None, None)
+        await push_tok(client_id, result)
+    except Exception as exc:
+        await push_tok(client_id, f"ERROR: google_drive failed: {exc}")
+    await conditional_push_done(client_id)
+
+
+async def cmd_get_system_info(client_id: str):
+    """Show current date/time and system status."""
+    from tools import get_system_info
+    result = await get_system_info()
+    await push_tok(client_id, str(result))
+    await conditional_push_done(client_id)
+
+
+async def cmd_llm_list(client_id: str):
+    """List LLM models with their configuration."""
+    from agents import llm_list
+    result = await llm_list()
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_llm_clean_text(client_id: str, args: str):
+    """Call a model with clean context."""
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        await push_tok(client_id, "Usage: !llm_clean_text <model> <prompt>")
+        await conditional_push_done(client_id)
+        return
+    model, prompt = parts[0].strip(), parts[1].strip()
+    from agents import llm_clean_text
+    from state import current_client_id
+    token = current_client_id.set(client_id)
+    try:
+        result = await llm_clean_text(model=model, prompt=prompt)
+        await push_tok(client_id, result)
+    except Exception as exc:
+        await push_tok(client_id, f"ERROR: llm_clean_text failed: {exc}")
+    finally:
+        current_client_id.reset(token)
+    await conditional_push_done(client_id)
+
+
+async def cmd_llm_clean_tool(client_id: str, args: str):
+    """Delegate a tool call to a model."""
+    parts = args.split(maxsplit=2)
+    if len(parts) < 3:
+        await push_tok(client_id, "Usage: !llm_clean_tool <model> <tool> <arguments>")
+        await conditional_push_done(client_id)
+        return
+    model, tool, arguments = parts[0].strip(), parts[1].strip(), parts[2].strip()
+    from agents import llm_clean_tool
+    from state import current_client_id
+    token = current_client_id.set(client_id)
+    try:
+        result = await llm_clean_tool(model=model, tool=tool, arguments=arguments)
+        await push_tok(client_id, result)
+    except Exception as exc:
+        await push_tok(client_id, f"ERROR: llm_clean_tool failed: {exc}")
+    finally:
+        current_client_id.reset(token)
+    await conditional_push_done(client_id)
+
+
+
+
 
 
 async def cmd_list_models(client_id: str, current: str):
@@ -670,26 +499,6 @@ async def cmd_set_model(client_id: str, key: str, session: dict):
             f"Use !model to list all models")
     await conditional_push_done(client_id)
 
-async def cmd_db(client_id: str, sql: str):
-    """Execute SQL directly without LLM or human gate."""
-    sql = sql.strip()
-    if not sql:
-        await push_tok(client_id,
-            "ERROR: SQL query required\n"
-            "Usage: !db <SQL query>\n"
-            "Examples:\n"
-            "  !db SELECT * FROM person\n"
-            "  !db SHOW TABLES\n"
-            "  !db DESCRIBE users")
-        await conditional_push_done(client_id)
-        return
-
-    try:
-        result = await execute_sql(sql)
-        await push_tok(client_id, result)
-    except Exception as exc:
-        await push_tok(client_id, f"ERROR: Database query failed\n{exc}")
-    await conditional_push_done(client_id)
 
 async def cmd_reset(client_id: str, session: dict):
     """Clear conversation history for current session."""
@@ -721,7 +530,9 @@ async def cmd_session(client_id: str, arg: str):
                 model = data.get("model", "unknown")
                 history_len = len(data.get("history", []))
                 shorthand_id = get_or_create_shorthand_id(sid)
-                lines.append(f"  ID [{shorthand_id}] {sid}: model={model}, history={history_len} messages{marker}")
+                peer_ip = data.get("peer_ip")
+                ip_str = f", ip={peer_ip}" if peer_ip else ""
+                lines.append(f"  ID [{shorthand_id}] {sid}: model={model}, history={history_len} messages{ip_str}{marker}")
             await push_tok(client_id, "\n".join(lines))
     elif len(parts) == 2:
         target_arg, action = parts[0], parts[1].lower()
@@ -975,13 +786,48 @@ async def cmd_tool_preview_length(client_id: str, arg: str, session: dict):
     await conditional_push_done(client_id)
 
 
-async def process_request(client_id: str, text: str, raw_payload: dict):
+async def cmd_stream(client_id: str, arg: str, session: dict):
+    """
+    Get or set the agent_call streaming mode for this session.
+
+    When streaming is enabled (default), remote agent tokens are relayed via
+    push_tok in real-time so Slack and other clients see per-turn progress.
+    When disabled, agent_call blocks silently and returns only the final result.
+
+    !stream               - show current setting
+    !stream <true|false>  - enable or disable streaming
+    """
+    arg = arg.strip().lower()
+    if not arg:
+        current = session.get("agent_call_stream", True)
+        status = "enabled" if current else "disabled"
+        await push_tok(client_id, f"agent_call streaming: {status}")
+        await conditional_push_done(client_id)
+        return
+
+    if arg in ("true", "1", "yes", "on"):
+        session["agent_call_stream"] = True
+        await push_tok(client_id, "agent_call streaming enabled — remote tokens relayed in real-time.")
+    elif arg in ("false", "0", "no", "off"):
+        session["agent_call_stream"] = False
+        await push_tok(client_id, "agent_call streaming disabled — only final result returned.")
+    else:
+        await push_tok(client_id,
+            f"ERROR: Invalid value '{arg}'\n"
+            "Usage: !stream <true|false>")
+    await conditional_push_done(client_id)
+
+
+async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip: str = None):
     from state import get_or_create_shorthand_id
 
     if client_id not in sessions:
         sessions[client_id] = {"model": raw_payload.get("default_model", DEFAULT_MODEL), "history": []}
         # Assign shorthand ID when session is created
         get_or_create_shorthand_id(client_id)
+    # Store/update peer IP whenever we have it
+    if peer_ip:
+        sessions[client_id]["peer_ip"] = peer_ip
     session = sessions[client_id]
     stripped = text.strip()
 
@@ -1003,18 +849,40 @@ async def process_request(client_id: str, text: str, raw_payload: dict):
                     await cmd_help(client_id)
                 elif cmd == "reset":
                     await cmd_reset(client_id, session)
-                elif cmd == "db":
-                    await cmd_db(client_id, arg)
-                elif cmd == "autoaidb":
-                    await cmd_autoaidb(client_id, arg)
-                elif cmd == "autogate":
-                    await cmd_autogate(client_id, arg)
-                elif cmd == "sysprompt":
-                    await cmd_sysprompt(client_id, arg)
-                elif cmd == "read_system_prompt":
-                    await cmd_read_system_prompt(client_id, arg)
-                elif cmd == "autoaisysprompt":
-                    await cmd_autoaisysprompt(client_id, arg)
+                elif cmd == "db_query":
+                    await cmd_db_query(client_id, arg)
+                elif cmd == "db_query_gate_status":
+                    await cmd_db_query_gate_status(client_id)
+                elif cmd in ("db_query_gate_read", "db_query_gate_write"):
+                    perm = "read" if cmd == "db_query_gate_read" else "write"
+                    await cmd_gate(client_id, "db_query", perm, arg)
+                elif cmd == "sysprompt_list":
+                    await cmd_sysprompt_list(client_id, arg, session)
+                elif cmd == "sysprompt_read":
+                    await cmd_sysprompt_read(client_id, arg, session)
+                elif cmd == "sysprompt_write":
+                    await cmd_sysprompt_write(client_id, arg, session)
+                elif cmd == "sysprompt_delete":
+                    await cmd_sysprompt_delete(client_id, arg, session)
+                elif cmd == "sysprompt_copy_dir":
+                    await cmd_sysprompt_copy_dir(client_id, arg, session)
+                elif cmd == "sysprompt_set_dir":
+                    await cmd_sysprompt_set_dir(client_id, arg, session)
+                elif cmd in ("search_ddgs", "search_google", "search_tavily", "search_xai"):
+                    engine = cmd[len("search_"):]
+                    await cmd_search(client_id, engine, arg)
+                elif cmd == "url_extract":
+                    await cmd_url_extract(client_id, arg)
+                elif cmd == "google_drive":
+                    await cmd_google_drive(client_id, arg)
+                elif cmd == "get_system_info":
+                    await cmd_get_system_info(client_id)
+                elif cmd == "llm_list":
+                    await cmd_llm_list(client_id)
+                elif cmd == "llm_clean_text":
+                    await cmd_llm_clean_text(client_id, arg)
+                elif cmd == "llm_clean_tool":
+                    await cmd_llm_clean_tool(client_id, arg)
                 elif cmd == "model":
                     if arg:
                         await cmd_set_model(client_id, arg, session)
@@ -1028,6 +896,17 @@ async def process_request(client_id: str, text: str, raw_payload: dict):
                     await cmd_llm_timeout(client_id, arg)
                 elif cmd == "tool_preview_length":
                     await cmd_tool_preview_length(client_id, arg, session)
+                elif cmd == "stream":
+                    await cmd_stream(client_id, arg, session)
+                elif cmd.endswith("_gate_read") or cmd.endswith("_gate_write"):
+                    # Generic per-tool gate command: !<toolname>_gate_read / !<toolname>_gate_write
+                    if cmd.endswith("_gate_read"):
+                        tool_name = cmd[:-len("_gate_read")]
+                        perm = "read"
+                    else:
+                        tool_name = cmd[:-len("_gate_write")]
+                        perm = "write"
+                    await cmd_gate(client_id, tool_name, perm, arg)
                 else:
                     await push_tok(client_id, f"Unknown command: !{cmd}\nUse !help to see available commands.\n")
 
@@ -1059,23 +938,55 @@ async def process_request(client_id: str, text: str, raw_payload: dict):
         if cmd == "reset":
             await cmd_reset(client_id, session)
             return
-        if cmd == "db":
-            await cmd_db(client_id, arg)
+        if cmd == "db_query":
+            await cmd_db_query(client_id, arg)
             return
-        if cmd == "autoaidb":
-            await cmd_autoaidb(client_id, arg)
+        if cmd == "db_query_gate_status":
+            await cmd_db_query_gate_status(client_id)
             return
-        if cmd == "autogate":
-            await cmd_autogate(client_id, arg)
+        if cmd in ("db_query_gate_read", "db_query_gate_write"):
+            perm = "read" if cmd == "db_query_gate_read" else "write"
+            await cmd_gate(client_id, "db_query", perm, arg)
             return
-        if cmd == "sysprompt":
-            await cmd_sysprompt(client_id, arg)
+        if cmd == "sysprompt_list":
+            await cmd_sysprompt_list(client_id, arg, session)
             return
-        if cmd == "read_system_prompt":
-            await cmd_read_system_prompt(client_id, arg)
+        if cmd == "sysprompt_read":
+            await cmd_sysprompt_read(client_id, arg, session)
             return
-        if cmd == "autoaisysprompt":
-            await cmd_autoaisysprompt(client_id, arg)
+        if cmd == "sysprompt_write":
+            await cmd_sysprompt_write(client_id, arg, session)
+            return
+        if cmd == "sysprompt_delete":
+            await cmd_sysprompt_delete(client_id, arg, session)
+            return
+        if cmd == "sysprompt_copy_dir":
+            await cmd_sysprompt_copy_dir(client_id, arg, session)
+            return
+        if cmd == "sysprompt_set_dir":
+            await cmd_sysprompt_set_dir(client_id, arg, session)
+            return
+        if cmd in ("search_ddgs", "search_google", "search_tavily", "search_xai"):
+            engine = cmd[len("search_"):]
+            await cmd_search(client_id, engine, arg)
+            return
+        if cmd == "url_extract":
+            await cmd_url_extract(client_id, arg)
+            return
+        if cmd == "google_drive":
+            await cmd_google_drive(client_id, arg)
+            return
+        if cmd == "get_system_info":
+            await cmd_get_system_info(client_id)
+            return
+        if cmd == "llm_list":
+            await cmd_llm_list(client_id)
+            return
+        if cmd == "llm_clean_text":
+            await cmd_llm_clean_text(client_id, arg)
+            return
+        if cmd == "llm_clean_tool":
+            await cmd_llm_clean_tool(client_id, arg)
             return
         if cmd == "model":
             if arg:
@@ -1094,6 +1005,19 @@ async def process_request(client_id: str, text: str, raw_payload: dict):
             return
         if cmd == "tool_preview_length":
             await cmd_tool_preview_length(client_id, arg, session)
+            return
+        if cmd == "stream":
+            await cmd_stream(client_id, arg, session)
+            return
+        # Generic per-tool gate command: !<toolname>_gate_read / !<toolname>_gate_write
+        if cmd.endswith("_gate_read") or cmd.endswith("_gate_write"):
+            if cmd.endswith("_gate_read"):
+                tool_name = cmd[:-len("_gate_read")]
+                perm = "read"
+            else:
+                tool_name = cmd[:-len("_gate_write")]
+                perm = "write"
+            await cmd_gate(client_id, tool_name, perm, arg)
             return
 
         # Catch-all for unknown commands - don't pass to LLM
@@ -1154,18 +1078,29 @@ async def process_request(client_id: str, text: str, raw_payload: dict):
 async def endpoint_submit(request: Request) -> JSONResponse:
     try: payload = await request.json()
     except: return JSONResponse({"status": "error"}, 400)
-    
+
     client_id, text = payload.get("client_id"), payload.get("text", "")
     if not client_id or not text: return JSONResponse({"error": "Missing fields"}, 400)
-    
+
+    peer_ip = request.client.host if request.client else None
     await cancel_active_task(client_id)
-    task = asyncio.create_task(process_request(client_id, text, payload))
+    task = asyncio.create_task(process_request(client_id, text, payload, peer_ip=peer_ip))
     active_tasks[client_id] = task
     return JSONResponse({"status": "OK"})
 
 async def endpoint_stream(request: Request):
     client_id = request.query_params.get("client_id")
     if not client_id: return JSONResponse({"error": "Missing client_id"}, 400)
+
+    # Register session on connect so it shows up in !session before first message
+    from state import get_or_create_shorthand_id
+    if client_id not in sessions:
+        sessions[client_id] = {"model": DEFAULT_MODEL, "history": []}
+        get_or_create_shorthand_id(client_id)
+    peer_ip = request.client.host if request.client else None
+    if peer_ip:
+        sessions[client_id]["peer_ip"] = peer_ip
+
     q = await get_queue(client_id)
 
     async def generator() -> AsyncGenerator[dict, None]:
@@ -1207,7 +1142,7 @@ async def endpoint_health(request: Request) -> JSONResponse:
 
 async def endpoint_list_sessions(request: Request) -> JSONResponse:
     """List all active sessions with metadata."""
-    from state import sessions, sse_queues
+    from state import sessions, sse_queues, get_or_create_shorthand_id
 
     client_id_filter = request.query_params.get("client_id")
 
@@ -1217,8 +1152,10 @@ async def endpoint_list_sessions(request: Request) -> JSONResponse:
             continue
         session_list.append({
             "client_id": cid,
+            "shorthand_id": get_or_create_shorthand_id(cid),
             "model": data.get("model", "unknown"),
             "history_length": len(data.get("history", [])),
+            "peer_ip": data.get("peer_ip"),
         })
 
     return JSONResponse({"sessions": session_list})

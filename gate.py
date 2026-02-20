@@ -114,35 +114,26 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         pending_gates.pop(gate_id, None)
         return decision == "allow"
 
-    if tool_name == "update_system_prompt":
-        # update_system_prompt is always a write operation
+    if tool_name in ("get_system_info", "llm_list", "help", "sysprompt_list", "sysprompt_read",
+                     "llm_call", "llm_timeout", "stream", "tool_preview_length"):
+        return True
+
+    # sysprompt write operations — gated
+    if tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
         default_perms = tool_gate_state.get("*", {})
-        tool_perms = tool_gate_state.get("update_system_prompt", {})
-        # Use tool-specific setting, fall back to default
+        tool_perms = tool_gate_state.get("sysprompt_write", {})
         if tool_perms.get("write", default_perms.get("write", False)):
             return True
-
-        # Auto-reject for non-interactive clients (llama proxy, slack)
         if is_non_interactive:
             return False
-
         gate_data = {
-            "gate_id":   str(uuid.uuid4()),
+            "gate_id": str(uuid.uuid4()),
             "tool_name": tool_name,
-            "tool_args": {
-                "operation": tool_args.get("operation", "?"),
-                "content":   tool_args.get("content", ""),
-                "target":    tool_args.get("target", ""),
-                "operation_type": "write",
-            },
+            "tool_args": {**tool_args, "operation_type": "write"},
             "tables": [],
         }
-
         if is_api_client:
             return await do_api_gate(gate_data)
-
-        # Send full content — the client controls display truncation via gate_preview_length.
-        # Keys match the new surgical-op schema in tools.py.
         gate_id = gate_data["gate_id"]
         pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
         await push_gate(client_id, gate_data)
@@ -151,37 +142,81 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         pending_gates.pop(gate_id, None)
         return decision == "allow"
 
-    if tool_name == "get_system_info":
-        return True
-
-    if tool_name == "read_system_prompt":
-        # read_system_prompt is a read-only operation
+    # session: read gate for "list", write gate for "delete"
+    if tool_name == "session":
+        action = tool_args.get("action", "list")
+        perm_type = "write" if action == "delete" else "read"
         default_perms = tool_gate_state.get("*", {})
-        tool_perms = tool_gate_state.get("read_system_prompt", {})
-        # Use tool-specific setting, fall back to default
-        if tool_perms.get("read", default_perms.get("read", False)):
+        tool_perms = tool_gate_state.get("session", {})
+        if tool_perms.get(perm_type, default_perms.get(perm_type, False)):
             return True
-
-        # Auto-reject for non-interactive clients (llama proxy, slack)
         if is_non_interactive:
             return False
-
-        section = tool_args.get("section", "")
         gate_data = {
             "gate_id": str(uuid.uuid4()),
             "tool_name": tool_name,
-            "tool_args": {"section": section, "operation_type": "read"},
+            "tool_args": {**tool_args, "operation_type": perm_type},
             "tables": [],
         }
-
         if is_api_client:
             return await do_api_gate(gate_data)
-
         gate_id = gate_data["gate_id"]
         pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
         await push_gate(client_id, gate_data)
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
+    # model: list is auto-allowed; set requires write gate
+    if tool_name == "model":
+        action = tool_args.get("action", "list")
+        if action == "list":
+            return True
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("model", {})
+        if tool_perms.get("write", default_perms.get("write", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "write"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
+    # reset: write gate
+    if tool_name == "reset":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("reset", {})
+        if tool_perms.get("write", default_perms.get("write", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "write"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
         return decision == "allow"
 
     # All registered extract tools are read-only — checked dynamically from plugin registry

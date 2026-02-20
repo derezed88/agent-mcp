@@ -7,5 +7,4 @@ Returns for each model: name, type (OPENAI/GEMINI), model_id, host, max_context,
 tool_call_available (YES/NO), llm_call_timeout, and description.
 
 When to use:
-- Before calling llm_call_clean, to find a model with tool_call_available=YES.
-- When the user asks which LLM models are available or what their capabilities are.
+- Before calling llm_clean_text or llm_clean_tool, to find a model with tool_call_available=YES.

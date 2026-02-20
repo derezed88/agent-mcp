@@ -1036,6 +1036,180 @@ class PluginManager:
             return True
         return False
 
+    # ------------------------------------------------------------------
+    # Gate defaults management
+    # ------------------------------------------------------------------
+
+    # All known gate-able tools and the permission types they support.
+    # db_query is handled separately (per-table keys in the "db" section).
+    _GATE_TOOLS: dict[str, list[str]] = {
+        "search_ddgs":    ["read"],
+        "search_google":  ["read"],
+        "search_tavily":  ["read"],
+        "search_xai":     ["read"],
+        "url_extract":    ["read"],
+        "google_drive":   ["read", "write"],
+        "sysprompt_write": ["write"],
+        "session":        ["read", "write"],
+        "model":          ["write"],
+        "reset":          ["write"],
+    }
+
+    def _load_gate_defaults(self) -> dict:
+        """Load gate-defaults.json, returning empty structure if not present."""
+        try:
+            with open("gate-defaults.json", "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {"db": {}, "tools": {}}
+        except json.JSONDecodeError as e:
+            print(f"{Colors.RED}Error reading gate-defaults.json: {e}{Colors.RESET}")
+            return {"db": {}, "tools": {}}
+
+    def _save_gate_defaults(self, data: dict) -> bool:
+        """Save gate-defaults.json."""
+        try:
+            with open("gate-defaults.json", "w") as f:
+                json.dump(data, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"{Colors.RED}Error saving gate-defaults.json: {e}{Colors.RESET}")
+            return False
+
+    def gate_list(self):
+        """List all gate settings from gate-defaults.json."""
+        data = self._load_gate_defaults()
+        db_section = data.get("db", {})
+        tool_section = data.get("tools", {})
+
+        print(f"\n{Colors.BOLD}Gate Defaults{Colors.RESET}  (True = auto-allow, False = gated/requires approval)")
+        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}")
+
+        # DB gates
+        print(f"\n{Colors.BOLD}db_query (per-table):{Colors.RESET}")
+        if not db_section:
+            print(f"  {Colors.GRAY}(all tables gated by default){Colors.RESET}")
+        else:
+            for table in sorted(db_section.keys()):
+                perms = db_section[table]
+                label = "(default *)" if table == "*" else ("(metadata)" if table == "__meta__" else table)
+                r = perms.get("read", False)
+                w = perms.get("write", False)
+                r_str = f"{Colors.GREEN}auto-allow{Colors.RESET}" if r else f"{Colors.YELLOW}gated{Colors.RESET}"
+                w_str = f"{Colors.GREEN}auto-allow{Colors.RESET}" if w else f"{Colors.YELLOW}gated{Colors.RESET}"
+                print(f"  {label:<20} read={r_str}  write={w_str}")
+
+        # Tool gates
+        print(f"\n{Colors.BOLD}Tool gates:{Colors.RESET}")
+        for tool, supported_perms in sorted(self._GATE_TOOLS.items()):
+            perms = tool_section.get(tool, {})
+            parts = []
+            for perm in supported_perms:
+                val = perms.get(perm, False)
+                val_str = f"{Colors.GREEN}auto-allow{Colors.RESET}" if val else f"{Colors.YELLOW}gated{Colors.RESET}"
+                parts.append(f"{perm}={val_str}")
+            print(f"  {tool:<20} {' '.join(parts)}")
+
+        print()
+        print(f"  Set:   {Colors.BOLD}gate-set db <table|*> <read|write> <true|false>{Colors.RESET}")
+        print(f"         {Colors.BOLD}gate-set <tool> <read|write> <true|false>{Colors.RESET}")
+        print(f"  Reset: {Colors.BOLD}gate-reset{Colors.RESET}  (sets all to gated/false)")
+        print(f"\n  {Colors.CYAN}Changes take effect after restarting agent-mcp.py{Colors.RESET}")
+        print()
+
+    def gate_set(self, args: list[str]) -> bool:
+        """
+        Set a gate default.
+        Usage:
+          gate-set db <table|*> <read|write> <true|false>
+          gate-set <tool> <read|write> <true|false>
+        """
+        BOOL_TRUE = {"true", "1", "yes", "on"}
+        BOOL_FALSE = {"false", "0", "no", "off"}
+
+        def parse_bool(s: str) -> bool | None:
+            s = s.lower()
+            if s in BOOL_TRUE:
+                return True
+            if s in BOOL_FALSE:
+                return False
+            return None
+
+        if not args:
+            print(f"{Colors.RED}Usage: gate-set db <table|*> <read|write> <true|false>{Colors.RESET}")
+            print(f"       gate-set <tool> <read|write> <true|false>")
+            return False
+
+        data = self._load_gate_defaults()
+
+        if args[0].lower() == "db":
+            # gate-set db <table> <read|write> <true|false>
+            if len(args) != 4:
+                print(f"{Colors.RED}Usage: gate-set db <table|*> <read|write> <true|false>{Colors.RESET}")
+                return False
+            table, perm, flag_str = args[1], args[2].lower(), args[3]
+            if perm not in ("read", "write"):
+                print(f"{Colors.RED}Permission must be 'read' or 'write'{Colors.RESET}")
+                return False
+            val = parse_bool(flag_str)
+            if val is None:
+                print(f"{Colors.RED}Value must be true or false{Colors.RESET}")
+                return False
+
+            db_section = data.setdefault("db", {})
+            db_section.setdefault(table, {"read": False, "write": False})[perm] = val
+            # Wildcard also applies to __meta__
+            if table == "*":
+                db_section.setdefault("__meta__", {"read": False, "write": False})[perm] = val
+
+            if self._save_gate_defaults(data):
+                status = f"{Colors.GREEN}auto-allow{Colors.RESET}" if val else f"{Colors.YELLOW}gated{Colors.RESET}"
+                label = "default (*)" if table == "*" else table
+                print(f"{Colors.GREEN}✓{Colors.RESET} db_query [{label}] {perm}: {status}")
+                print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+                return True
+            return False
+
+        else:
+            # gate-set <tool> <read|write> <true|false>
+            if len(args) != 3:
+                print(f"{Colors.RED}Usage: gate-set <tool> <read|write> <true|false>{Colors.RESET}")
+                print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
+                return False
+            tool, perm, flag_str = args[0].lower(), args[1].lower(), args[2]
+            if tool not in self._GATE_TOOLS:
+                print(f"{Colors.RED}Unknown tool '{tool}'{Colors.RESET}")
+                print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
+                return False
+            if perm not in ("read", "write"):
+                print(f"{Colors.RED}Permission must be 'read' or 'write'{Colors.RESET}")
+                return False
+            if perm not in self._GATE_TOOLS[tool]:
+                print(f"{Colors.RED}Tool '{tool}' does not support '{perm}' gate (supports: {self._GATE_TOOLS[tool]}){Colors.RESET}")
+                return False
+            val = parse_bool(flag_str)
+            if val is None:
+                print(f"{Colors.RED}Value must be true or false{Colors.RESET}")
+                return False
+
+            tool_section = data.setdefault("tools", {})
+            tool_section.setdefault(tool, {})[perm] = val
+
+            if self._save_gate_defaults(data):
+                status = f"{Colors.GREEN}auto-allow{Colors.RESET}" if val else f"{Colors.YELLOW}gated{Colors.RESET}"
+                print(f"{Colors.GREEN}✓{Colors.RESET} {tool} {perm}: {status}")
+                print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+                return True
+            return False
+
+    def gate_reset(self) -> bool:
+        """Reset all gate defaults to gated (false) — delete gate-defaults.json."""
+        if self._save_gate_defaults({"db": {}, "tools": {}}):
+            print(f"{Colors.GREEN}✓ All gate defaults reset — everything will be gated on next restart{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            return True
+        return False
+
     def show_help(self):
         """Print all available commands."""
         print(f"\n{Colors.BOLD}Plugin Commands:{Colors.RESET}")
@@ -1066,6 +1240,12 @@ class PluginManager:
         print("  ratelimit-set <type> <calls> <window>     - Set rate limit (calls=0 = unlimited)")
         print("  ratelimit-autodisable <type> <true|false> - Set auto_disable flag")
         print(f"  Valid types: llm_call, search, extract, drive, db, system")
+        print(f"\n{Colors.BOLD}Gate Default Commands:{Colors.RESET}")
+        print("  gate-list                                         - Show all gate defaults")
+        print("  gate-set db <table|*> <read|write> <true|false>  - Set DB gate default")
+        print("  gate-set <tool> <read|write> <true|false>         - Set tool gate default")
+        print("  gate-reset                                        - Reset all gates to gated (false)")
+        print(f"  Valid tools: {', '.join(sorted(PluginManager._GATE_TOOLS.keys()))}")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
         print("  quit                              - Exit plugin manager")
@@ -1234,6 +1414,12 @@ class PluginManager:
                         self.port_set(args[0], int(args[1]))
                     except ValueError:
                         print(f"{Colors.RED}Port must be an integer{Colors.RESET}")
+            elif action == "gate-list":
+                self.gate_list()
+            elif action == "gate-set":
+                self.gate_set(arg.split())
+            elif action == "gate-reset":
+                self.gate_reset()
             else:
                 print(f"{Colors.RED}Unknown command: {action}{Colors.RESET}")
 
@@ -1379,6 +1565,17 @@ def main():
                 print(f"{Colors.RED}✗ Value must be true or false{Colors.RESET}")
                 return 1
             manager.ratelimit_auto_disable(sys.argv[2], val in ("true", "1", "yes"))
+
+        # Gate commands
+        elif cmd == "gate-list":
+            manager.gate_list()
+        elif cmd == "gate-set":
+            # gate-set db <table> <read|write> <true|false>
+            # gate-set <tool> <read|write> <true|false>
+            if not manager.gate_set(sys.argv[2:]):
+                return 1
+        elif cmd == "gate-reset":
+            manager.gate_reset()
 
         else:
             print(f"{Colors.RED}Unknown command: {cmd}{Colors.RESET}")

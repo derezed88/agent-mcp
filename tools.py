@@ -7,7 +7,7 @@ from config import log
 from database import execute_sql
 from drive import run_drive_op
 from search import run_google_search
-from prompt import apply_prompt_operation, get_current_prompt, get_section, list_sections
+from prompt import get_section
 
 mcp_server = FastMCP("AIOps-DB-Tools")
 
@@ -16,64 +16,6 @@ mcp_server = FastMCP("AIOps-DB-Tools")
 async def db_query(sql: str) -> str:
     """Execute SQL against mymcp MySQL database."""
     return await execute_sql(sql)
-
-
-@mcp_server.tool()
-async def update_system_prompt(
-    section_name: str,
-    operation: str,
-    content: str = "",
-    target: str = "",
-    confirm_overwrite: bool = False,
-) -> str:
-    """
-    Surgically edit a specific section of the .system_prompt file.
-
-    section_name   : REQUIRED - one of: memory-hierarchy, tool-guardrails, tools,
-                     tool-logging, time-bypass, db-guardrails, behavior
-    operation      : append | prepend | replace | delete | overwrite
-    content        : text to add / replacement text (not needed for delete)
-    target         : exact substring to find (required for replace and delete)
-    confirm_overwrite : must be True to use the overwrite operation
-    """
-    try:
-        _, msg = apply_prompt_operation(
-            section_name=section_name,
-            operation=operation,
-            content=content,
-            target=target,
-            confirm_overwrite=confirm_overwrite,
-        )
-        log.info("System prompt operation '%s' on section '%s': %s", operation, section_name, msg)
-        return msg
-    except ValueError as exc:
-        return f"Prompt update rejected: {exc}"
-    except Exception as exc:
-        return f"Error updating system prompt: {exc}"
-
-
-@mcp_server.tool()
-async def read_system_prompt(section: str = "") -> str:
-    """
-    Return the system prompt or a specific section.
-
-    section : optional - empty for full prompt, or specify:
-              - Integer index (e.g., "0", "1", "2") for section at that position
-              - Section name (e.g., "tools", "behavior") for specific section
-    """
-    if not section:
-        return get_current_prompt()
-
-    section_content = get_section(section)
-    if section_content is None:
-        sections_info = list_sections()
-        section_list = "\n".join(
-            f"  [{s['index']}] {s['short-section-name']}: {s['description']}"
-            for s in sections_info
-        )
-        return f"Section '{section}' not found.\n\nAvailable sections:\n{section_list}"
-
-    return section_content
 
 
 @mcp_server.tool()
@@ -209,13 +151,25 @@ def get_core_tools():
     return {
         'lc': CORE_LC_TOOLS,
         'executors': {
-            'update_system_prompt': update_system_prompt,
-            'read_system_prompt': read_system_prompt,
-            'get_system_info': get_system_info,
-            'llm_clean_text': _agents.llm_clean_text,
-            'llm_clean_tool': _agents.llm_clean_tool,
-            'llm_list': _agents.llm_list,
-            'agent_call': _agents.agent_call,
+            'get_system_info':       get_system_info,
+            'llm_clean_text':        _agents.llm_clean_text,
+            'llm_clean_tool':        _agents.llm_clean_tool,
+            'llm_list':              _agents.llm_list,
+            'agent_call':            _agents.agent_call,
+            'sysprompt_list':        _sysprompt_list_exec,
+            'sysprompt_read':        _sysprompt_read_exec,
+            'sysprompt_write':       _sysprompt_write_exec,
+            'sysprompt_delete':      _sysprompt_delete_exec,
+            'sysprompt_copy_dir':    _sysprompt_copy_dir_exec,
+            'sysprompt_set_dir':     _sysprompt_set_dir_exec,
+            'session':               _session_exec,
+            'model':                 _model_exec,
+            'reset':                 _reset_exec,
+            'help':                  _help_exec,
+            'llm_call':              _llm_call_exec,
+            'llm_timeout':           _llm_timeout_exec,
+            'stream':                _stream_exec,
+            'tool_preview_length':   _tool_preview_length_exec,
         }
     }
 
@@ -268,13 +222,25 @@ def _lc_tool_to_openai_dict(tool: StructuredTool) -> dict:
 # Plugin tools declare their type via get_gate_tools() metadata.
 # Used by execute_tool() for universal rate limiting.
 _CORE_TOOL_TYPES: dict[str, str] = {
-    "update_system_prompt": "system",
-    "read_system_prompt":   "system",
-    "get_system_info":      "system",
-    "llm_clean_text":       "llm_call",
-    "llm_clean_tool":       "llm_call",
-    "llm_list":             "system",
-    "agent_call":           "agent_call",
+    "get_system_info":       "system",
+    "llm_clean_text":        "llm_call",
+    "llm_clean_tool":        "llm_call",
+    "llm_list":              "system",
+    "agent_call":            "agent_call",
+    "sysprompt_list":        "system",
+    "sysprompt_read":        "system",
+    "sysprompt_write":       "system",
+    "sysprompt_delete":      "system",
+    "sysprompt_copy_dir":    "system",
+    "sysprompt_set_dir":     "system",
+    "session":               "system",
+    "model":                 "system",
+    "reset":                 "system",
+    "help":                  "system",
+    "llm_call":              "system",
+    "llm_timeout":           "system",
+    "stream":                "system",
+    "tool_preview_length":   "system",
 }
 
 
@@ -297,13 +263,25 @@ def get_tool_executor(tool_name: str):
     import agents as _agents
 
     core_executors = {
-        'update_system_prompt': update_system_prompt,
-        'read_system_prompt':   read_system_prompt,
-        'get_system_info':      get_system_info,
-        'llm_clean_text':       _agents.llm_clean_text,
-        'llm_clean_tool':       _agents.llm_clean_tool,
-        'llm_list':             _agents.llm_list,
-        'agent_call':           _agents.agent_call,
+        'get_system_info':       get_system_info,
+        'llm_clean_text':        _agents.llm_clean_text,
+        'llm_clean_tool':        _agents.llm_clean_tool,
+        'llm_list':              _agents.llm_list,
+        'agent_call':            _agents.agent_call,
+        'sysprompt_list':        _sysprompt_list_exec,
+        'sysprompt_read':        _sysprompt_read_exec,
+        'sysprompt_write':       _sysprompt_write_exec,
+        'sysprompt_delete':      _sysprompt_delete_exec,
+        'sysprompt_copy_dir':    _sysprompt_copy_dir_exec,
+        'sysprompt_set_dir':     _sysprompt_set_dir_exec,
+        'session':               _session_exec,
+        'model':                 _model_exec,
+        'reset':                 _reset_exec,
+        'help':                  _help_exec,
+        'llm_call':              _llm_call_exec,
+        'llm_timeout':           _llm_timeout_exec,
+        'stream':                _stream_exec,
+        'tool_preview_length':   _tool_preview_length_exec,
     }
 
     if tool_name in core_executors:
@@ -326,35 +304,6 @@ from pydantic import BaseModel, Field
 from typing import Optional, Literal
 
 
-class _UpdateSystemPromptArgs(BaseModel):
-    section_name: Literal[
-        "memory-hierarchy", "tool-guardrails", "tools",
-        "tool-logging", "time-bypass", "db-guardrails", "behavior"
-    ] = Field(description="REQUIRED: The section to edit.")
-    operation: Literal["append", "prepend", "replace", "delete", "overwrite"] = Field(
-        description="The edit operation to perform."
-    )
-    content: str = Field(
-        default="",
-        description="The text to add or the replacement text. Pass ONLY the user-specified text — do not invent additional content.",
-    )
-    target: str = Field(
-        default="",
-        description="Exact substring to find (required for replace and delete operations).",
-    )
-    confirm_overwrite: bool = Field(
-        default=False,
-        description="Must be true to use the overwrite operation. Do not set true unless the user explicitly asked to replace the entire section.",
-    )
-
-
-class _ReadSystemPromptArgs(BaseModel):
-    section: str = Field(
-        default="",
-        description="Optional: Integer index or section name. Omit for full prompt.",
-    )
-
-
 class _GetSystemInfoArgs(BaseModel):
     pass  # No arguments — explicit schema prevents LangChain from leaking the docstring into parameters
 
@@ -370,62 +319,459 @@ class _LlmCleanToolArgs(BaseModel):
     arguments: str = Field(description="The user request / arguments to pass as the prompt to the target model. Be specific.")
 
 
+# ---------------------------------------------------------------------------
+# Sysprompt tool arg schemas
+# ---------------------------------------------------------------------------
+
+class _SyspromptListArgs(BaseModel):
+    model: str = Field(
+        description="Model key name (e.g., 'gemini25', 'grok4') or 'self' for the current model."
+    )
+
+
+class _SyspromptReadArgs(BaseModel):
+    model: str = Field(
+        description="Model key name or 'self' for the current model."
+    )
+    file: str = Field(
+        default="",
+        description=(
+            "Optional: specific file to read. Omit to read the full assembled prompt. "
+            "Can be a bare section name ('behavior'), a full filename ('.system_prompt_behavior'), "
+            "or '.system_prompt' for the root file."
+        ),
+    )
+
+
+class _SyspromptWriteArgs(BaseModel):
+    model: str = Field(description="Model key name or 'self' for the current model.")
+    file: str = Field(
+        description=(
+            "File to write. Can be a bare section name ('behavior'), a full filename "
+            "('.system_prompt_behavior'), or '.system_prompt' for the root file."
+        )
+    )
+    data: str = Field(description="Content to write. Overwrites the file (creates if missing).")
+
+
+class _SyspromptDeleteArgs(BaseModel):
+    model: str = Field(description="Model key name or 'self' for the current model.")
+    file: str = Field(
+        default="",
+        description=(
+            "File to delete. Omit to delete the ENTIRE directory (also sets system_prompt_folder='none'). "
+            "Can be a bare section name or full filename."
+        ),
+    )
+
+
+class _SyspromptCopyDirArgs(BaseModel):
+    model: str = Field(description="Model key name or 'self' to copy FROM.")
+    new_dir: str = Field(
+        description="New directory name under system_prompt/ to copy TO (e.g., 'grok4_custom')."
+    )
+
+
+class _SyspromptSetDirArgs(BaseModel):
+    model: str = Field(description="Model key name or 'self' for the current model.")
+    dir: str = Field(
+        description=(
+            "Directory name under system_prompt/ to assign (e.g., '000_default', 'grok4_custom'). "
+            "Use 'none' to clear the folder assignment."
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session / model / reset / help tool arg schemas
+# ---------------------------------------------------------------------------
+
+class _SessionArgs(BaseModel):
+    action: Literal["list", "delete"] = Field(
+        description="'list' to show all sessions, 'delete' to remove a session."
+    )
+    session_id: str = Field(
+        default="",
+        description="Session shorthand ID (e.g., '101') or full session ID. Required for 'delete'.",
+    )
+
+
+class _ModelArgs(BaseModel):
+    action: Literal["list", "set"] = Field(
+        description="'list' to show available models, 'set' to switch the active model."
+    )
+    model_key: str = Field(
+        default="",
+        description="Model key to switch to. Required for 'set' action.",
+    )
+
+
+class _ResetArgs(BaseModel):
+    pass  # No arguments
+
+
+class _HelpArgs(BaseModel):
+    pass  # No arguments
+
+
+# ---------------------------------------------------------------------------
+# Meta-command tool arg schemas (llm_call, llm_timeout, stream, tool_preview_length)
+# ---------------------------------------------------------------------------
+
+class _LlmCallArgs(BaseModel):
+    action: Literal["list", "set"] = Field(
+        description="'list' to show tool_call_available status for all models, 'set' to change it."
+    )
+    model_key: str = Field(
+        default="",
+        description="Model key to change. Omit (or use '*') to apply to ALL models. Required when action='set'.",
+    )
+    enabled: Optional[bool] = Field(
+        default=None,
+        description="True to enable tool_call_available, False to disable. Required when action='set'.",
+    )
+
+
+class _LlmTimeoutArgs(BaseModel):
+    action: Literal["list", "set"] = Field(
+        description="'list' to show current timeouts, 'set' to change."
+    )
+    model_key: str = Field(
+        default="",
+        description="Model key to set timeout for. Omit (or use '*') to apply to ALL models.",
+    )
+    seconds: Optional[int] = Field(
+        default=None,
+        description="Timeout in seconds. Required when action='set'.",
+    )
+
+
+class _StreamArgs(BaseModel):
+    action: Literal["get", "set"] = Field(
+        description="'get' to show current streaming setting, 'set' to change it."
+    )
+    enabled: Optional[bool] = Field(
+        default=None,
+        description="True to enable streaming, False to disable. Required when action='set'.",
+    )
+
+
+class _ToolPreviewLengthArgs(BaseModel):
+    action: Literal["get", "set"] = Field(
+        description="'get' to show current preview length, 'set' to change it."
+    )
+    length: Optional[int] = Field(
+        default=None,
+        description="Number of characters to show (0 = unlimited). Required when action='set'.",
+    )
+
+
 class _AgentCallArgs(BaseModel):
     agent_url: str = Field(
         description="Base URL of the target agent-mcp instance, e.g. 'http://localhost:8767'. "
                     "The target must have the API client plugin (plugin_client_api) enabled."
     )
     message: str = Field(
-        description="The message or command to send to the target agent. "
-                    "Can be any text, !command, or @model prefix. "
-                    "The full response from the target agent is returned."
+        description=(
+            "The message or command to send to the target agent. "
+            "Can be any text, !command, or @model prefix. "
+            "The full response from the target agent is returned.\n\n"
+            "CRITICAL: You are the ORCHESTRATOR. Send ONE direct conversational prompt per call. "
+            "The remote agent only RESPONDS — it cannot itself call agent_call (depth guard blocks it). "
+            "NEVER embed multi-turn instructions in the message (e.g. 'have a 3-turn conversation with me'). "
+            "That causes Max swarm depth errors. "
+            "For N-turn conversations: make N separate agent_call invocations, each with a single question."
+        )
     )
     target_client_id: str = Field(
         default="",
         description="Optional: session name to use on the target agent. "
                     "Omit to auto-generate an isolated swarm session."
     )
+    stream: bool = Field(
+        default=True,
+        description="If True (default), relay the remote agent's tokens in real-time as they "
+                    "arrive so Slack and other clients see per-turn progress. "
+                    "Set to False to suppress streaming and return only the final result — "
+                    "useful when the intermediate tokens would be noisy or are not needed."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sysprompt tool executors
+# ---------------------------------------------------------------------------
+
+async def _sysprompt_list_exec(model: str) -> str:
+    from prompt import sp_list_files, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id
+    from state import sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    return sp_list_files(resolved, LLM_REGISTRY)
+
+
+async def _sysprompt_read_exec(model: str, file: str = "") -> str:
+    from prompt import sp_read_prompt, sp_read_file, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    if file:
+        return sp_read_file(resolved, file, LLM_REGISTRY)
+    return sp_read_prompt(resolved, LLM_REGISTRY)
+
+
+async def _sysprompt_write_exec(model: str, file: str, data: str) -> str:
+    from prompt import sp_write_file, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    return sp_write_file(resolved, file, data, LLM_REGISTRY)
+
+
+async def _sysprompt_delete_exec(model: str, file: str = "") -> str:
+    from prompt import sp_delete_file, sp_delete_directory, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    if file:
+        return sp_delete_file(resolved, file, LLM_REGISTRY)
+    return sp_delete_directory(resolved, LLM_REGISTRY)
+
+
+async def _sysprompt_copy_dir_exec(model: str, new_dir: str) -> str:
+    from prompt import sp_copy_directory, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    return sp_copy_directory(resolved, new_dir, LLM_REGISTRY)
+
+
+async def _sysprompt_set_dir_exec(model: str, dir: str) -> str:
+    from prompt import sp_set_directory, sp_resolve_model
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    return sp_set_directory(resolved, dir)
+
+
+# ---------------------------------------------------------------------------
+# Session / model / reset / help tool executors
+# ---------------------------------------------------------------------------
+
+async def _session_exec(action: str, session_id: str = "") -> str:
+    from state import sessions, get_or_create_shorthand_id, get_session_by_shorthand, remove_shorthand_mapping, current_client_id
+    cid = current_client_id.get("")
+
+    if action == "list":
+        if not sessions:
+            return "No active sessions."
+        lines = ["Active sessions:"]
+        for sid, data in sessions.items():
+            marker = " (current)" if sid == cid else ""
+            model = data.get("model", "unknown")
+            history_len = len(data.get("history", []))
+            shorthand_id = get_or_create_shorthand_id(sid)
+            peer_ip = data.get("peer_ip")
+            ip_str = f", ip={peer_ip}" if peer_ip else ""
+            lines.append(f"  ID [{shorthand_id}] {sid}: model={model}, history={history_len} messages{ip_str}{marker}")
+        return "\n".join(lines)
+
+    if action == "delete":
+        if not session_id:
+            return "ERROR: session_id required for 'delete' action."
+        # Try shorthand ID
+        target_sid = None
+        try:
+            shorthand_id = int(session_id)
+            target_sid = get_session_by_shorthand(shorthand_id)
+            if not target_sid:
+                return f"Session ID [{shorthand_id}] not found."
+        except ValueError:
+            target_sid = session_id
+        if target_sid in sessions:
+            shorthand_id = get_or_create_shorthand_id(target_sid)
+            del sessions[target_sid]
+            remove_shorthand_mapping(target_sid)
+            return f"Deleted session ID [{shorthand_id}]: {target_sid}"
+        return f"Session not found: {target_sid}"
+
+    return f"Unknown action '{action}'. Valid: list, delete"
+
+
+async def _model_exec(action: str, model_key: str = "") -> str:
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions, cancel_active_task
+
+    if action == "list":
+        lines = ["Available models:"]
+        cid = current_client_id.get("")
+        current = sessions.get(cid, {}).get("model", "") if cid else ""
+        for key, meta in LLM_REGISTRY.items():
+            model_id = meta.get("model_id", key)
+            marker = " (current)" if key == current else ""
+            lines.append(f"  {key:<12} {model_id}{marker}")
+        return "\n".join(lines)
+
+    if action == "set":
+        if not model_key:
+            return "ERROR: model_key required for 'set' action."
+        cid = current_client_id.get("")
+        if not cid:
+            return "ERROR: No active session context for model switch."
+        if model_key not in LLM_REGISTRY:
+            available = ", ".join(LLM_REGISTRY.keys())
+            return f"ERROR: Unknown model '{model_key}'\nAvailable: {available}"
+        await cancel_active_task(cid)
+        sessions[cid]["model"] = model_key
+        return f"Model set to '{model_key}'."
+
+    return f"Unknown action '{action}'. Valid: list, set"
+
+
+async def _reset_exec() -> str:
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    if not cid or cid not in sessions:
+        return "ERROR: No active session context."
+    history_len = len(sessions[cid].get("history", []))
+    sessions[cid]["history"] = []
+    return f"Conversation history cleared ({history_len} messages removed)."
+
+
+async def _help_exec() -> str:
+    from tools import get_all_gate_tools
+    gate_tools = get_all_gate_tools()
+    tool_lines = []
+    for tool_name, meta in sorted(gate_tools.items(), key=lambda x: (x[1].get("type",""), x[0])):
+        desc = meta.get("description", "")
+        tool_lines.append(f"  {tool_name:<30} - {desc}")
+    return (
+        "Available commands: Use !help in the chat interface for full command list.\n"
+        "Key tool calls (LLM-invocable):\n"
+        "  sysprompt_list(model)         - list system prompt files for a model\n"
+        "  sysprompt_read(model, file)   - read full prompt or specific file\n"
+        "  sysprompt_write(model, file, data) - write a system prompt file\n"
+        "  sysprompt_delete(model, file) - delete file or entire folder\n"
+        "  sysprompt_copy_dir(model, new_dir) - copy prompt folder\n"
+        "  sysprompt_set_dir(model, dir) - assign prompt folder to model\n"
+        "  session(action, ...)          - list or delete sessions\n"
+        "  model(action, ...)            - list or switch models\n"
+        "  reset()                       - clear conversation history\n"
+        "  db_query(sql)                 - run SQL\n"
+        "  search_ddgs/search_tavily/search_xai/search_google(query) - web search\n"
+        "  url_extract(method, url)      - extract web page content\n"
+        "  google_drive(operation, ...) - Google Drive CRUD\n"
+        "  get_system_info()             - date/time/status\n"
+        "  llm_list()                    - list LLM models\n"
+        "  llm_clean_text(model, prompt) - call LLM with no context\n"
+        "  llm_clean_tool(model, tool, arguments) - delegate tool call\n"
+        "  llm_call(action, ...)         - manage model delegation\n"
+        "  llm_timeout(action, ...)      - manage delegation timeouts\n"
+        "  stream(action, ...)           - control streaming mode\n"
+        "  tool_preview_length(action, ...) - control tool output display\n"
+        "  agent_call(agent_url, message) - call remote agent\n"
+        "\nGated tools (listed below require human approval unless gate is off):\n"
+        + "\n".join(tool_lines)
+    )
+
+
+async def _llm_call_exec(action: str, model_key: str = "", enabled: bool = None) -> str:
+    from config import LLM_REGISTRY, save_llm_model_field
+    if action == "list":
+        lines = ["LLM tool_call_available status:"]
+        for name, cfg in sorted(LLM_REGISTRY.items()):
+            available = "YES" if cfg.get("tool_call_available", False) else "NO"
+            timeout = cfg.get("llm_call_timeout", 60)
+            desc = cfg.get("description", "")
+            lines.append(f"  {name:<14} tool_call={available}  timeout={timeout}s  {desc}")
+        return "\n".join(lines)
+    if action == "set":
+        if enabled is None:
+            return "ERROR: 'enabled' required for action='set'."
+        targets = [model_key] if model_key and model_key != "*" else list(LLM_REGISTRY.keys())
+        changed = []
+        for name in targets:
+            if name not in LLM_REGISTRY:
+                return f"ERROR: Unknown model '{name}'."
+            LLM_REGISTRY[name]["tool_call_available"] = enabled
+            if save_llm_model_field(name, "tool_call_available", enabled):
+                changed.append(name)
+        status = "enabled" if enabled else "disabled"
+        return f"tool_call_available={status} for: {', '.join(changed)}. Persisted to llm-models.json."
+    return f"Unknown action '{action}'. Valid: list, set"
+
+
+async def _llm_timeout_exec(action: str, model_key: str = "", seconds: int = None) -> str:
+    from config import LLM_REGISTRY, save_llm_model_field
+    if action == "list":
+        lines = ["LLM delegation timeouts:"]
+        for name, cfg in sorted(LLM_REGISTRY.items()):
+            t = cfg.get("llm_call_timeout", 60)
+            available = "YES" if cfg.get("tool_call_available", False) else "NO"
+            lines.append(f"  {name:<14} timeout={t}s  tool_call={available}")
+        return "\n".join(lines)
+    if action == "set":
+        if seconds is None or seconds < 1:
+            return "ERROR: 'seconds' must be a positive integer for action='set'."
+        targets = [model_key] if model_key and model_key != "*" else list(LLM_REGISTRY.keys())
+        changed = []
+        for name in targets:
+            if name not in LLM_REGISTRY:
+                return f"ERROR: Unknown model '{name}'."
+            LLM_REGISTRY[name]["llm_call_timeout"] = seconds
+            if save_llm_model_field(name, "llm_call_timeout", seconds):
+                changed.append(name)
+        return f"llm_call_timeout={seconds}s for: {', '.join(changed)}. Persisted to llm-models.json."
+    return f"Unknown action '{action}'. Valid: list, set"
+
+
+async def _stream_exec(action: str, enabled: bool = None) -> str:
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    if not cid or cid not in sessions:
+        return "ERROR: No active session context."
+    if action == "get":
+        current = sessions[cid].get("agent_call_stream", True)
+        return f"agent_call streaming: {'enabled' if current else 'disabled'}"
+    if action == "set":
+        if enabled is None:
+            return "ERROR: 'enabled' required for action='set'."
+        sessions[cid]["agent_call_stream"] = enabled
+        return f"agent_call streaming {'enabled' if enabled else 'disabled'}."
+    return f"Unknown action '{action}'. Valid: get, set"
+
+
+async def _tool_preview_length_exec(action: str, length: int = None) -> str:
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    if not cid or cid not in sessions:
+        return "ERROR: No active session context."
+    if action == "get":
+        current = sessions[cid].get("tool_preview_length", 500)
+        return f"Tool preview length: {'unlimited' if current == 0 else f'{current} chars'}"
+    if action == "set":
+        if length is None or length < 0:
+            return "ERROR: 'length' must be >= 0 (0 = unlimited) for action='set'."
+        sessions[cid]["tool_preview_length"] = length
+        return f"Tool preview length set to {'unlimited' if length == 0 else f'{length} chars'}."
+    return f"Unknown action '{action}'. Valid: get, set"
 
 
 def _make_core_lc_tools() -> list:
     """Build CORE_LC_TOOLS after agents module is available (avoids circular import)."""
     import agents as _agents
     return [
-        StructuredTool.from_function(
-            coroutine=update_system_prompt,
-            name="update_system_prompt",
-            description=(
-                "Surgically edit a specific section of the system prompt file using a named operation. "
-                "NEVER reconstruct the full prompt yourself — only pass the specific "
-                "text the user asked to add, change, or remove.\n\n"
-                "REQUIRED: section_name must be one of: memory-hierarchy, tool-guardrails, tools, "
-                "tool-logging, time-bypass, db-guardrails, behavior. "
-                "You CANNOT create new sections.\n\n"
-                "Operations:\n"
-                "  append    – add `content` to the end of the section.\n"
-                "  prepend   – add `content` to the beginning of the section.\n"
-                "  replace   – swap exact `target` string with `content`.\n"
-                "  delete    – remove all lines containing `target` substring.\n"
-                "  overwrite – replace entire section; ONLY with confirm_overwrite=true "
-                "and only when user explicitly requests a full replacement.\n\n"
-                "For 'add/append/include/insert' requests → use append.\n"
-                "For 'change X to Y' → use replace with target=X, content=Y.\n"
-                "For 'remove/delete a rule' → use delete with target=that rule text.\n"
-                "NEVER use overwrite unless instructed and confirm_overwrite is true."
-            ),
-            args_schema=_UpdateSystemPromptArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=read_system_prompt,
-            name="read_system_prompt",
-            description=(
-                "Return the system prompt or a specific section. "
-                "Call with no parameters for full prompt. "
-                "Or specify section by integer index (0, 1, 2...) or name "
-                "(e.g., 'tools', 'behavior')."
-            ),
-            args_schema=_ReadSystemPromptArgs,
-        ),
         StructuredTool.from_function(
             coroutine=get_system_info,
             name="get_system_info",
@@ -475,16 +821,161 @@ def _make_core_lc_tools() -> list:
             coroutine=_agents.agent_call,
             name="agent_call",
             description=(
-                "Send a message or command to another agent-mcp instance and return its response. "
+                "Send a single direct message to another agent-mcp instance and return its response. "
                 "Use for multi-agent coordination (swarm): delegate tasks, verify answers, or "
-                "parallelize work across agent instances. "
-                "The target agent processes the message through its full stack (LLM, tools, gates). "
-                "Swarm depth is limited to 1 hop to prevent recursion. "
-                "Gate approval on the target agent follows that agent's own gate policy — "
-                "configure auto_approve_gates on the AgentClient if the target needs tool access. "
-                "Rate limited: 5 calls per 60 seconds per session."
+                "gather perspectives across agent instances.\n\n"
+                "ORCHESTRATION MODEL: YOU are the orchestrator. YOU make repeated agent_call "
+                "invocations — one per conversation turn. The remote agent ONLY RESPONDS to the "
+                "single message you send; it does NOT itself call agent_call (depth guard blocks "
+                "recursion at 1 hop). For an N-turn conversation, make N separate agent_call "
+                "calls, then synthesize all responses. NEVER embed multi-turn orchestration in "
+                "the message field (e.g. 'have a 5-turn conversation') — that causes immediate "
+                "Max swarm depth errors.\n\n"
+                "Rate limited: 5 calls per 60 seconds per session. "
+                "By default (stream=True) remote tokens are relayed in real-time for live Slack progress. "
+                "Set stream=False to suppress streaming and return only the final result."
             ),
             args_schema=_AgentCallArgs,
+        ),
+        # --- Sysprompt management tools ---
+        StructuredTool.from_function(
+            coroutine=_sysprompt_list_exec,
+            name="sysprompt_list",
+            description=(
+                "List all .system_prompt* files in a model's system prompt folder. "
+                "Use model='self' for the current model."
+            ),
+            args_schema=_SyspromptListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_read_exec,
+            name="sysprompt_read",
+            description=(
+                "Read the system prompt for a model. Omit 'file' to get the full assembled prompt. "
+                "Specify 'file' to read a specific section file. Use model='self' for current model."
+            ),
+            args_schema=_SyspromptReadArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_write_exec,
+            name="sysprompt_write",
+            description=(
+                "Overwrite or create a system prompt file for a model. "
+                "Use model='self' for the current model. "
+                "The file argument can be a section name ('behavior') or full filename ('.system_prompt_behavior'). "
+                "WARNING: This overwrites the entire file. Requires gate approval."
+            ),
+            args_schema=_SyspromptWriteArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_delete_exec,
+            name="sysprompt_delete",
+            description=(
+                "Delete a system prompt file (or the entire folder) for a model. "
+                "Omit 'file' to delete the ENTIRE directory and set folder='none'. "
+                "Use model='self' for the current model. Requires gate approval."
+            ),
+            args_schema=_SyspromptDeleteArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_copy_dir_exec,
+            name="sysprompt_copy_dir",
+            description=(
+                "Copy a model's system prompt folder to a new directory under system_prompt/. "
+                "Use model='self' for the current model. Requires gate approval."
+            ),
+            args_schema=_SyspromptCopyDirArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_set_dir_exec,
+            name="sysprompt_set_dir",
+            description=(
+                "Assign a model's system_prompt_folder to an existing directory under system_prompt/. "
+                "Use 'none' to clear the folder. Persists to llm-models.json. Requires gate approval."
+            ),
+            args_schema=_SyspromptSetDirArgs,
+        ),
+        # --- Session / model / reset / help tools ---
+        StructuredTool.from_function(
+            coroutine=_session_exec,
+            name="session",
+            description=(
+                "Manage agent sessions. action='list' shows all active sessions. "
+                "action='delete' removes a session (requires session_id, can be shorthand integer or full ID). "
+                "List requires read gate approval; delete requires write gate approval."
+            ),
+            args_schema=_SessionArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_model_exec,
+            name="model",
+            description=(
+                "Manage the active LLM model. action='list' shows all available models. "
+                "action='set' switches the active model for this session (requires model_key). "
+                "List is always allowed; set requires write gate approval."
+            ),
+            args_schema=_ModelArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_reset_exec,
+            name="reset",
+            description=(
+                "Clear conversation history for the current session. "
+                "Requires write gate approval."
+            ),
+            args_schema=_ResetArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_help_exec,
+            name="help",
+            description="Return a summary of available commands and tool calls.",
+            args_schema=_HelpArgs,
+        ),
+        # --- Meta-command tools (also accessible via !commands) ---
+        StructuredTool.from_function(
+            coroutine=_llm_call_exec,
+            name="llm_call",
+            description=(
+                "Manage the tool_call_available flag for LLM models. "
+                "action='list' shows all models with their tool_call_available status. "
+                "action='set' enables/disables delegation for a model (or all models if model_key is omitted). "
+                "Always allowed (no gate)."
+            ),
+            args_schema=_LlmCallArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_llm_timeout_exec,
+            name="llm_timeout",
+            description=(
+                "Manage llm_call_timeout for LLM delegation. "
+                "action='list' shows current timeouts. "
+                "action='set' updates the timeout in seconds (omit model_key to set all models). "
+                "Always allowed (no gate)."
+            ),
+            args_schema=_LlmTimeoutArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_stream_exec,
+            name="stream",
+            description=(
+                "Control agent_call streaming for the current session. "
+                "action='get' shows current setting. "
+                "action='set' enables or disables real-time token relay. "
+                "Always allowed (no gate)."
+            ),
+            args_schema=_StreamArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_tool_preview_length_exec,
+            name="tool_preview_length",
+            description=(
+                "Control how many characters of tool output are shown in chat. "
+                "The full result is always sent to the LLM regardless. "
+                "action='get' shows current setting. "
+                "action='set' changes it (0 = unlimited). "
+                "Always allowed (no gate)."
+            ),
+            args_schema=_ToolPreviewLengthArgs,
         ),
     ]
 

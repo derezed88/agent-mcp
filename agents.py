@@ -25,12 +25,11 @@ import time
 
 from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, save_llm_model_field
 from state import push_tok, push_done, push_err, current_client_id, sessions
-from prompt import get_current_prompt
+from prompt import get_current_prompt, load_prompt_for_folder
 from gate import check_human_gate
 from database import execute_sql
 from tools import (
-    update_system_prompt, get_system_info,
-    read_system_prompt,
+    get_system_info,
     get_all_lc_tools, get_all_openai_tools, get_tool_executor,
     get_tool_type,
 )
@@ -244,9 +243,9 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
         if tool_name == "db_query":
             sql = tool_args.get("sql", "")
             await push_tok(client_id, f"\n[db ▶] {sql}\n")
-        elif tool_name == "update_system_prompt":
-            await push_tok(client_id, f"\n[sysprompt ▶] updating…\n")
-        elif tool_name == "read_system_prompt":
+        elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
+            await push_tok(client_id, f"\n[sysprompt ▶] {tool_name}…\n")
+        elif tool_name in ("sysprompt_list", "sysprompt_read"):
             await push_tok(client_id, "\n[sysprompt ▶] reading…\n")
         elif tool_name == "get_system_info":
             await push_tok(client_id, "\n[sysinfo ▶] fetching…\n")
@@ -276,9 +275,9 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
 
         if tool_name == "db_query":
             await push_tok(client_id, f"[db ◀]\n{preview}\n")
-        elif tool_name == "update_system_prompt":
+        elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
             await push_tok(client_id, f"[sysprompt ◀] {result}\n")
-        elif tool_name == "read_system_prompt":
+        elif tool_name in ("sysprompt_list", "sysprompt_read"):
             await push_tok(client_id, f"[sysprompt ◀]\n{preview}\n")
         elif tool_name == "get_system_info":
             await push_tok(client_id, f"[sysinfo ◀] {result}\n")
@@ -416,8 +415,18 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         # StructuredTool objects carry full schema + coroutine reference.
         llm_with_tools = llm.bind_tools(_CURRENT_LC_TOOLS)
 
+        # Load per-model system prompt (stateless; falls back to global if not configured)
+        model_cfg = LLM_REGISTRY.get(model_key, {})
+        sp_folder_rel = model_cfg.get("system_prompt_folder", "")
+        if sp_folder_rel and sp_folder_rel.lower() != "none":
+            from config import BASE_DIR
+            sp_folder_abs = os.path.join(BASE_DIR, sp_folder_rel)
+            system_prompt = load_prompt_for_folder(sp_folder_abs)
+        else:
+            system_prompt = get_current_prompt()
+
         # Convert internal message format to LangChain message objects
-        ctx: list[BaseMessage] = _to_lc_messages(get_current_prompt(), messages)
+        ctx: list[BaseMessage] = _to_lc_messages(system_prompt, messages)
 
         for _ in range(MAX_TOOL_ITERATIONS):
             ai_msg: AIMessage = await llm_with_tools.ainvoke(ctx)
@@ -446,9 +455,29 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 return final
 
             # Execute all tool calls in this turn
+            has_non_agent_call_output = False
             for tc in ai_msg.tool_calls:
+                is_streaming_agent_call = (
+                    tc["name"] == "agent_call"
+                    and tc["args"].get("stream", True)
+                )
+                if tc["name"] != "agent_call":
+                    has_non_agent_call_output = True
                 result = await execute_tool(client_id, tc["name"], tc["args"])
                 ctx.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+                # Flush immediately after each streaming agent_call so Slack posts
+                # per-turn progress as it arrives rather than batching all turns.
+                # Without this, when the LLM issues N agent_calls in one batch
+                # (grok4 batches all turns), a single push_done at the end causes
+                # the Slack consumer to post the entire N-turn conversation as one
+                # block — the batch behaviour observed in Test 6 (5-turn).
+                if is_streaming_agent_call:
+                    await push_done(client_id)
+            # Signal end of this tool-call round trip for any non-agent_call tools
+            # (db_query, google_drive, etc.) so streaming clients see intermediate
+            # results before the LLM's next thinking step.
+            if has_non_agent_call_output:
+                await push_done(client_id)
 
         await push_tok(client_id, "\n[Max iterations]\n")
         await push_done(client_id)
@@ -635,13 +664,23 @@ async def llm_list() -> str:
     return "\n".join(lines)
 
 
-async def agent_call(agent_url: str, message: str, target_client_id: str = None) -> str:
+async def agent_call(
+    agent_url: str,
+    message: str,
+    target_client_id: str = None,
+    stream: bool = True,
+) -> str:
     """
     Call another agent-mcp instance (swarm/multi-agent coordination).
 
     Sends `message` to a remote agent at `agent_url` using the API client plugin.
     The remote agent processes it through its full stack (LLM, tools, gates).
     Returns the complete text response.
+
+    When stream=True (default), remote tokens are relayed via push_tok in real-time
+    so Slack and other clients see per-turn progress as it arrives.
+    When stream=False, the call blocks silently until the remote agent finishes and
+    returns only the final result (original behaviour).
 
     Depth guard: calls originating from an api-swarm- prefixed client_id are
     rejected immediately to prevent unbounded recursion (max 1 hop).
@@ -658,6 +697,12 @@ async def agent_call(agent_url: str, message: str, target_client_id: str = None)
     # Depth guard — api-swarm- prefix signals this is already a delegated call
     if calling_client.startswith("api-swarm-"):
         return "[agent_call] Max swarm depth reached (1 hop). Call rejected to prevent recursion."
+
+    # Session-level streaming override: !stream true|false takes precedence over
+    # the LLM-supplied stream parameter so the human always has final control.
+    session_stream = sessions.get(calling_client, {}).get("agent_call_stream", None)
+    if session_stream is not None:
+        stream = session_stream
 
     # Derive a stable swarm client_id from calling session + agent URL so the
     # remote session persists across multiple agent_call invocations (same human
@@ -676,15 +721,25 @@ async def agent_call(agent_url: str, message: str, target_client_id: str = None)
 
     try:
         client = AgentClient(agent_url, client_id=swarm_client_id, api_key=api_key)
-        result = await asyncio.wait_for(
-            client.send(message, timeout=timeout),
-            timeout=timeout + 5,
-        )
 
-        preview_len = sessions.get(calling_client, {}).get("tool_preview_length", 500)
-        preview = result if (preview_len == 0 or len(result) <= preview_len) else result[:preview_len] + "\n…(truncated)"
-        await push_tok(calling_client, f"[agent_call ◀] {agent_url}:\n{preview}\n")
-        return result
+        if stream:
+            # Streaming path: relay each remote token via push_tok so Slack and
+            # other clients see the remote agent's output as it arrives, rather
+            # than waiting for the full response before seeing anything.
+            accumulated = []
+            async for chunk in client.stream(message, timeout=timeout):
+                accumulated.append(chunk)
+                await push_tok(calling_client, chunk)
+            return "".join(accumulated)
+        else:
+            # Non-streaming path: block until remote agent finishes, return full result.
+            # The LLM narrates the result itself; no push_tok preview here to avoid
+            # double-echo in Slack and other clients.
+            result = await asyncio.wait_for(
+                client.send(message, timeout=timeout),
+                timeout=timeout + 5,
+            )
+            return result
 
     except asyncio.TimeoutError:
         msg = f"ERROR: agent_call timed out after {timeout}s waiting for {agent_url}."

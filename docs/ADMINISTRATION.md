@@ -81,7 +81,7 @@ python plugin-manager.py disable <plugin_name>   # disable a plugin
 |---|---|---|
 | `plugin_client_shellpy` | client_interface | shell.py terminal client (always keep enabled) |
 | `plugin_proxy_llama` | client_interface | OpenAI/Ollama API (port set via `llama_port` in `plugins-enabled.json`) |
-| `plugin_client_slack` | client_interface | Slack bidirectional client |
+| `plugin_client_slack` | client_interface | Slack bidirectional client (see tuning below) |
 | `plugin_database_mysql` | data_tool | `db_query` tool |
 | `plugin_storage_googledrive` | data_tool | `google_drive` tool |
 | `plugin_search_ddgs` | data_tool | `ddgs_search` tool (no key required) |
@@ -89,6 +89,40 @@ python plugin-manager.py disable <plugin_name>   # disable a plugin
 | `plugin_search_xai` | data_tool | `xai_search` tool |
 | `plugin_search_google` | data_tool | `google_search` tool |
 | `plugin_urlextract_tavily` | data_tool | `url_extract` tool |
+
+### Slack Plugin Tuning
+
+The Slack plugin posts each agent turn to Slack immediately as it completes, rather than
+waiting for the full conversation to finish. After each turn it waits up to
+`inter_turn_timeout` seconds for the next turn to begin before declaring the conversation done.
+
+**Why you may need to tune this:**
+
+- **Too low (< 10s):** The final summary from the orchestrating LLM (e.g. grok4) is cut off.
+  After the last `agent_call` returns, the LLM still needs one more inference pass to generate
+  its synthesis — frontier models typically need 3–10s for this. If the timeout expires first,
+  the Slack conversation ends without the closing summary.
+- **Too high (> 60s):** No functional harm, but the Slack thread stays "open" for longer after
+  the last message appears, which may look like the agent is still working.
+
+**Default:** 30 seconds. Configure in `plugins-enabled.json`:
+
+```json
+"plugin_client_slack": {
+  "enabled": true,
+  "slack_port": 8766,
+  "slack_host": "0.0.0.0",
+  "inter_turn_timeout": 30
+}
+```
+
+Override without editing JSON using `.env`:
+```
+SLACK_INTER_TURN_TIMEOUT=45
+```
+The JSON value takes precedence over `.env` if both are set.
+
+---
 
 ### Model Commands
 
@@ -206,6 +240,23 @@ Gate pop-up preview length (shell.py only):
 !gate_preview_length [n]        get/set gate approval preview char limit
 ```
 
+### Agent Streaming Control
+
+```
+!stream                 show current agent_call streaming setting (default: enabled)
+!stream <true|false>    enable/disable real-time token relay from remote agent
+```
+
+> **Note:** The primary node is always the orchestrator. The remote agent responds
+> to single messages — it does not itself call agent_call back. Multi-turn conversations
+> are conducted by the primary node making repeated agent_call invocations, one per turn.
+
+When enabled (default), remote agent tokens are relayed via push_tok in real-time —
+Slack sees each remote turn as it completes rather than as a batch at the end.
+Set to `false` to suppress streaming and return only the final result.
+
+---
+
 ### LLM Tool Calls
 
 Control which models the session LLM can delegate to via `llm_call_clean`:
@@ -272,78 +323,6 @@ Container sections cannot be directly edited — edit their child sections inste
 ---
 
 ## Deployment
-
-### Automated node setup (`setup-agent-mcp.sh`)
-
-`setup-agent-mcp.sh` (repo root) automates cloning the repo, creating a venv,
-installing requirements, and pulling all secrets/config from an existing reference
-installation — so a new node is fully configured and ready to start in one step.
-
-#### Prerequisites
-
-- **Python 3.11+** via pyenv (recommended) or system Python
-- **SSH key auth** from the new machine back to the dev machine (when deploying remotely):
-  ```bash
-  # On the new/remote machine — one-time setup:
-  ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
-  ssh-copy-id user@192.168.1.10   # your dev machine IP
-  ```
-
-#### Local clone (same machine, new directory)
-
-```bash
-mkdir ~/projects/mynode && cd ~/projects/mynode
-bash /path/to/setup-agent-mcp.sh \
-    --source-dir /path/to/your/dev/install
-```
-
-#### Remote node (different machine)
-
-```bash
-# On the remote machine:
-mkdir ~/projects/mynode && cd ~/projects/mynode
-# Download the script from the repo (or scp it from your dev machine)
-curl -O https://raw.githubusercontent.com/derezed88/agent-mcp/main/setup-agent-mcp.sh
-
-bash setup-agent-mcp.sh \
-    --source-host 192.168.1.10 \
-    --source-dir /path/to/your/dev/install \
-    [--source-user <user>]        # SSH user on dev machine (default: $USER)
-    [--branch <branch>]           # git branch to check out (default: main)
-    [--name <dirname>]            # target directory name (default: agent-mcp)
-```
-
-The script will:
-1. Verify SSH connectivity to the dev machine
-2. Clone the repo (SSH if a GitHub key is present, HTTPS otherwise)
-3. Create a venv with the correct Python version (reads `.python-version`)
-4. Install all requirements
-5. Pull from the dev machine via `scp`: `.env`, `credentials.json`, `token.json`,
-   `llm-models.json`, `.python-version`, service account JSON, and all `.system_prompt*` files
-6. Run an import check and display the port configuration
-
-#### After setup
-
-```bash
-cd agent-mcp   # (or --name value)
-source venv/bin/activate
-
-# If running alongside other instances on the same machine, reassign ports first:
-python plugin-manager.py port-list
-python plugin-manager.py port-set plugin_client_shellpy 8770
-python plugin-manager.py port-set plugin_client_api     8777
-
-python agent-mcp.py       # terminal 1 — server
-python shell.py           # terminal 2 — client
-```
-
-#### What is NOT copied
-
-`plugins-enabled.json` is intentionally not copied. Each node gets the repo's
-clean defaults. Adjust ports and plugin state per-instance with `plugin-manager.py`
-after setup.
-
----
 
 ### Development (foreground)
 

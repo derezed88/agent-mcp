@@ -10,8 +10,10 @@ Provides bidirectional Slack integration with asymmetric transport:
 """
 
 import os
+import re
 import json
 import asyncio
+import time
 from typing import List, Dict, Optional
 from starlette.routing import Route
 from starlette.requests import Request
@@ -48,12 +50,17 @@ class SlackClientPlugin(BasePlugin):
         self.enabled = False
         self.slack_port = 8766
         self.slack_host = "0.0.0.0"
+        self.inter_turn_timeout = 30.0
         self.slack_client: Optional[AsyncWebClient] = None
         self.socket_client: Optional[SocketModeClient] = None
 
         # Map Slack thread_ts to agent session_id and channel
         # Format: {"thread_ts_or_channel_ts": {"session_id": "sess_xyz", "channel_id": "C123"}}
         self.slack_sessions: Dict[str, Dict[str, str]] = {}
+
+        # One active consumer task per client_id — prevents queue bleed when
+        # rapid messages arrive before the previous consumer has exited.
+        self._consumer_tasks: Dict[str, asyncio.Task] = {}
 
         # Background task for Socket Mode listener
         self._socket_task: Optional[asyncio.Task] = None
@@ -68,6 +75,10 @@ class SlackClientPlugin(BasePlugin):
             # Get configuration
             self.slack_port = config.get('slack_port', 8766)
             self.slack_host = config.get('slack_host', '0.0.0.0')
+            self.inter_turn_timeout = float(
+                config.get("inter_turn_timeout",
+                os.getenv("SLACK_INTER_TURN_TIMEOUT", "30"))
+            )
 
             # Get Slack credentials from environment
             bot_token = os.getenv("SLACK_BOT_TOKEN")
@@ -281,8 +292,16 @@ class SlackClientPlugin(BasePlugin):
 
         session_info = self.slack_sessions[thread_ts]
 
-        # Create task to consume agent responses and send to Slack
-        asyncio.create_task(self._consume_agent_responses(client_id, channel_id, thread_ts))
+        # Cancel any previous consumer for this client_id before starting a new one.
+        # Without this, rapid messages spawn multiple consumers that race on the same
+        # queue — causing responses from conversation N to appear during conversation N+1.
+        # We fire-and-forget the cancel (don't await) to avoid blocking the event handler.
+        old_task = self._consumer_tasks.get(client_id)
+        if old_task and not old_task.done():
+            old_task.cancel()
+
+        task = asyncio.create_task(self._consume_agent_responses(client_id, channel_id, thread_ts))
+        self._consumer_tasks[client_id] = task
 
         # Submit message to agent (same as shell.py does via /submit)
         # This will trigger process_request which handles !commands and LLM
@@ -297,6 +316,54 @@ class SlackClientPlugin(BasePlugin):
         # Process through agent (imported from routes.py)
         asyncio.create_task(process_request(client_id, text, payload))
 
+    # Two-pass regexes to strip push_tok bracket status lines from agent output.
+    #
+    # Pass 1 — "owned body" tags: bracket lines that own the body lines immediately
+    # following them.  Two sub-cases:
+    #   a) Tag line ends with ":" — e.g. "[agent_call ◀] url:\nbody text"
+    #   b) Tag line contains "◀" (close/result tag) — e.g. "[search ddgs ◀]\nresults…"
+    # Both the tag line and its body are removed because the LLM always writes its
+    # own summary of the result afterwards.
+    _STATUS_OWNED_RE = re.compile(
+        r'\[(?:agent_call|tool_call|llm_clean_text|llm_clean_tool'
+        r'|db|search\s+\w+|sysprompt|sysinfo|drive)[^\]]*\]'
+        r'[^\n]*(?::|◀)[^\n]*\n'
+        r'(?:(?!\[)[^\n]+\n?)*',
+        re.MULTILINE,
+    )
+    # Pass 2 — standalone bracket tag lines (▶ progress lines, bare ◀, ✗ errors,
+    # [Max iterations], [RATE LIMITED], [REJECTED], [catcher], [context], etc.)
+    _STATUS_STANDALONE_RE = re.compile(
+        r'^\[(?:agent_call|tool_call|llm_clean_text|llm_clean_tool'
+        r'|db|search\s+\w+|sysprompt|sysinfo|drive|catcher|context'
+        r'|RATE\s+LIMITED|REJECTED|Max\s+iterations)[^\]]*\][^\n]*\n?',
+        re.MULTILINE,
+    )
+
+    @classmethod
+    def _filter_status_lines(cls, text: str) -> str:
+        """Remove push_tok status bracket lines (and their owned bodies) from agent output."""
+        filtered = cls._STATUS_OWNED_RE.sub('', text)
+        filtered = cls._STATUS_STANDALONE_RE.sub('', filtered)
+        # Collapse runs of blank lines that may be left behind
+        filtered = re.sub(r'\n{3,}', '\n\n', filtered)
+        return filtered.strip()
+
+    async def _update_slack_message(
+        self, channel_id: str, message_ts: str, text: str
+    ) -> None:
+        """Edit an existing Slack message in-place via chat.update."""
+        if not self.slack_client:
+            return
+        try:
+            await self.slack_client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text=text,
+            )
+        except Exception as e:
+            log.warning(f"Slack chat.update failed: {e}")
+
     async def _consume_agent_responses(
         self,
         client_id: str,
@@ -307,6 +374,16 @@ class SlackClientPlugin(BasePlugin):
         Consume responses from agent queue and send to Slack.
 
         Similar to how shell.py consumes via SSE stream.
+
+        Multi-turn behaviour: after each agent turn completes (done event) the
+        accumulated text is posted to Slack immediately so the user sees progress.
+        Accumulation then resets for the next turn.  The final turn's post is the
+        last message the user sees — no silent 2-minute wait.
+
+        Heartbeat: while waiting for the first token (e.g. during a long agent_call),
+        a "_(working...)_" message is posted and edited in-place every 30 seconds so
+        the user knows the system is alive.  The heartbeat stops the moment real
+        content arrives; its final state is left in the thread as a breadcrumb.
         """
         if not self.slack_client:
             log.error("Slack client not initialized")
@@ -315,70 +392,201 @@ class SlackClientPlugin(BasePlugin):
         # Get the queue for this client
         queue = await get_queue(client_id)
 
-        # Accumulate response text
-        response_parts = []
+        # Accumulate tokens for the current turn
+        response_parts: List[str] = []
+        turn_index = 0  # which agent turn we are on (0-based)
 
         # Multi-turn agents (tool call → LLM response) emit multiple "done" signals.
-        # After each "done" we wait a short grace period for the next turn to start.
+        # After each "done" we post the turn's output immediately, then wait a short
+        # grace period for the next turn to start.
         # If nothing arrives within the grace period, the conversation is truly finished.
-        FIRST_TIMEOUT = 120.0   # max wait for first token (LLM can be slow)
-        INTER_TURN_TIMEOUT = 5.0  # grace period between turns after a "done"
+        FIRST_TIMEOUT = 300.0   # max wait for first token; raised to cover 5-turn agent_call
+        HEARTBEAT_INTERVAL = 30.0  # how often to update the "working" message
+        INTER_TURN_TIMEOUT = self.inter_turn_timeout  # configurable via plugins-enabled.json
 
         timeout = FIRST_TIMEOUT
         received_done = False
 
+        # Heartbeat state
+        heartbeat_ts: Optional[str] = None   # ts of the posted "working" message
+        heartbeat_task: Optional[asyncio.Task] = None
+        start_time = time.monotonic()
+        first_token_received = False
+
+        async def _start_heartbeat() -> None:
+            """Post an initial 'working' message and then edit it every 30s.
+
+            Waits HEARTBEAT_INTERVAL before posting so fast responses never
+            see the heartbeat at all — it only appears during long waits.
+            """
+            nonlocal heartbeat_ts
+            try:
+                # Initial delay — if content arrives quickly, we never post
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                resp = await self.slack_client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="_(working…)_",
+                )
+                heartbeat_ts = resp.get("ts")
+                while True:
+                    await asyncio.sleep(HEARTBEAT_INTERVAL)
+                    elapsed = int(time.monotonic() - start_time)
+                    mins, secs = divmod(elapsed, 60)
+                    elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                    await _update_heartbeat(f"_(working… {elapsed_str})_")
+            except asyncio.CancelledError:
+                pass  # normal — cancelled when real content arrives
+            except Exception as e:
+                log.warning(f"Heartbeat error: {e}")
+
+        async def _update_heartbeat(text: str) -> None:
+            if heartbeat_ts:
+                await _update_slack_message(channel_id, heartbeat_ts, text)
+
+        async def _stop_heartbeat(final_text: Optional[str] = None) -> None:
+            """Cancel the heartbeat task and optionally set a final message."""
+            nonlocal heartbeat_task
+            if heartbeat_task and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+            heartbeat_task = None
+            if final_text and heartbeat_ts:
+                await _update_heartbeat(final_text)
+
+        # Local alias so inner functions can call instance method without self
+        async def _update_slack_message(ch: str, ts: str, text: str) -> None:
+            await self._update_slack_message(ch, ts, text)
+
+        # ts of the first turn's Slack message — kept so we can retroactively
+        # prepend "_(turn 1)_" when a second turn arrives, without labeling
+        # single-turn responses at all.
+        first_turn_ts: Optional[str] = None
+        first_turn_text: Optional[str] = None
+
+        async def _flush_turn(label: str) -> None:
+            """Post the current turn's accumulated text to Slack and reset."""
+            nonlocal response_parts, turn_index, first_turn_ts, first_turn_text
+            if response_parts:
+                # push_tok encodes newlines as \\n literals; restore them before
+                # filtering so the line-anchored regexes work correctly.
+                turn_text = self._filter_status_lines(
+                    "".join(response_parts).replace("\\n", "\n")
+                )
+                if turn_text:
+                    if turn_index == 0:
+                        # First turn: post without a label for now.  If a second
+                        # turn arrives we'll retroactively edit this message to add
+                        # "_(turn 1)_" so single-turn responses stay clean.
+                        first_turn_ts = await self._send_slack_message(channel_id, thread_ts, turn_text)
+                        first_turn_text = turn_text
+                    else:
+                        if turn_index == 1 and first_turn_ts and first_turn_text:
+                            # Second turn arriving — retroactively label turn 1
+                            await _update_slack_message(
+                                channel_id, first_turn_ts,
+                                f"_(turn 1)_\n{first_turn_text}"
+                            )
+                        # Post this turn with its label
+                        await self._send_slack_message(
+                            channel_id, thread_ts,
+                            f"_(turn {turn_index + 1})_\n{turn_text}"
+                        )
+                    log.info(f"Slack: posted {label} for {client_id} (turn {turn_index + 1})")
+                    turn_index += 1  # only advance on visible output
+            response_parts = []
+
+        cancelled = False
         try:
+            # Start heartbeat immediately — covers the initial wait before any token
+            # arrives (e.g. during a long blocking agent_call sequence).
+            heartbeat_task = asyncio.create_task(_start_heartbeat())
+
             while True:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=timeout)
                     received_done = False  # reset: activity means we're still in a turn
                 except asyncio.TimeoutError:
                     if received_done:
-                        # Grace period expired after a "done" — conversation finished
+                        # Grace period expired after a "done" — conversation finished.
+                        # The turn was already flushed on the done event; nothing left to do.
+                        await _stop_heartbeat()
                         break
                     else:
                         # No response at all within FIRST_TIMEOUT
                         log.warning(f"Slack consumer timeout waiting for response from {client_id}")
+                        await _stop_heartbeat("_(timed out)_")
+                        # Flush whatever we have (may be empty)
+                        await _flush_turn("timeout flush")
                         break
 
                 item_type = item.get("t")
 
                 if item_type == "tok":
+                    # First real token — stop heartbeat before appending content
+                    if not first_token_received:
+                        first_token_received = True
+                        await _stop_heartbeat("_(done working)_")
                     # Token/text data
                     response_parts.append(item["d"])
                     timeout = FIRST_TIMEOUT  # reset to long timeout while active
 
                 elif item_type == "done":
-                    # One turn complete — switch to short grace period for next turn
+                    # One turn complete — post immediately, then wait for next turn
+                    await _stop_heartbeat()
+                    await _flush_turn("turn complete")
                     received_done = True
                     timeout = INTER_TURN_TIMEOUT
+                    # Start heartbeat for next inter-turn wait
+                    first_token_received = False
+                    heartbeat_ts = None
+                    heartbeat_task = asyncio.create_task(_start_heartbeat())
 
                 elif item_type == "err":
-                    # Error occurred
+                    # Error occurred — append and flush immediately
+                    await _stop_heartbeat("_(error)_")
                     error_msg = item.get("d", "Unknown error")
                     response_parts.append(f"\n\n⚠️ Error: {error_msg}")
+                    await _flush_turn("error")
                     break
 
                 elif item_type == "gate":
                     # Gate request - inform user that approval is needed
+                    await _stop_heartbeat()
                     gate_data = item.get("d", {})
                     tool_name = gate_data.get("tool_name", "unknown")
-                    response_parts.append(
-                        f"\n\n🔒 Gate approval required for tool: `{tool_name}`\n"
+                    gate_notice = (
+                        f"🔒 Gate approval required for tool: `{tool_name}`\n"
                         f"(Approval must be provided via shell.py client)"
                     )
+                    await self._send_slack_message(channel_id, thread_ts, gate_notice)
                     timeout = FIRST_TIMEOUT  # gate may take a while
                     received_done = False
                     # Continue listening for more responses
 
-            # Send accumulated response to Slack
-            if response_parts:
-                full_response = "".join(response_parts).strip()
-                if full_response:
-                    await self._send_slack_message(channel_id, thread_ts, full_response)
-
+        except asyncio.CancelledError:
+            # Cancelled by a new incoming message — do NOT drain the queue.
+            # The new consumer will pick up whatever process_request already
+            # put there for the next message.
+            cancelled = True
+            await _stop_heartbeat()
+            raise
         except Exception as e:
             log.error(f"Error consuming agent responses for {client_id}: {e}", exc_info=True)
+            await _stop_heartbeat("_(error)_")
+        finally:
+            # Drain stale queue items on normal or error exit — but NOT on cancel,
+            # because the cancelling message's process_request may have already
+            # put its tok+done into the queue for the new consumer to pick up.
+            if not cancelled:
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
     @staticmethod
     def _close_open_backticks(text: str) -> str:
@@ -411,16 +619,19 @@ class SlackClientPlugin(BasePlugin):
             return text + '`'
         return text
 
-    async def _send_slack_message(self, channel_id: str, thread_ts: str, text: str) -> None:
+    async def _send_slack_message(self, channel_id: str, thread_ts: str, text: str) -> Optional[str]:
         """
         Send message to Slack channel/thread via Web API (chat.postMessage).
 
         Authenticated via SLACK_BOT_TOKEN. Supports threaded replies and
         automatic chunking for messages exceeding Slack's ~4000 char limit.
+
+        Returns the Slack message ts of the first posted chunk, or None on error.
+        The ts can be used with _update_slack_message() to retroactively edit the message.
         """
         if not self.slack_client:
             log.error("Slack client not initialized")
-            return
+            return None
 
         try:
             # Clean up text for Slack rendering
@@ -430,15 +641,17 @@ class SlackClientPlugin(BasePlugin):
             # Slack has a ~4000 character limit for messages
             # Split into chunks if needed
             max_chunk_size = 3500
+            first_ts: Optional[str] = None
 
             if len(cleaned_text) <= max_chunk_size:
                 # Close any unclosed backtick spans before sending
                 cleaned_text = self._close_open_backticks(cleaned_text)
-                await self.slack_client.chat_postMessage(
+                resp = await self.slack_client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
                     text=cleaned_text
                 )
+                first_ts = resp.get("ts")
                 log.info(f"Sent Slack message to {channel_id}/{thread_ts} ({len(cleaned_text)} chars)")
             else:
                 # Split into chunks
@@ -449,17 +662,22 @@ class SlackClientPlugin(BasePlugin):
                     prefix = f"(Part {i+1}/{len(chunks)})\n" if len(chunks) > 1 else ""
                     # Close any unclosed backtick spans at chunk boundary
                     chunk = self._close_open_backticks(chunk)
-                    await self.slack_client.chat_postMessage(
+                    resp = await self.slack_client.chat_postMessage(
                         channel=channel_id,
                         thread_ts=thread_ts,
                         text=prefix + chunk
                     )
+                    if i == 0:
+                        first_ts = resp.get("ts")
                     # Small delay between chunks to avoid rate limits
                     if i < len(chunks) - 1:
                         await asyncio.sleep(0.5)
 
+            return first_ts
+
         except Exception as e:
             log.error(f"Error sending Slack message: {e}", exc_info=True)
+            return None
 
     # =========================================================================
     # Status endpoints

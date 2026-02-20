@@ -1,6 +1,7 @@
 import os
+import shutil
 from typing import List, Dict, Optional, Tuple, Set
-from config import log, SYSTEM_PROMPT_FILE
+from config import log, SYSTEM_PROMPT_FILE, BASE_DIR, LLM_MODELS_FILE
 
 # ---------------------------------------------------------------------------
 # SECTIONAL SYSTEM PROMPT DESIGN
@@ -29,7 +30,7 @@ from config import log, SYSTEM_PROMPT_FILE
 # ---------------------------------------------------------------------------
 
 DEFAULT_MAIN_PROMPT = """\
-You are Robot, an AI assistant with persistent memory via a MySQL database (mymcp).
+You are an AI assistant with persistent memory via a MySQL database (mymcp).
 You are an autonomous agent. When you need information, you MUST use a tool call. Do not explain your steps. Do not provide Markdown code blocks. If you have a tool available for a task, use it immediately.
 
 [SECTIONS]
@@ -50,9 +51,16 @@ _sections: List[Dict] = []
 _cached_full_prompt: Optional[str] = None
 
 
-def _get_section_file_path(section_name: str) -> str:
-    """Return the file path for a given section name."""
-    base_dir = os.path.dirname(SYSTEM_PROMPT_FILE)
+SYSTEM_PROMPT_BASE = os.path.join(BASE_DIR, "system_prompt")
+
+
+def _get_section_file_path(section_name: str, folder: Optional[str] = None) -> str:
+    """Return the file path for a given section name.
+
+    If folder is provided, use it as the base directory.
+    Otherwise fall back to the directory of SYSTEM_PROMPT_FILE.
+    """
+    base_dir = folder if folder else os.path.dirname(SYSTEM_PROMPT_FILE)
     return os.path.join(base_dir, f".system_prompt_{section_name}")
 
 
@@ -96,6 +104,7 @@ def _load_section_recursive(
     parent: Optional[str],
     ancestors: Set[str],
     all_seen: Set[str],
+    folder: Optional[str] = None,
 ) -> List[Dict]:
     """
     Load a section file recursively.
@@ -105,6 +114,7 @@ def _load_section_recursive(
 
     ancestors: set of section names in the current call stack (loop detection)
     all_seen: set of all section names registered so far (duplicate detection)
+    folder: optional base folder path; overrides the default SYSTEM_PROMPT_FILE directory
     """
     # Loop detection
     if section_name in ancestors:
@@ -136,7 +146,7 @@ def _load_section_recursive(
 
     all_seen.add(section_name)
 
-    file_path = _get_section_file_path(section_name)
+    file_path = _get_section_file_path(section_name, folder)
     if not os.path.exists(file_path):
         log.warning(f"Section file not found: {file_path}")
         return [{
@@ -191,7 +201,7 @@ def _load_section_recursive(
         for child_name, child_desc in sub_section_list:
             child_sections = _load_section_recursive(
                 child_name, child_desc, depth + 1, section_name,
-                new_ancestors, all_seen
+                new_ancestors, all_seen, folder=folder
             )
             result.extend(child_sections)
         return result
@@ -232,6 +242,7 @@ def load_system_prompt() -> str:
     """
     Load the system prompt from disk recursively.
     Builds a flat _sections list from the full section tree.
+    Uses the default SYSTEM_PROMPT_FILE path (backward compatible).
     """
     global _main_paragraph, _sections, _cached_full_prompt
 
@@ -271,6 +282,53 @@ def load_system_prompt() -> str:
         f"{total} sections ({leaves} leaf, {total - leaves} container)"
     )
     return _cached_full_prompt
+
+
+def load_prompt_for_folder(folder: str) -> str:
+    """
+    Stateless: load and assemble the system prompt from a specific folder.
+    Does NOT mutate any global state — safe to call for any model at any time.
+
+    The folder must contain a '.system_prompt' root file and optional
+    '.system_prompt_<name>' section files.
+
+    Returns the assembled prompt string.
+    """
+    root_file = os.path.join(folder, ".system_prompt")
+    if not os.path.exists(root_file):
+        log.warning(f"load_prompt_for_folder: no .system_prompt in {folder}")
+        return DEFAULT_MAIN_PROMPT
+
+    try:
+        with open(root_file, 'r', encoding='utf-8') as fh:
+            content = fh.read()
+    except Exception as exc:
+        log.warning(f"load_prompt_for_folder: could not read {root_file}: {exc}")
+        return DEFAULT_MAIN_PROMPT
+
+    main_paragraph, section_list = _parse_main_prompt(content)
+
+    all_seen: Set[str] = set()
+    sections: List[Dict] = []
+    for short_name, description in section_list:
+        loaded = _load_section_recursive(
+            short_name, description, depth=0, parent=None,
+            ancestors=set(), all_seen=all_seen, folder=folder
+        )
+        sections.extend(loaded)
+
+    # Assemble without touching globals
+    parts = [main_paragraph]
+    for section in sections:
+        depth = section.get('depth', 0)
+        prefix = "##" + "#" * depth
+        header = f"\n\n{prefix} {section['short-section-name']}: {section['description']}"
+        body = section['body']
+        if body:
+            parts.append(header + "\n" + body)
+        else:
+            parts.append(header)
+    return '\n'.join(parts)
 
 
 def _assemble_full_prompt() -> str:
@@ -345,9 +403,9 @@ def list_sections() -> List[Dict]:
     ]
 
 
-def _write_section_file(section_name: str, content: str) -> None:
+def _write_section_file(section_name: str, content: str, folder: Optional[str] = None) -> None:
     """Write content to a section file, including the ## header."""
-    file_path = _get_section_file_path(section_name)
+    file_path = _get_section_file_path(section_name, folder)
 
     description = ""
     for section in _sections:
@@ -467,3 +525,239 @@ def apply_prompt_operation(
 
     log.info(f"apply_prompt_operation({section_name}, {op}): {msg}")
     return new_body, msg
+
+
+# ---------------------------------------------------------------------------
+# Sysprompt CRUD Library
+# ---------------------------------------------------------------------------
+# Functions for managing per-model system prompt folders.
+# All accept a model_key and resolve the folder from LLM_REGISTRY.
+# "self" is resolved by callers before passing here.
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+
+def _sp_get_folder(model_key: str, llm_registry: dict) -> Optional[str]:
+    """
+    Return the absolute folder path for a model's system prompts.
+    Returns None if model not found or folder is 'none'.
+    """
+    model_cfg = llm_registry.get(model_key, {})
+    folder_rel = model_cfg.get("system_prompt_folder", "")
+    if not folder_rel or folder_rel.lower() == "none":
+        return None
+    return os.path.join(BASE_DIR, folder_rel)
+
+
+def sp_resolve_model(model_key_or_self: str, current_model: str) -> str:
+    """Resolve 'self' to the current model key."""
+    if model_key_or_self.lower() == "self":
+        return current_model
+    return model_key_or_self
+
+
+def sp_list_files(model_key: str, llm_registry: dict) -> str:
+    """
+    List all .system_prompt* files in the model's folder.
+    Returns a formatted string.
+    """
+    folder = _sp_get_folder(model_key, llm_registry)
+    if folder is None:
+        return f"Model '{model_key}' has no system_prompt_folder configured (or set to 'none')."
+    if not os.path.isdir(folder):
+        return f"Folder does not exist: {folder}"
+
+    files = sorted(
+        f for f in os.listdir(folder)
+        if f.startswith(".system_prompt") or f == ".system_prompt"
+    )
+    if not files:
+        return f"No .system_prompt* files in {folder}"
+
+    lines = [f"System prompt files for '{model_key}' in {folder}:"]
+    for fname in files:
+        fpath = os.path.join(folder, fname)
+        size = os.path.getsize(fpath)
+        lines.append(f"  {fname}  ({size} bytes)")
+    return "\n".join(lines)
+
+
+def sp_read_prompt(model_key: str, llm_registry: dict) -> str:
+    """
+    Load and assemble the full system prompt for a model (stateless).
+    """
+    folder = _sp_get_folder(model_key, llm_registry)
+    if folder is None:
+        return f"Model '{model_key}' has no system_prompt_folder configured."
+    return load_prompt_for_folder(folder)
+
+
+def sp_read_file(model_key: str, filename: str, llm_registry: dict) -> str:
+    """
+    Read a specific file from the model's system prompt folder.
+    filename can be a bare section name (e.g. 'behavior') or a full filename
+    (e.g. '.system_prompt_behavior' or '.system_prompt').
+    """
+    folder = _sp_get_folder(model_key, llm_registry)
+    if folder is None:
+        return f"Model '{model_key}' has no system_prompt_folder configured."
+
+    # Resolve filename
+    if filename == ".system_prompt":
+        fpath = os.path.join(folder, ".system_prompt")
+    elif filename.startswith(".system_prompt"):
+        fpath = os.path.join(folder, filename)
+    else:
+        fpath = os.path.join(folder, f".system_prompt_{filename}")
+
+    if not os.path.exists(fpath):
+        return f"File not found: {fpath}"
+
+    try:
+        with open(fpath, 'r', encoding='utf-8') as fh:
+            return fh.read()
+    except Exception as exc:
+        return f"Error reading {fpath}: {exc}"
+
+
+def sp_write_file(model_key: str, filename: str, data: str, llm_registry: dict) -> str:
+    """
+    Overwrite or create a file in the model's system prompt folder.
+    filename can be a bare section name or full filename.
+    Creates the folder if it doesn't exist.
+    """
+    folder = _sp_get_folder(model_key, llm_registry)
+    if folder is None:
+        return f"Model '{model_key}' has no system_prompt_folder configured."
+
+    os.makedirs(folder, exist_ok=True)
+
+    if filename == ".system_prompt":
+        fpath = os.path.join(folder, ".system_prompt")
+    elif filename.startswith(".system_prompt"):
+        fpath = os.path.join(folder, filename)
+    else:
+        fpath = os.path.join(folder, f".system_prompt_{filename}")
+
+    try:
+        with open(fpath, 'w', encoding='utf-8') as fh:
+            fh.write(data)
+        return f"Wrote {len(data)} bytes to {fpath}"
+    except Exception as exc:
+        return f"Error writing {fpath}: {exc}"
+
+
+def sp_delete_file(model_key: str, filename: str, llm_registry: dict) -> str:
+    """
+    Delete a specific file from the model's system prompt folder.
+    """
+    folder = _sp_get_folder(model_key, llm_registry)
+    if folder is None:
+        return f"Model '{model_key}' has no system_prompt_folder configured."
+
+    if filename == ".system_prompt":
+        fpath = os.path.join(folder, ".system_prompt")
+    elif filename.startswith(".system_prompt"):
+        fpath = os.path.join(folder, filename)
+    else:
+        fpath = os.path.join(folder, f".system_prompt_{filename}")
+
+    if not os.path.exists(fpath):
+        return f"File not found: {fpath}"
+
+    try:
+        os.remove(fpath)
+        return f"Deleted: {fpath}"
+    except Exception as exc:
+        return f"Error deleting {fpath}: {exc}"
+
+
+def sp_delete_directory(model_key: str, llm_registry: dict) -> str:
+    """
+    Delete the entire system prompt folder for a model and set
+    system_prompt_folder to 'none' in llm-models.json.
+    """
+    folder = _sp_get_folder(model_key, llm_registry)
+    if folder is None:
+        return f"Model '{model_key}' has no folder to delete."
+
+    try:
+        shutil.rmtree(folder)
+    except Exception as exc:
+        return f"Error deleting folder {folder}: {exc}"
+
+    # Update llm-models.json
+    try:
+        with open(LLM_MODELS_FILE, 'r') as f:
+            data = _json.load(f)
+        if model_key in data.get('models', {}):
+            data['models'][model_key]['system_prompt_folder'] = 'none'
+            with open(LLM_MODELS_FILE, 'w') as f:
+                _json.dump(data, f, indent=2)
+            llm_registry[model_key]['system_prompt_folder'] = 'none'
+    except Exception as exc:
+        return f"Folder deleted but failed to update llm-models.json: {exc}"
+
+    return f"Deleted folder {folder} and set system_prompt_folder='none' for '{model_key}'."
+
+
+def sp_copy_directory(src_model: str, new_dir: str, llm_registry: dict) -> str:
+    """
+    Copy a model's system prompt folder to system_prompt/<new_dir>.
+    new_dir must be a simple directory name (no slashes).
+    """
+    src_folder = _sp_get_folder(src_model, llm_registry)
+    if src_folder is None:
+        return f"Model '{src_model}' has no system_prompt_folder configured."
+    if not os.path.isdir(src_folder):
+        return f"Source folder does not exist: {src_folder}"
+
+    # Sanitize new_dir
+    new_dir_clean = os.path.basename(new_dir.strip("/\\"))
+    if not new_dir_clean:
+        return "ERROR: new_dir must be a non-empty directory name."
+
+    dst_folder = os.path.join(SYSTEM_PROMPT_BASE, new_dir_clean)
+    if os.path.exists(dst_folder):
+        return f"ERROR: Destination already exists: {dst_folder}"
+
+    try:
+        shutil.copytree(src_folder, dst_folder)
+        return f"Copied '{src_model}' prompts to {dst_folder}"
+    except Exception as exc:
+        return f"Error copying to {dst_folder}: {exc}"
+
+
+def sp_set_directory(model_key: str, new_dir: str) -> str:
+    """
+    Set a model's system_prompt_folder to system_prompt/<new_dir>
+    in llm-models.json and in the in-memory LLM_REGISTRY.
+    """
+    new_dir_clean = os.path.basename(new_dir.strip("/\\"))
+    if not new_dir_clean:
+        return "ERROR: new_dir must be a non-empty directory name."
+
+    new_folder_rel = f"system_prompt/{new_dir_clean}"
+    new_folder_abs = os.path.join(BASE_DIR, new_folder_rel)
+
+    if not os.path.isdir(new_folder_abs) and new_dir_clean.lower() != "none":
+        return f"ERROR: Directory does not exist: {new_folder_abs}"
+
+    try:
+        with open(LLM_MODELS_FILE, 'r') as f:
+            data = _json.load(f)
+        if model_key not in data.get('models', {}):
+            return f"ERROR: Model '{model_key}' not found in llm-models.json."
+        data['models'][model_key]['system_prompt_folder'] = new_folder_rel
+        with open(LLM_MODELS_FILE, 'w') as f:
+            _json.dump(data, f, indent=2)
+    except Exception as exc:
+        return f"Error updating llm-models.json: {exc}"
+
+    # Update in-memory registry
+    from config import LLM_REGISTRY
+    if model_key in LLM_REGISTRY:
+        LLM_REGISTRY[model_key]['system_prompt_folder'] = new_folder_rel
+
+    return f"Set system_prompt_folder='{new_folder_rel}' for model '{model_key}'."
