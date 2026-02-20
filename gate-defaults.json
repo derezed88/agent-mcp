@@ -32,11 +32,13 @@
       "read": true
     },
     "limit_list": {
-      "read": false
+      "read": true
     },
     "tmux": {
-      "read": false,
       "write": false
+    },
+    "gate_list": {
+      "read": true
     }
   }
 }

@@ -413,21 +413,23 @@ class TmuxPlugin(BasePlugin):
 
     def get_gate_tools(self) -> Dict[str, Any]:
         """
-        Read tools: tmux_ls, tmux_history  — gated via tmux_gate_read
-        Write tools: all others            — gated via tmux_gate_write
+        All tmux tools are write-gated via !tmux_gate_write <true|false>.
+        There is no read gate — tmux_ls and tmux_history expose session topology
+        and command history (including credentials) so they are not safe to
+        auto-allow independently of write operations.
         """
         return {
             "tmux_new":           {"type": "tmux", "operations": ["write"],
                                    "description": "create a new PTY shell session"},
             "tmux_exec":          {"type": "tmux", "operations": ["write"],
                                    "description": "execute a command in a PTY session"},
-            "tmux_ls":            {"type": "tmux", "operations": ["read"],
+            "tmux_ls":            {"type": "tmux", "operations": ["write"],
                                    "description": "list active PTY sessions"},
             "tmux_kill_session":  {"type": "tmux", "operations": ["write"],
                                    "description": "terminate a named PTY session"},
             "tmux_kill_server":   {"type": "tmux", "operations": ["write"],
                                    "description": "terminate all PTY sessions"},
-            "tmux_history":       {"type": "tmux", "operations": ["read"],
+            "tmux_history":       {"type": "tmux", "operations": ["write"],
                                    "description": "show session rolling history"},
             "tmux_history_limit": {"type": "tmux", "operations": ["write"],
                                    "description": "change the rolling history line limit"},

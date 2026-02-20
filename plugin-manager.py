@@ -1057,7 +1057,7 @@ class PluginManager:
         "session":        ["read", "write"],
         "model":          ["write"],
         "reset":          ["write"],
-        "tmux":           ["read", "write"],
+        "tmux":           ["write"],
     }
 
     def _load_gate_defaults(self) -> dict:
