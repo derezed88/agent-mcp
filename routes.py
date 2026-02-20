@@ -84,6 +84,8 @@ async def cmd_help(client_id: str):
         "  !llm_timeout <model> <seconds>            - set llm_call_timeout for a model\n"
         "  !llm_timeout <seconds>                    - set timeout for ALL models\n"
         "  !llm_timeout                              - list current timeouts\n"
+        "  !stream <true|false>                      - enable/disable streaming of agent_call tokens to this client\n"
+        "  !stream                                   - show current agent_call streaming setting\n"
         "\n"
         "AI tools (require human gate approval unless noted):\n"
         + "\n".join(tool_lines) + "\n"
@@ -977,6 +979,38 @@ async def cmd_tool_preview_length(client_id: str, arg: str, session: dict):
     await conditional_push_done(client_id)
 
 
+async def cmd_stream(client_id: str, arg: str, session: dict):
+    """
+    Get or set the agent_call streaming mode for this session.
+
+    When streaming is enabled (default), remote agent tokens are relayed via
+    push_tok in real-time so Slack and other clients see per-turn progress.
+    When disabled, agent_call blocks silently and returns only the final result.
+
+    !stream               - show current setting
+    !stream <true|false>  - enable or disable streaming
+    """
+    arg = arg.strip().lower()
+    if not arg:
+        current = session.get("agent_call_stream", True)
+        status = "enabled" if current else "disabled"
+        await push_tok(client_id, f"agent_call streaming: {status}")
+        await conditional_push_done(client_id)
+        return
+
+    if arg in ("true", "1", "yes", "on"):
+        session["agent_call_stream"] = True
+        await push_tok(client_id, "agent_call streaming enabled — remote tokens relayed in real-time.")
+    elif arg in ("false", "0", "no", "off"):
+        session["agent_call_stream"] = False
+        await push_tok(client_id, "agent_call streaming disabled — only final result returned.")
+    else:
+        await push_tok(client_id,
+            f"ERROR: Invalid value '{arg}'\n"
+            "Usage: !stream <true|false>")
+    await conditional_push_done(client_id)
+
+
 async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip: str = None):
     from state import get_or_create_shorthand_id
 
@@ -1033,6 +1067,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_llm_timeout(client_id, arg)
                 elif cmd == "tool_preview_length":
                     await cmd_tool_preview_length(client_id, arg, session)
+                elif cmd == "stream":
+                    await cmd_stream(client_id, arg, session)
                 else:
                     await push_tok(client_id, f"Unknown command: !{cmd}\nUse !help to see available commands.\n")
 
@@ -1099,6 +1135,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "tool_preview_length":
             await cmd_tool_preview_length(client_id, arg, session)
+            return
+        if cmd == "stream":
+            await cmd_stream(client_id, arg, session)
             return
 
         # Catch-all for unknown commands - don't pass to LLM

@@ -683,6 +683,12 @@ async def agent_call(
     if calling_client.startswith("api-swarm-"):
         return "[agent_call] Max swarm depth reached (1 hop). Call rejected to prevent recursion."
 
+    # Session-level streaming override: !stream true|false takes precedence over
+    # the LLM-supplied stream parameter so the human always has final control.
+    session_stream = sessions.get(calling_client, {}).get("agent_call_stream", None)
+    if session_stream is not None:
+        stream = session_stream
+
     # Derive a stable swarm client_id from calling session + agent URL so the
     # remote session persists across multiple agent_call invocations (same human
     # session talking to same remote agent = same remote session).
