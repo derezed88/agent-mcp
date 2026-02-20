@@ -13,6 +13,7 @@ import os
 import re
 import json
 import asyncio
+import time
 from typing import List, Dict, Optional
 from starlette.routing import Route
 from starlette.requests import Request
@@ -333,6 +334,21 @@ class SlackClientPlugin(BasePlugin):
         filtered = re.sub(r'\n{3,}', '\n\n', filtered)
         return filtered.strip()
 
+    async def _update_slack_message(
+        self, channel_id: str, message_ts: str, text: str
+    ) -> None:
+        """Edit an existing Slack message in-place via chat.update."""
+        if not self.slack_client:
+            return
+        try:
+            await self.slack_client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text=text,
+            )
+        except Exception as e:
+            log.warning(f"Slack chat.update failed: {e}")
+
     async def _consume_agent_responses(
         self,
         client_id: str,
@@ -348,6 +364,11 @@ class SlackClientPlugin(BasePlugin):
         accumulated text is posted to Slack immediately so the user sees progress.
         Accumulation then resets for the next turn.  The final turn's post is the
         last message the user sees — no silent 2-minute wait.
+
+        Heartbeat: while waiting for the first token (e.g. during a long agent_call),
+        a "_(working...)_" message is posted and edited in-place every 30 seconds so
+        the user knows the system is alive.  The heartbeat stops the moment real
+        content arrives; its final state is left in the thread as a breadcrumb.
         """
         if not self.slack_client:
             log.error("Slack client not initialized")
@@ -364,11 +385,66 @@ class SlackClientPlugin(BasePlugin):
         # After each "done" we post the turn's output immediately, then wait a short
         # grace period for the next turn to start.
         # If nothing arrives within the grace period, the conversation is truly finished.
-        FIRST_TIMEOUT = 120.0   # max wait for first token (LLM can be slow)
+        FIRST_TIMEOUT = 300.0   # max wait for first token; raised to cover 5-turn agent_call
+        HEARTBEAT_INTERVAL = 30.0  # how often to update the "working" message
         INTER_TURN_TIMEOUT = self.inter_turn_timeout  # configurable via plugins-enabled.json
 
         timeout = FIRST_TIMEOUT
         received_done = False
+
+        # Heartbeat state
+        heartbeat_ts: Optional[str] = None   # ts of the posted "working" message
+        heartbeat_task: Optional[asyncio.Task] = None
+        start_time = time.monotonic()
+        first_token_received = False
+
+        async def _start_heartbeat() -> None:
+            """Post an initial 'working' message and then edit it every 30s.
+
+            Waits HEARTBEAT_INTERVAL before posting so fast responses never
+            see the heartbeat at all — it only appears during long waits.
+            """
+            nonlocal heartbeat_ts
+            try:
+                # Initial delay — if content arrives quickly, we never post
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                resp = await self.slack_client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="_(working…)_",
+                )
+                heartbeat_ts = resp.get("ts")
+                while True:
+                    await asyncio.sleep(HEARTBEAT_INTERVAL)
+                    elapsed = int(time.monotonic() - start_time)
+                    mins, secs = divmod(elapsed, 60)
+                    elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                    await _update_heartbeat(f"_(working… {elapsed_str})_")
+            except asyncio.CancelledError:
+                pass  # normal — cancelled when real content arrives
+            except Exception as e:
+                log.warning(f"Heartbeat error: {e}")
+
+        async def _update_heartbeat(text: str) -> None:
+            if heartbeat_ts:
+                await _update_slack_message(channel_id, heartbeat_ts, text)
+
+        async def _stop_heartbeat(final_text: Optional[str] = None) -> None:
+            """Cancel the heartbeat task and optionally set a final message."""
+            nonlocal heartbeat_task
+            if heartbeat_task and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+            heartbeat_task = None
+            if final_text and heartbeat_ts:
+                await _update_heartbeat(final_text)
+
+        # Local alias so inner functions can call instance method without self
+        async def _update_slack_message(ch: str, ts: str, text: str) -> None:
+            await self._update_slack_message(ch, ts, text)
 
         async def _flush_turn(label: str) -> None:
             """Post the current turn's accumulated text to Slack and reset."""
@@ -385,6 +461,10 @@ class SlackClientPlugin(BasePlugin):
             response_parts = []
 
         try:
+            # Start heartbeat immediately — covers the initial wait before any token
+            # arrives (e.g. during a long blocking agent_call sequence).
+            heartbeat_task = asyncio.create_task(_start_heartbeat())
+
             while True:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=timeout)
@@ -393,10 +473,12 @@ class SlackClientPlugin(BasePlugin):
                     if received_done:
                         # Grace period expired after a "done" — conversation finished.
                         # The turn was already flushed on the done event; nothing left to do.
+                        await _stop_heartbeat()
                         break
                     else:
                         # No response at all within FIRST_TIMEOUT
                         log.warning(f"Slack consumer timeout waiting for response from {client_id}")
+                        await _stop_heartbeat("_(timed out)_")
                         # Flush whatever we have (may be empty)
                         await _flush_turn("timeout flush")
                         break
@@ -404,18 +486,28 @@ class SlackClientPlugin(BasePlugin):
                 item_type = item.get("t")
 
                 if item_type == "tok":
+                    # First real token — stop heartbeat before appending content
+                    if not first_token_received:
+                        first_token_received = True
+                        await _stop_heartbeat("_(done working)_")
                     # Token/text data
                     response_parts.append(item["d"])
                     timeout = FIRST_TIMEOUT  # reset to long timeout while active
 
                 elif item_type == "done":
                     # One turn complete — post immediately, then wait for next turn
+                    await _stop_heartbeat()
                     await _flush_turn("turn complete")
                     received_done = True
                     timeout = INTER_TURN_TIMEOUT
+                    # Start heartbeat for next inter-turn wait
+                    first_token_received = False
+                    heartbeat_ts = None
+                    heartbeat_task = asyncio.create_task(_start_heartbeat())
 
                 elif item_type == "err":
                     # Error occurred — append and flush immediately
+                    await _stop_heartbeat("_(error)_")
                     error_msg = item.get("d", "Unknown error")
                     response_parts.append(f"\n\n⚠️ Error: {error_msg}")
                     await _flush_turn("error")
@@ -423,6 +515,7 @@ class SlackClientPlugin(BasePlugin):
 
                 elif item_type == "gate":
                     # Gate request - inform user that approval is needed
+                    await _stop_heartbeat()
                     gate_data = item.get("d", {})
                     tool_name = gate_data.get("tool_name", "unknown")
                     gate_notice = (
@@ -436,6 +529,7 @@ class SlackClientPlugin(BasePlugin):
 
         except Exception as e:
             log.error(f"Error consuming agent responses for {client_id}: {e}", exc_info=True)
+            await _stop_heartbeat("_(error)_")
 
     @staticmethod
     def _close_open_backticks(text: str) -> str:
