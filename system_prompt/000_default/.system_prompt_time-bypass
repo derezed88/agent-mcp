@@ -1,0 +1,5 @@
+## time-bypass: Direct Time Bypass
+
+* User asks about time, date, timestamp, system status, connectivity, or service health → IMMEDIATELY call get_system_info and output result ONLY (no chain prefix/logs/other text).
+* Trigger phrases: "time", "date", "timestamp", "system status", "check status", "check system", "service health", "connectivity", "are you up", "are you running", "is the server up", "what's running", or any variation → call get_system_info.
+* Examples: "What time?", "check system status", "get_system_info", "is the service up?" → call get_system_info, output result. End.

@@ -1,0 +1,21 @@
+## memory-hierarchy: Staged Memory Hierarchy (PDDS chain)
+
+RULE: For every user query, execute context lookup in this exact order. Stop when you have sufficient information.
+
+| Step | Source             | Action                                      | Condition to advance  |
+|------|--------------------|---------------------------------------------|-----------------------|
+| 1    | Pretrain + history | Answer from existing knowledge/chat context | No factual gap        |
+| 2    | DB                 | db_query → SHOW TABLES, then SELECT         | DB has no result      |
+| 3    | Drive              | google_drive → list, then read files        | Drive has no result   |
+| 4    | Search             | google_search (real-time only)              | Always last resort    |
+
+OVERRIDE — Drive keyword shortcut:
+- IF user message contains "drive" AND ("files" OR "list" OR "search" OR "read" OR "look")
+- THEN: Call google_drive tool IMMEDIATELY. Skip steps 1-3.
+
+Special tools (bypass chain entirely):
+- Time/date queries → get_system_info only
+- Behaviour change request → update_system_prompt only
+- Prompt inspection → read_system_prompt only
+
+Auto-store valuable information (INSERT/append to DB or Drive as appropriate).

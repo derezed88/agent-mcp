@@ -209,13 +209,23 @@ def get_core_tools():
     return {
         'lc': CORE_LC_TOOLS,
         'executors': {
-            'update_system_prompt': update_system_prompt,
-            'read_system_prompt': read_system_prompt,
-            'get_system_info': get_system_info,
-            'llm_clean_text': _agents.llm_clean_text,
-            'llm_clean_tool': _agents.llm_clean_tool,
-            'llm_list': _agents.llm_list,
-            'agent_call': _agents.agent_call,
+            'update_system_prompt':  update_system_prompt,
+            'read_system_prompt':    read_system_prompt,
+            'get_system_info':       get_system_info,
+            'llm_clean_text':        _agents.llm_clean_text,
+            'llm_clean_tool':        _agents.llm_clean_tool,
+            'llm_list':              _agents.llm_list,
+            'agent_call':            _agents.agent_call,
+            'sysprompt_list':        _sysprompt_list_exec,
+            'sysprompt_read':        _sysprompt_read_exec,
+            'sysprompt_write':       _sysprompt_write_exec,
+            'sysprompt_delete':      _sysprompt_delete_exec,
+            'sysprompt_copy_dir':    _sysprompt_copy_dir_exec,
+            'sysprompt_set_dir':     _sysprompt_set_dir_exec,
+            'session_tool':          _session_tool_exec,
+            'model_tool':            _model_tool_exec,
+            'reset_tool':            _reset_tool_exec,
+            'help_tool':             _help_tool_exec,
         }
     }
 
@@ -268,13 +278,23 @@ def _lc_tool_to_openai_dict(tool: StructuredTool) -> dict:
 # Plugin tools declare their type via get_gate_tools() metadata.
 # Used by execute_tool() for universal rate limiting.
 _CORE_TOOL_TYPES: dict[str, str] = {
-    "update_system_prompt": "system",
-    "read_system_prompt":   "system",
-    "get_system_info":      "system",
-    "llm_clean_text":       "llm_call",
-    "llm_clean_tool":       "llm_call",
-    "llm_list":             "system",
-    "agent_call":           "agent_call",
+    "update_system_prompt":  "system",
+    "read_system_prompt":    "system",
+    "get_system_info":       "system",
+    "llm_clean_text":        "llm_call",
+    "llm_clean_tool":        "llm_call",
+    "llm_list":              "system",
+    "agent_call":            "agent_call",
+    "sysprompt_list":        "system",
+    "sysprompt_read":        "system",
+    "sysprompt_write":       "system",
+    "sysprompt_delete":      "system",
+    "sysprompt_copy_dir":    "system",
+    "sysprompt_set_dir":     "system",
+    "session_tool":          "system",
+    "model_tool":            "system",
+    "reset_tool":            "system",
+    "help_tool":             "system",
 }
 
 
@@ -297,13 +317,23 @@ def get_tool_executor(tool_name: str):
     import agents as _agents
 
     core_executors = {
-        'update_system_prompt': update_system_prompt,
-        'read_system_prompt':   read_system_prompt,
-        'get_system_info':      get_system_info,
-        'llm_clean_text':       _agents.llm_clean_text,
-        'llm_clean_tool':       _agents.llm_clean_tool,
-        'llm_list':             _agents.llm_list,
-        'agent_call':           _agents.agent_call,
+        'update_system_prompt':  update_system_prompt,
+        'read_system_prompt':    read_system_prompt,
+        'get_system_info':       get_system_info,
+        'llm_clean_text':        _agents.llm_clean_text,
+        'llm_clean_tool':        _agents.llm_clean_tool,
+        'llm_list':              _agents.llm_list,
+        'agent_call':            _agents.agent_call,
+        'sysprompt_list':        _sysprompt_list_exec,
+        'sysprompt_read':        _sysprompt_read_exec,
+        'sysprompt_write':       _sysprompt_write_exec,
+        'sysprompt_delete':      _sysprompt_delete_exec,
+        'sysprompt_copy_dir':    _sysprompt_copy_dir_exec,
+        'sysprompt_set_dir':     _sysprompt_set_dir_exec,
+        'session_tool':          _session_tool_exec,
+        'model_tool':            _model_tool_exec,
+        'reset_tool':            _reset_tool_exec,
+        'help_tool':             _help_tool_exec,
     }
 
     if tool_name in core_executors:
@@ -370,6 +400,101 @@ class _LlmCleanToolArgs(BaseModel):
     arguments: str = Field(description="The user request / arguments to pass as the prompt to the target model. Be specific.")
 
 
+# ---------------------------------------------------------------------------
+# Sysprompt tool arg schemas
+# ---------------------------------------------------------------------------
+
+class _SyspromptListArgs(BaseModel):
+    model: str = Field(
+        description="Model key name (e.g., 'gemini25', 'grok4') or 'self' for the current model."
+    )
+
+
+class _SyspromptReadArgs(BaseModel):
+    model: str = Field(
+        description="Model key name or 'self' for the current model."
+    )
+    file: str = Field(
+        default="",
+        description=(
+            "Optional: specific file to read. Omit to read the full assembled prompt. "
+            "Can be a bare section name ('behavior'), a full filename ('.system_prompt_behavior'), "
+            "or '.system_prompt' for the root file."
+        ),
+    )
+
+
+class _SyspromptWriteArgs(BaseModel):
+    model: str = Field(description="Model key name or 'self' for the current model.")
+    file: str = Field(
+        description=(
+            "File to write. Can be a bare section name ('behavior'), a full filename "
+            "('.system_prompt_behavior'), or '.system_prompt' for the root file."
+        )
+    )
+    data: str = Field(description="Content to write. Overwrites the file (creates if missing).")
+
+
+class _SyspromptDeleteArgs(BaseModel):
+    model: str = Field(description="Model key name or 'self' for the current model.")
+    file: str = Field(
+        default="",
+        description=(
+            "File to delete. Omit to delete the ENTIRE directory (also sets system_prompt_folder='none'). "
+            "Can be a bare section name or full filename."
+        ),
+    )
+
+
+class _SyspromptCopyDirArgs(BaseModel):
+    model: str = Field(description="Model key name or 'self' to copy FROM.")
+    new_dir: str = Field(
+        description="New directory name under system_prompt/ to copy TO (e.g., 'grok4_custom')."
+    )
+
+
+class _SyspromptSetDirArgs(BaseModel):
+    model: str = Field(description="Model key name or 'self' for the current model.")
+    dir: str = Field(
+        description=(
+            "Directory name under system_prompt/ to assign (e.g., '000_default', 'grok4_custom'). "
+            "Use 'none' to clear the folder assignment."
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session / model / reset / help tool arg schemas
+# ---------------------------------------------------------------------------
+
+class _SessionToolArgs(BaseModel):
+    action: Literal["list", "delete"] = Field(
+        description="'list' to show all sessions, 'delete' to remove a session."
+    )
+    session_id: str = Field(
+        default="",
+        description="Session shorthand ID (e.g., '101') or full session ID. Required for 'delete'.",
+    )
+
+
+class _ModelToolArgs(BaseModel):
+    action: Literal["list", "set"] = Field(
+        description="'list' to show available models, 'set' to switch the active model."
+    )
+    model_key: str = Field(
+        default="",
+        description="Model key to switch to. Required for 'set' action.",
+    )
+
+
+class _ResetToolArgs(BaseModel):
+    pass  # No arguments
+
+
+class _HelpToolArgs(BaseModel):
+    pass  # No arguments
+
+
 class _AgentCallArgs(BaseModel):
     agent_url: str = Field(
         description="Base URL of the target agent-mcp instance, e.g. 'http://localhost:8767'. "
@@ -398,6 +523,191 @@ class _AgentCallArgs(BaseModel):
                     "arrive so Slack and other clients see per-turn progress. "
                     "Set to False to suppress streaming and return only the final result — "
                     "useful when the intermediate tokens would be noisy or are not needed."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sysprompt tool executors
+# ---------------------------------------------------------------------------
+
+async def _sysprompt_list_exec(model: str) -> str:
+    from prompt import sp_list_files, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id
+    from state import sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    return sp_list_files(resolved, LLM_REGISTRY)
+
+
+async def _sysprompt_read_exec(model: str, file: str = "") -> str:
+    from prompt import sp_read_prompt, sp_read_file, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    if file:
+        return sp_read_file(resolved, file, LLM_REGISTRY)
+    return sp_read_prompt(resolved, LLM_REGISTRY)
+
+
+async def _sysprompt_write_exec(model: str, file: str, data: str) -> str:
+    from prompt import sp_write_file, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    return sp_write_file(resolved, file, data, LLM_REGISTRY)
+
+
+async def _sysprompt_delete_exec(model: str, file: str = "") -> str:
+    from prompt import sp_delete_file, sp_delete_directory, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    if file:
+        return sp_delete_file(resolved, file, LLM_REGISTRY)
+    return sp_delete_directory(resolved, LLM_REGISTRY)
+
+
+async def _sysprompt_copy_dir_exec(model: str, new_dir: str) -> str:
+    from prompt import sp_copy_directory, sp_resolve_model
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    return sp_copy_directory(resolved, new_dir, LLM_REGISTRY)
+
+
+async def _sysprompt_set_dir_exec(model: str, dir: str) -> str:
+    from prompt import sp_set_directory, sp_resolve_model
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+    resolved = sp_resolve_model(model, current_model)
+    return sp_set_directory(resolved, dir)
+
+
+# ---------------------------------------------------------------------------
+# Session / model / reset / help tool executors
+# ---------------------------------------------------------------------------
+
+async def _session_tool_exec(action: str, session_id: str = "") -> str:
+    from state import sessions, get_or_create_shorthand_id, get_session_by_shorthand, remove_shorthand_mapping, current_client_id
+    cid = current_client_id.get("")
+
+    if action == "list":
+        if not sessions:
+            return "No active sessions."
+        lines = ["Active sessions:"]
+        for sid, data in sessions.items():
+            marker = " (current)" if sid == cid else ""
+            model = data.get("model", "unknown")
+            history_len = len(data.get("history", []))
+            shorthand_id = get_or_create_shorthand_id(sid)
+            peer_ip = data.get("peer_ip")
+            ip_str = f", ip={peer_ip}" if peer_ip else ""
+            lines.append(f"  ID [{shorthand_id}] {sid}: model={model}, history={history_len} messages{ip_str}{marker}")
+        return "\n".join(lines)
+
+    if action == "delete":
+        if not session_id:
+            return "ERROR: session_id required for 'delete' action."
+        # Try shorthand ID
+        target_sid = None
+        try:
+            shorthand_id = int(session_id)
+            target_sid = get_session_by_shorthand(shorthand_id)
+            if not target_sid:
+                return f"Session ID [{shorthand_id}] not found."
+        except ValueError:
+            target_sid = session_id
+        if target_sid in sessions:
+            shorthand_id = get_or_create_shorthand_id(target_sid)
+            del sessions[target_sid]
+            remove_shorthand_mapping(target_sid)
+            return f"Deleted session ID [{shorthand_id}]: {target_sid}"
+        return f"Session not found: {target_sid}"
+
+    return f"Unknown action '{action}'. Valid: list, delete"
+
+
+async def _model_tool_exec(action: str, model_key: str = "") -> str:
+    from config import LLM_REGISTRY
+    from state import current_client_id, sessions, cancel_active_task
+
+    if action == "list":
+        lines = ["Available models:"]
+        cid = current_client_id.get("")
+        current = sessions.get(cid, {}).get("model", "") if cid else ""
+        for key, meta in LLM_REGISTRY.items():
+            model_id = meta.get("model_id", key)
+            marker = " (current)" if key == current else ""
+            lines.append(f"  {key:<12} {model_id}{marker}")
+        return "\n".join(lines)
+
+    if action == "set":
+        if not model_key:
+            return "ERROR: model_key required for 'set' action."
+        cid = current_client_id.get("")
+        if not cid:
+            return "ERROR: No active session context for model switch."
+        if model_key not in LLM_REGISTRY:
+            available = ", ".join(LLM_REGISTRY.keys())
+            return f"ERROR: Unknown model '{model_key}'\nAvailable: {available}"
+        await cancel_active_task(cid)
+        sessions[cid]["model"] = model_key
+        return f"Model set to '{model_key}'."
+
+    return f"Unknown action '{action}'. Valid: list, set"
+
+
+async def _reset_tool_exec() -> str:
+    from state import current_client_id, sessions
+    cid = current_client_id.get("")
+    if not cid or cid not in sessions:
+        return "ERROR: No active session context."
+    history_len = len(sessions[cid].get("history", []))
+    sessions[cid]["history"] = []
+    return f"Conversation history cleared ({history_len} messages removed)."
+
+
+async def _help_tool_exec() -> str:
+    from tools import get_all_gate_tools, get_gate_tools_by_type
+    gate_tools = get_all_gate_tools()
+    tool_lines = []
+    for tool_name, meta in sorted(gate_tools.items(), key=lambda x: (x[1].get("type",""), x[0])):
+        desc = meta.get("description", "")
+        tool_lines.append(f"  {tool_name:<30} - {desc}")
+    return (
+        "Available commands: Use !help in the chat interface for full command list.\n"
+        "Key tool calls (LLM-invocable):\n"
+        "  sysprompt_list(model)         - list system prompt files for a model\n"
+        "  sysprompt_read(model, file)   - read full prompt or specific file\n"
+        "  sysprompt_write(model, file, data) - write a system prompt file\n"
+        "  sysprompt_delete(model, file) - delete file or entire folder\n"
+        "  sysprompt_copy_dir(model, new_dir) - copy prompt folder\n"
+        "  sysprompt_set_dir(model, dir) - assign prompt folder to model\n"
+        "  session_tool(action, ...)     - list or delete sessions\n"
+        "  model_tool(action, ...)       - list or switch models\n"
+        "  reset_tool()                  - clear conversation history\n"
+        "  db_query(sql)                 - run SQL\n"
+        "  search_ddgs/search_tavily/search_xai/search_google(query) - web search\n"
+        "  url_extract(method, url)      - extract web page content\n"
+        "  google_drive(operation, ...) - Google Drive CRUD\n"
+        "  get_system_info()             - date/time/status\n"
+        "  llm_list()                    - list LLM models\n"
+        "  llm_clean_text(model, prompt) - call LLM with no context\n"
+        "  llm_clean_tool(model, tool, arguments) - delegate tool call\n"
+        "  agent_call(agent_url, message) - call remote agent\n"
+        "\nGated tools (listed below require human approval unless gate is off):\n"
+        + "\n".join(tool_lines)
     )
 
 
@@ -504,6 +814,100 @@ def _make_core_lc_tools() -> list:
                 "Set stream=False to suppress streaming and return only the final result."
             ),
             args_schema=_AgentCallArgs,
+        ),
+        # --- Sysprompt management tools ---
+        StructuredTool.from_function(
+            coroutine=_sysprompt_list_exec,
+            name="sysprompt_list",
+            description=(
+                "List all .system_prompt* files in a model's system prompt folder. "
+                "Use model='self' for the current model."
+            ),
+            args_schema=_SyspromptListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_read_exec,
+            name="sysprompt_read",
+            description=(
+                "Read the system prompt for a model. Omit 'file' to get the full assembled prompt. "
+                "Specify 'file' to read a specific section file. Use model='self' for current model."
+            ),
+            args_schema=_SyspromptReadArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_write_exec,
+            name="sysprompt_write",
+            description=(
+                "Overwrite or create a system prompt file for a model. "
+                "Use model='self' for the current model. "
+                "The file argument can be a section name ('behavior') or full filename ('.system_prompt_behavior'). "
+                "WARNING: This overwrites the entire file. Requires gate approval."
+            ),
+            args_schema=_SyspromptWriteArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_delete_exec,
+            name="sysprompt_delete",
+            description=(
+                "Delete a system prompt file (or the entire folder) for a model. "
+                "Omit 'file' to delete the ENTIRE directory and set folder='none'. "
+                "Use model='self' for the current model. Requires gate approval."
+            ),
+            args_schema=_SyspromptDeleteArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_copy_dir_exec,
+            name="sysprompt_copy_dir",
+            description=(
+                "Copy a model's system prompt folder to a new directory under system_prompt/. "
+                "Use model='self' for the current model. Requires gate approval."
+            ),
+            args_schema=_SyspromptCopyDirArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sysprompt_set_dir_exec,
+            name="sysprompt_set_dir",
+            description=(
+                "Assign a model's system_prompt_folder to an existing directory under system_prompt/. "
+                "Use 'none' to clear the folder. Persists to llm-models.json. Requires gate approval."
+            ),
+            args_schema=_SyspromptSetDirArgs,
+        ),
+        # --- Session / model / reset / help tools ---
+        StructuredTool.from_function(
+            coroutine=_session_tool_exec,
+            name="session_tool",
+            description=(
+                "Manage agent sessions. action='list' shows all active sessions. "
+                "action='delete' removes a session (requires session_id, can be shorthand integer or full ID). "
+                "List requires read gate approval; delete requires write gate approval."
+            ),
+            args_schema=_SessionToolArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_model_tool_exec,
+            name="model_tool",
+            description=(
+                "Manage the active LLM model. action='list' shows all available models. "
+                "action='set' switches the active model for this session (requires model_key). "
+                "List is always allowed; set requires write gate approval."
+            ),
+            args_schema=_ModelToolArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_reset_tool_exec,
+            name="reset_tool",
+            description=(
+                "Clear conversation history for the current session. "
+                "Requires write gate approval."
+            ),
+            args_schema=_ResetToolArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_help_tool_exec,
+            name="help_tool",
+            description="Return a summary of available commands and tool calls.",
+            args_schema=_HelpToolArgs,
         ),
     ]
 

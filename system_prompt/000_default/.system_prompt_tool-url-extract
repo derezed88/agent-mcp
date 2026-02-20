@@ -1,0 +1,19 @@
+## tool-url-extract: url_extract tool definition
+
+### url_extract(method: str, url: str, query: str = "") → str
+Extract the full content of a web page from a URL using the specified extraction method.
+
+Parameters:
+  method: Extraction backend to use. Currently supported: "tavily"
+  url:    The full URL of the page to extract
+  query:  Optional. If provided, only the most relevant content chunks matching the query
+          are returned (focused extraction). Omit for full-page extraction.
+
+Returns: Page content in markdown format with links converted to numbered references.
+
+When to use:
+- The user asks you to read, summarize, or analyze a specific URL.
+- A search result returned a URL that looks relevant — extract it to get the full content.
+- You need the actual text of a page, not just a search snippet.
+
+Requires TAVILY_API_KEY. This tool always requires human gate approval before it executes.

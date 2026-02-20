@@ -26,14 +26,28 @@ log = logging.getLogger("AISvc")
 
 
 def load_default_model():
-    """Load default model from plugins-enabled.json."""
+    """Load default model from llm-models.json."""
     try:
-        with open(PLUGINS_ENABLED_FILE, 'r') as f:
-            config = json.load(f)
-        return config.get('default_model', 'gemini25')
+        with open(LLM_MODELS_FILE, 'r') as f:
+            data = json.load(f)
+        return data.get('default_model', 'gemini25')
     except (FileNotFoundError, Exception) as e:
-        log.warning(f"Could not load default model from plugins-enabled.json: {e}")
-        return 'gemini25'  # Fallback to gemini25
+        log.warning(f"Could not load default_model from llm-models.json: {e}")
+        return 'gemini25'
+
+
+def save_default_model(model_key: str) -> bool:
+    """Persist default_model to llm-models.json. Returns True on success."""
+    try:
+        with open(LLM_MODELS_FILE, 'r') as f:
+            data = json.load(f)
+        data['default_model'] = model_key
+        with open(LLM_MODELS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception as e:
+        log.error(f"save_default_model({model_key}): {e}")
+        return False
 
 
 def load_llm_registry():
@@ -66,6 +80,7 @@ def load_llm_registry():
                 "description": config.get('description', ''),
                 "tool_call_available": config.get('tool_call_available', False),
                 "llm_call_timeout": config.get('llm_call_timeout', 60),
+                "system_prompt_folder": config.get('system_prompt_folder', ''),
             }
 
         return registry

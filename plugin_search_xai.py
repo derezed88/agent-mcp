@@ -61,9 +61,9 @@ class SearchXaiPlugin(BasePlugin):
         self.enabled = False
 
     def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare xai_search as a read-only gated search tool."""
+        """Declare search_xai as a read-only gated search tool."""
         return {
-            "xai_search": {
+            "search_xai": {
                 "type": "search",
                 "operations": ["read"],
                 "description": "web/X search via xAI Grok x_search (read-only)"
@@ -74,14 +74,14 @@ class SearchXaiPlugin(BasePlugin):
         """Return xAI search tool definitions in LangChain StructuredTool format."""
         api_key = self._api_key
 
-        async def xai_search_executor(query: str, model: str = "grok-4-1-fast-reasoning") -> str:
+        async def search_xai_executor(query: str, model: str = "grok-4-1-fast-reasoning") -> str:
             return await _run_xai_search(api_key, query, model)
 
         return {
             "lc": [
                 StructuredTool.from_function(
-                    coroutine=xai_search_executor,
-                    name="xai_search",
+                    coroutine=search_xai_executor,
+                    name="search_xai",
                     description=(
                         "Search the web and X/Twitter using xAI Grok's x_search tool. "
                         "Returns AI-synthesized answer with citations from real-time web results. "

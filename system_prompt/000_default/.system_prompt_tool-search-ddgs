@@ -1,0 +1,13 @@
+## tool-search-ddgs: search_ddgs tool definition
+
+### search_ddgs(query: str, max_results: int = 10) → str
+Search the web using DuckDuckGo (no API key required). Returns titles, URLs, and snippets.
+
+Follow PDDS chain (see memory-hierarchy section). Call search_ddgs when:
+- db_query returned no relevant results, AND
+- google_drive returned no relevant results, AND
+- You cannot answer from your training knowledge.
+
+Use search_ddgs as the first web search option (no API key required, fast, broad coverage).
+
+This tool always requires human gate approval before it executes.

@@ -25,7 +25,7 @@ import time
 
 from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, save_llm_model_field
 from state import push_tok, push_done, push_err, current_client_id, sessions
-from prompt import get_current_prompt
+from prompt import get_current_prompt, load_prompt_for_folder
 from gate import check_human_gate
 from database import execute_sql
 from tools import (
@@ -416,8 +416,18 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         # StructuredTool objects carry full schema + coroutine reference.
         llm_with_tools = llm.bind_tools(_CURRENT_LC_TOOLS)
 
+        # Load per-model system prompt (stateless; falls back to global if not configured)
+        model_cfg = LLM_REGISTRY.get(model_key, {})
+        sp_folder_rel = model_cfg.get("system_prompt_folder", "")
+        if sp_folder_rel and sp_folder_rel.lower() != "none":
+            from config import BASE_DIR
+            sp_folder_abs = os.path.join(BASE_DIR, sp_folder_rel)
+            system_prompt = load_prompt_for_folder(sp_folder_abs)
+        else:
+            system_prompt = get_current_prompt()
+
         # Convert internal message format to LangChain message objects
-        ctx: list[BaseMessage] = _to_lc_messages(get_current_prompt(), messages)
+        ctx: list[BaseMessage] = _to_lc_messages(system_prompt, messages)
 
         for _ in range(MAX_TOOL_ITERATIONS):
             ai_msg: AIMessage = await llm_with_tools.ainvoke(ctx)

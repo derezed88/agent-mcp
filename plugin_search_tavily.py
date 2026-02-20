@@ -57,9 +57,9 @@ class SearchTavilyPlugin(BasePlugin):
         self.enabled = False
 
     def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare tavily_search as a read-only gated search tool."""
+        """Declare search_tavily as a read-only gated search tool."""
         return {
-            "tavily_search": {
+            "search_tavily": {
                 "type": "search",
                 "operations": ["read"],
                 "description": "web search via Tavily AI (read-only)"
@@ -70,14 +70,14 @@ class SearchTavilyPlugin(BasePlugin):
         """Return Tavily search tool definitions in LangChain StructuredTool format."""
         client = self._client
 
-        async def tavily_search_executor(query: str, search_depth: str = "basic") -> str:
+        async def search_tavily_executor(query: str, search_depth: str = "basic") -> str:
             return await _run_tavily_search(client, query, search_depth)
 
         return {
             "lc": [
                 StructuredTool.from_function(
-                    coroutine=tavily_search_executor,
-                    name="tavily_search",
+                    coroutine=search_tavily_executor,
+                    name="search_tavily",
                     description=(
                         "Search the web using Tavily AI search API. "
                         "Returns AI-curated results with an answer summary and source URLs. "

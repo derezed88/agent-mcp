@@ -1,6 +1,5 @@
 {
   "version": "1.0.0",
-  "default_model": "gemini25",
   "enabled_plugins": [
     "plugin_client_shellpy",
     "plugin_client_api",

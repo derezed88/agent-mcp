@@ -1,0 +1,15 @@
+## tools: Available Tool Definitions
+
+[SECTIONS]
+tool-db-query: db_query tool definition
+tool-get-system-info: get_system_info tool definition
+tool-search-ddgs: search_ddgs tool definition
+tool-search-tavily: search_tavily tool definition
+tool-search-xai: search_xai tool definition
+tool-search-google: search_google tool definition
+tool-google-drive: google_drive tool definition
+tool-url-extract: url_extract tool definition
+tool-llm-list: llm_list tool definition
+tool-llm-call-clean: llm_clean_text tool definition
+tool-llm-clean-tool: llm_clean_tool tool definition
+tool-agent-call: agent_call tool definition
