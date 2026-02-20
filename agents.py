@@ -35,6 +35,63 @@ from tools import (
 )
 
 # ---------------------------------------------------------------------------
+# Inter-agent message filters
+# Loaded once at startup from plugins-enabled.json
+# plugin_config.plugin_client_api.INTER_AGENT_ALLOWED_COMMANDS
+# plugin_config.plugin_client_api.INTER_AGENT_BLOCKED_COMMANDS
+#
+# These filter the *message* text sent via agent_call — not tool names.
+# ALLOWED (non-empty): message must start with one of the listed prefixes.
+# BLOCKED: message must not start with any of the listed prefixes.
+# Both lists are lowercased prefix strings.  Empty = no restriction.
+# ---------------------------------------------------------------------------
+
+_inter_agent_allowed: list[str] = []
+_inter_agent_blocked: list[str] = []
+
+
+def _load_inter_agent_filters() -> None:
+    """Load INTER_AGENT_ALLOWED/BLOCKED_COMMANDS from plugins-enabled.json."""
+    global _inter_agent_allowed, _inter_agent_blocked
+    try:
+        path = os.path.join(os.path.dirname(__file__), "plugins-enabled.json")
+        with open(path, "r") as f:
+            cfg = json.load(f)
+        api_cfg = cfg.get("plugin_config", {}).get("plugin_client_api", {})
+        raw_allow = api_cfg.get("INTER_AGENT_ALLOWED_COMMANDS", [])
+        raw_block = api_cfg.get("INTER_AGENT_BLOCKED_COMMANDS", [])
+        _inter_agent_allowed = [s.strip().lower() for s in raw_allow if s.strip()]
+        _inter_agent_blocked = [s.strip().lower() for s in raw_block if s.strip()]
+    except Exception:
+        pass   # no filter file = no restrictions
+
+
+_load_inter_agent_filters()
+
+
+def _check_inter_agent_message(message: str) -> str | None:
+    """
+    Apply inter-agent message filters.
+    Returns None if permitted, or an error string if blocked.
+    Matching is against the lowercased message prefix.
+    """
+    msg_lower = message.strip().lower()
+    if _inter_agent_allowed:
+        if not any(msg_lower.startswith(p) for p in _inter_agent_allowed):
+            return (
+                f"BLOCKED by INTER_AGENT_ALLOWED_COMMANDS: message does not match "
+                f"any allowed prefix. Allowed: {', '.join(_inter_agent_allowed)}"
+            )
+    for pattern in _inter_agent_blocked:
+        if msg_lower.startswith(pattern):
+            return (
+                f"BLOCKED by INTER_AGENT_BLOCKED_COMMANDS: message matches "
+                f"blocked pattern '{pattern}'."
+            )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # LangChain LLM Factory
 # ---------------------------------------------------------------------------
 
@@ -704,6 +761,12 @@ async def agent_call(
         )
         log.warning(f"agent_call depth limit: client={calling_client} depth={agent_call_depth}")
         return msg
+
+    # Inter-agent message filter
+    block_reason = _check_inter_agent_message(message)
+    if block_reason:
+        log.warning(f"agent_call filter block: client={calling_client} reason={block_reason}")
+        return f"ERROR: {block_reason}\nMessage was NOT sent to the remote agent."
 
     # Session-level streaming override: !stream true|false takes precedence over
     # the LLM-supplied stream parameter so the human always has final control.

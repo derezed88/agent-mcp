@@ -1057,7 +1057,15 @@ class PluginManager:
         "session":        ["read", "write"],
         "model":          ["write"],
         "reset":          ["write"],
-        "tmux":           ["write"],
+        "tmux":                ["write"],   # group gate — applies to all tmux tools unless overridden
+        "tmux_new":            ["write"],
+        "tmux_exec":           ["write"],
+        "tmux_ls":             ["write"],
+        "tmux_history":        ["write"],
+        "tmux_kill_session":   ["write"],
+        "tmux_kill_server":    ["write"],
+        "tmux_history_limit":  ["write"],
+        "tmux_call_limit":     ["read", "write"],
     }
 
     def _load_gate_defaults(self) -> dict:

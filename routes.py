@@ -77,7 +77,13 @@ async def cmd_help(client_id: str):
         "  !tmux kill-server                         - terminate all sessions\n"
         "  !tmux a <name>                            - show recent history for a session\n"
         "  !tmux history-limit [n]                   - get/set rolling history line limit\n"
-        "  !tmux_gate_write <t|f>                    - gate all tmux tools: true=gated, false=auto-allow\n"
+        "  !tmux filters                             - show ALLOWED/BLOCKED command filter lists\n"
+        "  !tmux_call_limit                          - show current tmux rate limit\n"
+        "  !tmux_call_limit <calls> <window_sec>     - set rate limit (auto-disables on breach)\n"
+        "  !tmux_gate_write <t|f>                    - gate ALL tmux tools: true=gated, false=auto-allow\n"
+        "  !tmux_<toolname>_gate_write <t|f>         - per-tool override (e.g. !tmux_exec_gate_write)\n"
+        "  !tmux_call_limit_gate_read <t|f>          - gate tmux_call_limit reads\n"
+        "  !tmux_call_limit_gate_write <t|f>         - gate tmux_call_limit writes\n"
         "\n"
         "Gate Management (per-tool):\n"
         "  !gate_list                                - show live gate status for all tools\n"
@@ -508,6 +514,26 @@ async def cmd_tmux(client_id: str, args: str):
         await push_tok(client_id, result)
     except Exception as exc:
         await push_tok(client_id, f"ERROR: !tmux {subcommand} failed: {exc}")
+    await conditional_push_done(client_id)
+
+
+async def cmd_tmux_call_limit(client_id: str, args: str):
+    """
+    Get or set the tmux tool rate limit.
+    !tmux_call_limit                      - show current limit
+    !tmux_call_limit <calls> <window_sec> - set rate limit
+    """
+    from tools import get_tool_executor
+    if get_tool_executor("tmux_exec") is None:
+        await push_tok(client_id, "ERROR: tmux plugin not loaded.")
+        await conditional_push_done(client_id)
+        return
+    try:
+        from plugin_tmux import tmux_call_limit_command
+        result = await tmux_call_limit_command(args)
+        await push_tok(client_id, result)
+    except Exception as exc:
+        await push_tok(client_id, f"ERROR: !tmux_call_limit failed: {exc}")
     await conditional_push_done(client_id)
 
 
@@ -986,6 +1012,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_google_drive(client_id, arg)
                 elif cmd == "tmux":
                     await cmd_tmux(client_id, arg)
+                elif cmd == "tmux_call_limit":
+                    await cmd_tmux_call_limit(client_id, arg)
                 elif cmd == "get_system_info":
                     await cmd_get_system_info(client_id)
                 elif cmd == "llm_list":
@@ -1096,6 +1124,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "tmux":
             await cmd_tmux(client_id, arg)
+            return
+        if cmd == "tmux_call_limit":
+            await cmd_tmux_call_limit(client_id, arg)
             return
         if cmd == "get_system_info":
             await cmd_get_system_info(client_id)

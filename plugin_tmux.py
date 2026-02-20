@@ -4,18 +4,21 @@ Tmux-like Shell Session Plugin for MCP Agent
 Provides persistent PTY (pseudo-terminal) shell sessions.
 LLMs interact via tool calls; humans manage sessions via !tmux commands.
 
-Sessions live in memory with a configurable rolling history buffer.
-TMUX_HISTORY_LIMIT is set in plugins-enabled.json under
-plugin_config.plugin_tmux.TMUX_HISTORY_LIMIT (default 200).
+Config keys in plugins-enabled.json → plugin_config.plugin_tmux:
+    TMUX_HISTORY_LIMIT        int   Rolling history lines per session (default 200)
+    TMUX_ALLOWED_COMMANDS     list  Whitelist of allowed command prefixes (empty = all allowed)
+    TMUX_BLOCKED_COMMANDS     list  Blacklist of blocked command prefixes (checked after allow)
 
-Tools (all gated):
-    tmux_new(name)                       — create a new shell session      [write]
-    tmux_exec(session, command, timeout) — run a command, return output    [write]
-    tmux_ls()                            — list active sessions             [read]
-    tmux_kill_session(name)              — terminate one session            [write]
-    tmux_kill_server()                   — terminate all sessions           [write]
-    tmux_history(session, lines)         — show rolling history             [read]
-    tmux_history_limit(n)                — change history line limit        [write]
+Tools (all write-gated via !tmux_gate_write or per-tool !tmux_<name>_gate_write):
+    tmux_new(name)                         — create a new shell session
+    tmux_exec(session, command, timeout)   — run a command, return output
+    tmux_ls()                              — list active sessions
+    tmux_kill_session(name)                — terminate one session
+    tmux_kill_server()                     — terminate all sessions
+    tmux_history(session, lines)           — show rolling history
+    tmux_history_limit(n)                  — change history line limit
+    tmux_call_limit()                      — show current rate limit config  [read]
+    tmux_call_limit(calls, window)         — set rate limit                  [write]
 
 User commands (dispatched from routes.py cmd_tmux):
     !tmux new <name>
@@ -23,12 +26,15 @@ User commands (dispatched from routes.py cmd_tmux):
     !tmux kill-session <name>
     !tmux kill-server
     !tmux a <name>
-    !tmux history-limit <n>
+    !tmux history-limit [n]
+    !tmux_call_limit              - show current limit
+    !tmux_call_limit <calls> <window_seconds>  - set limit
 
-Gate:
-    Read  operations (tmux_ls, tmux_history)       — !tmux_gate_read  <t|f>
-    Write operations (all others)                  — !tmux_gate_write <t|f>
-    Both default to gated (gate ON).
+Gates (all default to gated/false):
+    Group:    !tmux_gate_write <t|f>              — covers all tmux tools
+    Per-tool: !tmux_<toolname>_gate_write <t|f>   — overrides group for that tool
+    Rate limit: !tmux_call_limit_gate_read  <t|f>
+                !tmux_call_limit_gate_write <t|f>
 """
 
 import asyncio
@@ -36,12 +42,11 @@ import fcntl
 import os
 import pty
 import re
-import signal
 import struct
 import termios
 import time
 from collections import deque
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import StructuredTool
 from plugin_loader import BasePlugin
@@ -49,36 +54,84 @@ from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
-# Module-level session registry
-# Shared by the plugin instance and the !tmux command handler in routes.py.
+# Module-level state — shared by plugin instance and routes.py cmd_tmux()
 # ---------------------------------------------------------------------------
 
-# name -> {
-#   "proc":    asyncio.subprocess.Process,
-#   "master":  int  (PTY master fd),
-#   "history": deque[str],
-#   "name":    str,
-#   "started": float,
-# }
+# name -> {proc, master, history, name, started}
 _sessions: Dict[str, Dict[str, Any]] = {}
 
-# Rolling history limit (lines).  Updated by !tmux history-limit / tmux_history_limit.
+# Rolling history limit (lines). Updated by !tmux history-limit / tmux_history_limit.
 _history_limit: int = 200
 
+# Command filter lists. Empty allowed = all allowed. Checked in tmux_exec_executor.
+# Format: list of command prefixes (lowercased for matching).
+_allowed_commands: List[str] = []   # empty = allow all
+_blocked_commands: List[str] = []   # empty = block none
+
+# Rate limit config (mirrors plugins-enabled.json rate_limits.tmux section at runtime)
+# Updated by tmux_call_limit_executor / tmux_command("call-limit", ...).
+_rate_limit_calls: int = 30
+_rate_limit_window: int = 60
+
 # --- Tuning constants -------------------------------------------------------
-_READ_TIMEOUT_DEFAULT: float = 10.0   # seconds to wait for output silence
-_DRAIN_PAUSE: float = 0.25            # seconds of silence = "command done"
-_STARTUP_DRAIN: float = 0.5           # seconds to discard bash startup noise
-_CHUNK: int = 4096                    # bytes per PTY read
-_PTY_COLS: int = 220                  # terminal width reported to programs
+_READ_TIMEOUT_DEFAULT: float = 10.0
+_DRAIN_PAUSE: float = 0.25
+_STARTUP_DRAIN: float = 0.5
+_CHUNK: int = 4096
+_PTY_COLS: int = 220
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Command filtering
+# ---------------------------------------------------------------------------
+
+def _check_command(command: str) -> Optional[str]:
+    """
+    Apply TMUX_ALLOWED_COMMANDS and TMUX_BLOCKED_COMMANDS filters.
+    Returns None if the command is permitted, or an error string if blocked.
+
+    Matching is against the first word of the command (the executable name),
+    case-insensitive.  Patterns may include a second word for subcommand
+    matching (e.g. "git push").
+    """
+    cmd_lower = command.strip().lower()
+
+    # Allowed list: if non-empty, command must match at least one entry
+    if _allowed_commands:
+        matched = any(cmd_lower.startswith(p) for p in _allowed_commands)
+        if not matched:
+            allowed_str = ", ".join(_allowed_commands)
+            return (
+                f"BLOCKED: command not in TMUX_ALLOWED_COMMANDS.\n"
+                f"Allowed prefixes: {allowed_str}"
+            )
+
+    # Blocked list: command must not match any entry
+    for pattern in _blocked_commands:
+        if cmd_lower.startswith(pattern):
+            return f"BLOCKED: command matches TMUX_BLOCKED_COMMANDS pattern '{pattern}'."
+
+    return None
+
+
+def _format_filter_status() -> str:
+    """Return a human-readable summary of current filter configuration."""
+    if _allowed_commands:
+        allow_str = f"ALLOW-LIST ({len(_allowed_commands)} entries): " + ", ".join(_allowed_commands)
+    else:
+        allow_str = "ALLOW-LIST: (empty — all commands permitted)"
+    if _blocked_commands:
+        block_str = f"BLOCK-LIST ({len(_blocked_commands)} entries): " + ", ".join(_blocked_commands)
+    else:
+        block_str = "BLOCK-LIST: (empty — nothing explicitly blocked)"
+    return f"{allow_str}\n{block_str}"
+
+
+# ---------------------------------------------------------------------------
+# Internal PTY helpers
 # ---------------------------------------------------------------------------
 
 def _valid_name(name: str) -> bool:
-    """Session names: letters, digits, hyphens, underscores only."""
     return bool(re.fullmatch(r"[A-Za-z0-9_-]+", name))
 
 
@@ -96,7 +149,6 @@ def _make_nonblocking(fd: int) -> None:
 
 
 def _drain_sync(master_fd: int) -> bytes:
-    """Read whatever is currently buffered without blocking."""
     buf = b""
     try:
         while True:
@@ -110,23 +162,15 @@ def _drain_sync(master_fd: int) -> bytes:
 
 
 def _decode_pty(raw: bytes) -> str:
-    """Decode PTY bytes, stripping ANSI/VT100 escape sequences."""
     text = raw.decode("utf-8", errors="replace")
     ansi = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
     text = ansi.sub("", text)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return text
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 async def _read_output(master_fd: int,
                        timeout: float = _READ_TIMEOUT_DEFAULT,
                        drain_pause: float = _DRAIN_PAUSE) -> str:
-    """
-    Async PTY drain.
-
-    Waits up to *timeout* seconds for the first byte, then keeps reading
-    with *drain_pause* silence threshold.  Returns decoded, ANSI-stripped text.
-    """
     loop = asyncio.get_event_loop()
     buf = b""
     got_data = False
@@ -149,7 +193,7 @@ async def _read_output(master_fd: int,
         if chunk:
             buf += chunk
             got_data = True
-            deadline = loop.time() + drain_pause  # reset silence window
+            deadline = loop.time() + drain_pause
 
     return _decode_pty(buf)
 
@@ -168,7 +212,6 @@ def _is_alive(name: str) -> bool:
 
 
 async def _do_create(name: str) -> str:
-    """Spawn a bash shell in a new PTY; register under *name*."""
     if name in _sessions:
         return f"Session '{name}' already exists."
 
@@ -178,9 +221,7 @@ async def _do_create(name: str) -> str:
 
     proc = await asyncio.create_subprocess_exec(
         "/bin/bash", "--login", "-i",
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
+        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
         start_new_session=True,
     )
     os.close(slave_fd)
@@ -194,8 +235,7 @@ async def _do_create(name: str) -> str:
     }
 
     await asyncio.sleep(_STARTUP_DRAIN)
-    _drain_sync(master_fd)   # discard bash startup banner
-
+    _drain_sync(master_fd)
     return f"Session '{name}' created (pid {proc.pid})."
 
 
@@ -223,8 +263,7 @@ async def _do_kill_all() -> str:
     names = list(_sessions.keys())
     if not names:
         return "No active sessions."
-    results = [await _do_kill(n) for n in names]
-    return "\n".join(results)
+    return "\n".join([await _do_kill(n) for n in names])
 
 
 def _do_ls() -> str:
@@ -259,9 +298,7 @@ def _do_history(name: str, lines: int = 50) -> str:
 class _TmuxNewArgs(BaseModel):
     name: str = Field(description="Session name (letters, digits, hyphens, underscores)")
 
-
 async def tmux_new_executor(name: str) -> str:
-    """Create a new named PTY shell session."""
     name = name.strip()
     if not _valid_name(name):
         return f"ERROR: Invalid session name '{name}'. Use letters, digits, hyphens, underscores only."
@@ -272,21 +309,16 @@ class _TmuxExecArgs(BaseModel):
     session: str = Field(description="Target session name")
     command: str = Field(
         description=(
-            "Shell command to send. For long-running jobs use '&' to background "
-            "and tee output to a log file. Control chars: \\x03=Ctrl-C, \\x04=Ctrl-D."
+            "Shell command to send. For long-running jobs use '&' to background and tee "
+            "output to a log file. Control chars: \\x03=Ctrl-C, \\x04=Ctrl-D."
         )
     )
     timeout: Optional[float] = Field(
         default=10.0,
-        description=(
-            "Seconds to wait for output silence (default 10). "
-            "Increase for slow commands. Max 120."
-        ),
+        description="Seconds to wait for output silence (default 10, max 120).",
     )
 
-
 async def tmux_exec_executor(session: str, command: str, timeout: float = 10.0) -> str:
-    """Send a command to a PTY session and return captured output."""
     if session not in _sessions:
         names = ", ".join(_sessions.keys()) if _sessions else "(none)"
         return (
@@ -300,6 +332,11 @@ async def tmux_exec_executor(session: str, command: str, timeout: float = 10.0) 
             f"Kill and recreate: tmux_kill_session(name='{session}') then tmux_new(name='{session}')"
         )
 
+    # Command filter check
+    block_reason = _check_command(command)
+    if block_reason:
+        return f"ERROR: {block_reason}\nCommand was NOT sent to the session."
+
     timeout = max(1.0, min(float(timeout or 10.0), 120.0))
     sess = _sessions[session]
     master_fd = sess["master"]
@@ -312,34 +349,27 @@ async def tmux_exec_executor(session: str, command: str, timeout: float = 10.0) 
 
     output = await _read_output(master_fd, timeout=timeout)
     _append_history(session, f"$ {command}\n" + output)
-
     return output if output.strip() else "(no output)"
 
 
 class _TmuxLsArgs(BaseModel):
     pass
 
-
 async def tmux_ls_executor() -> str:
-    """List all active PTY sessions."""
     return _do_ls()
 
 
 class _TmuxKillSessionArgs(BaseModel):
     name: str = Field(description="Session name to terminate")
 
-
 async def tmux_kill_session_executor(name: str) -> str:
-    """Terminate a named PTY session."""
     return await _do_kill(name.strip())
 
 
 class _TmuxKillServerArgs(BaseModel):
     pass
 
-
 async def tmux_kill_server_executor() -> str:
-    """Terminate all PTY sessions."""
     return await _do_kill_all()
 
 
@@ -347,18 +377,14 @@ class _TmuxHistoryArgs(BaseModel):
     session: str = Field(description="Session name")
     lines: Optional[int] = Field(default=50, description="Number of recent lines to show (default 50)")
 
-
 async def tmux_history_executor(session: str, lines: int = 50) -> str:
-    """Show the rolling history buffer for a session."""
     return _do_history(session.strip(), int(lines or 50))
 
 
 class _TmuxHistoryLimitArgs(BaseModel):
     n: int = Field(description="New rolling history limit (lines per session, >= 1)")
 
-
 async def tmux_history_limit_executor(n: int) -> str:
-    """Set the rolling history line limit for all sessions."""
     global _history_limit
     if n < 1:
         return "ERROR: History limit must be >= 1."
@@ -369,6 +395,62 @@ async def tmux_history_limit_executor(n: int) -> str:
     return f"History limit set to {n} lines. ({len(_sessions)} session(s) updated)"
 
 
+class _TmuxCallLimitArgs(BaseModel):
+    calls: Optional[int] = Field(
+        default=None,
+        description="Max calls allowed in the window (omit to read current setting)"
+    )
+    window_seconds: Optional[int] = Field(
+        default=None,
+        description="Rolling window length in seconds (omit to read current setting)"
+    )
+
+async def tmux_call_limit_executor(calls: Optional[int] = None,
+                                    window_seconds: Optional[int] = None) -> str:
+    """Read or update the tmux tool rate limit."""
+    global _rate_limit_calls, _rate_limit_window
+
+    if calls is None and window_seconds is None:
+        # Read
+        return (
+            f"tmux rate limit: {_rate_limit_calls} calls per {_rate_limit_window}s\n"
+            f"(auto_disable=true — tmux tools disabled on breach until agent restart)"
+        )
+
+    # Write — both must be supplied together
+    if calls is None or window_seconds is None:
+        return "ERROR: Provide both calls and window_seconds, or neither (to read)."
+    if calls < 1:
+        return "ERROR: calls must be >= 1."
+    if window_seconds < 1:
+        return "ERROR: window_seconds must be >= 1."
+
+    old_calls, old_window = _rate_limit_calls, _rate_limit_window
+    _rate_limit_calls = calls
+    _rate_limit_window = window_seconds
+
+    # Persist to plugins-enabled.json
+    try:
+        import json
+        path = os.path.join(os.path.dirname(__file__), "plugins-enabled.json")
+        with open(path, "r") as f:
+            cfg = json.load(f)
+        cfg.setdefault("rate_limits", {})["tmux"] = {
+            "calls": calls,
+            "window_seconds": window_seconds,
+            "auto_disable": True,
+        }
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2)
+        saved = " Persisted to plugins-enabled.json."
+    except Exception as e:
+        saved = f" WARNING: in-memory only, failed to persist: {e}"
+
+    return (
+        f"tmux rate limit: {old_calls}/{old_window}s → {calls}/{window_seconds}s.{saved}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Plugin class
 # ---------------------------------------------------------------------------
@@ -377,9 +459,9 @@ class TmuxPlugin(BasePlugin):
     """PTY shell session manager — tmux-like sessions for LLM shell interaction."""
 
     PLUGIN_NAME = "plugin_tmux"
-    PLUGIN_VERSION = "1.0.0"
+    PLUGIN_VERSION = "1.1.0"
     PLUGIN_TYPE = "data_tool"
-    DESCRIPTION = "PTY shell sessions with rolling history (tmux-like)"
+    DESCRIPTION = "PTY shell sessions with rolling history, command filtering, and rate limiting"
     DEPENDENCIES = []
     ENV_VARS = []
 
@@ -387,12 +469,34 @@ class TmuxPlugin(BasePlugin):
         self.enabled = False
 
     def init(self, config: dict) -> bool:
-        global _history_limit
-        limit = config.get("TMUX_HISTORY_LIMIT", config.get("tmux_history_limit", 200))
+        global _history_limit, _allowed_commands, _blocked_commands
+        global _rate_limit_calls, _rate_limit_window
+
+        # History limit
         try:
-            _history_limit = int(limit)
+            _history_limit = int(config.get("TMUX_HISTORY_LIMIT", 200))
         except (TypeError, ValueError):
             _history_limit = 200
+
+        # Command filter lists — store as lowercase prefixes for fast matching
+        raw_allowed = config.get("TMUX_ALLOWED_COMMANDS", [])
+        raw_blocked = config.get("TMUX_BLOCKED_COMMANDS", [])
+        _allowed_commands = [s.strip().lower() for s in raw_allowed if s.strip()]
+        _blocked_commands = [s.strip().lower() for s in raw_blocked if s.strip()]
+
+        # Rate limit — read from plugins-enabled.json rate_limits.tmux if present
+        try:
+            import json
+            path = os.path.join(os.path.dirname(__file__), "plugins-enabled.json")
+            with open(path, "r") as f:
+                full_cfg = json.load(f)
+            rl = full_cfg.get("rate_limits", {}).get("tmux", {})
+            _rate_limit_calls  = int(rl.get("calls", 30))
+            _rate_limit_window = int(rl.get("window_seconds", 60))
+        except Exception:
+            _rate_limit_calls  = 30
+            _rate_limit_window = 60
+
         self.enabled = True
         return True
 
@@ -413,26 +517,21 @@ class TmuxPlugin(BasePlugin):
 
     def get_gate_tools(self) -> Dict[str, Any]:
         """
-        All tmux tools are write-gated via !tmux_gate_write <true|false>.
-        There is no read gate — tmux_ls and tmux_history expose session topology
-        and command history (including credentials) so they are not safe to
-        auto-allow independently of write operations.
+        All tmux tools are write-gated.
+        Group gate 'tmux' covers all; per-tool gates override for individual tools.
+        tmux_call_limit supports both read and write gates.
         """
+        entry = {"type": "tmux", "operations": ["write"]}
         return {
-            "tmux_new":           {"type": "tmux", "operations": ["write"],
-                                   "description": "create a new PTY shell session"},
-            "tmux_exec":          {"type": "tmux", "operations": ["write"],
-                                   "description": "execute a command in a PTY session"},
-            "tmux_ls":            {"type": "tmux", "operations": ["write"],
-                                   "description": "list active PTY sessions"},
-            "tmux_kill_session":  {"type": "tmux", "operations": ["write"],
-                                   "description": "terminate a named PTY session"},
-            "tmux_kill_server":   {"type": "tmux", "operations": ["write"],
-                                   "description": "terminate all PTY sessions"},
-            "tmux_history":       {"type": "tmux", "operations": ["write"],
-                                   "description": "show session rolling history"},
-            "tmux_history_limit": {"type": "tmux", "operations": ["write"],
-                                   "description": "change the rolling history line limit"},
+            "tmux_new":           {**entry, "description": "create a new PTY shell session"},
+            "tmux_exec":          {**entry, "description": "execute a command in a PTY session"},
+            "tmux_ls":            {**entry, "description": "list active PTY sessions"},
+            "tmux_kill_session":  {**entry, "description": "terminate a named PTY session"},
+            "tmux_kill_server":   {**entry, "description": "terminate all PTY sessions"},
+            "tmux_history":       {**entry, "description": "show session rolling history"},
+            "tmux_history_limit": {**entry, "description": "change the rolling history line limit"},
+            "tmux_call_limit":    {"type": "tmux", "operations": ["read", "write"],
+                                   "description": "read or set the tmux tool rate limit"},
         }
 
     def get_tools(self) -> Dict[str, Any]:
@@ -482,7 +581,7 @@ class TmuxPlugin(BasePlugin):
                     name="tmux_history",
                     description=(
                         "Show the rolling output history for a session. "
-                        "Useful for reviewing what ran without re-executing commands."
+                        "Useful for reviewing past output without re-executing commands."
                     ),
                     args_schema=_TmuxHistoryArgs,
                 ),
@@ -492,19 +591,26 @@ class TmuxPlugin(BasePlugin):
                     description="Set the rolling history line limit for all sessions.",
                     args_schema=_TmuxHistoryLimitArgs,
                 ),
+                StructuredTool.from_function(
+                    coroutine=tmux_call_limit_executor,
+                    name="tmux_call_limit",
+                    description=(
+                        "Read or set the tmux tool rate limit. "
+                        "Call with no args to show current limit. "
+                        "Call with calls + window_seconds to update the limit."
+                    ),
+                    args_schema=_TmuxCallLimitArgs,
+                ),
             ]
         }
 
 
 # ---------------------------------------------------------------------------
-# Public API for routes.py cmd_tmux()
+# Public API for routes.py cmd_tmux() and cmd_tmux_call_limit()
 # ---------------------------------------------------------------------------
 
 async def tmux_command(subcommand: str, args: str) -> str:
-    """
-    Dispatch a !tmux subcommand from the routes layer.
-    Returns a string suitable for push_tok.
-    """
+    """Dispatch a !tmux subcommand. Returns string for push_tok."""
     sub = subcommand.lower().strip()
 
     if sub == "new":
@@ -548,8 +654,35 @@ async def tmux_command(subcommand: str, args: str) -> str:
             return f"ERROR: Invalid value '{val}'. Must be a positive integer."
         return await tmux_history_limit_executor(n)
 
+    elif sub == "filters":
+        return _format_filter_status()
+
     else:
         return (
             f"Unknown tmux subcommand: '{sub}'\n"
-            "Available: new, ls, kill-session, kill-server, a, history-limit"
+            "Available: new, ls, kill-session, kill-server, a, history-limit, filters"
         )
+
+
+async def tmux_call_limit_command(args: str) -> str:
+    """
+    Dispatch !tmux_call_limit command.
+    No args  → show current limit
+    <n> <w>  → set calls=n window=w
+    """
+    args = args.strip()
+    if not args:
+        return await tmux_call_limit_executor()
+    parts = args.split()
+    if len(parts) != 2:
+        return (
+            "Usage: !tmux_call_limit [<calls> <window_seconds>]\n"
+            "  No args: show current limit\n"
+            "  Example: !tmux_call_limit 20 60"
+        )
+    try:
+        calls = int(parts[0])
+        window = int(parts[1])
+    except ValueError:
+        return "ERROR: Both arguments must be integers."
+    return await tmux_call_limit_executor(calls=calls, window_seconds=window)

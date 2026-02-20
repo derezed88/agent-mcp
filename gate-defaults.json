@@ -37,6 +37,10 @@
     "tmux": {
       "write": false
     },
+    "tmux_call_limit": {
+      "read": false,
+      "write": false
+    },
     "gate_list": {
       "read": true
     }

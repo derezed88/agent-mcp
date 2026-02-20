@@ -34,11 +34,49 @@
     "plugin_client_api": {
       "enabled": true,
       "api_port": 8767,
-      "api_host": "0.0.0.0"
+      "api_host": "0.0.0.0",
+      "INTER_AGENT_ALLOWED_COMMANDS": [],
+      "INTER_AGENT_BLOCKED_COMMANDS": [
+        "rm -rf",
+        "rm -f /",
+        "dd if=",
+        "mkfs",
+        ":(){ :|:& };:",
+        "> /dev/sd",
+        "chmod -r /",
+        "chown -r /",
+        "curl | bash",
+        "curl | sh",
+        "wget | bash",
+        "wget | sh",
+        "shutdown",
+        "reboot",
+        "halt",
+        "poweroff"
+      ]
     },
     "plugin_tmux": {
       "enabled": true,
-      "TMUX_HISTORY_LIMIT": 200
+      "TMUX_HISTORY_LIMIT": 200,
+      "TMUX_ALLOWED_COMMANDS": [],
+      "TMUX_BLOCKED_COMMANDS": [
+        "rm -rf",
+        "rm -f /",
+        "dd if=",
+        "mkfs",
+        ":(){ :|:& };:",
+        "> /dev/sd",
+        "chmod -r /",
+        "chown -r /",
+        "curl | bash",
+        "curl | sh",
+        "wget | bash",
+        "wget | sh",
+        "shutdown",
+        "reboot",
+        "halt",
+        "poweroff"
+      ]
     }
   },
   "rate_limits": {
@@ -76,10 +114,15 @@
       "calls": 5,
       "window_seconds": 60,
       "auto_disable": false
+    },
+    "tmux": {
+      "calls": 30,
+      "window_seconds": 60,
+      "auto_disable": true
     }
   },
   "metadata": {
-    "last_modified": "2026-02-18",
+    "last_modified": "2026-02-20",
     "notes": "Configuration for enabled plugins. Modified by plugin-manager.py"
   },
   "default_model": "gemini25fl"
