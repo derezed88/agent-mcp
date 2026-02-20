@@ -37,7 +37,7 @@ from plugin_loader import PluginLoader
 from tools import get_core_tools
 import tools as tools_module
 import agents as agents_module
-from tools import register_gate_tools
+from tools import register_gate_tools, register_plugin_commands
 
 
 def _check_port_available(host: str, port: int) -> bool:
@@ -91,6 +91,10 @@ async def run_agent(host: str = "0.0.0.0"):
             gate_tools = plugin.get_gate_tools()
             if gate_tools:
                 register_gate_tools(plugin_name, gate_tools)
+            # Register !command handlers
+            commands = plugin.get_commands()
+            if commands:
+                register_plugin_commands(plugin_name, commands, plugin.get_help())
 
     # Update agents module with dynamic tools
     agents_module.update_tool_definitions()

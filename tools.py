@@ -72,6 +72,13 @@ _PLUGIN_TOOL_EXECUTORS: dict = {}
 # operations: ["read"], ["write"], ["read", "write"]
 _PLUGIN_GATE_TOOLS: dict = {}
 
+# Plugin command registry: command_name -> async handler(subcommand_or_args: str) -> str
+# Handlers have signature: async (args: str) -> str
+# Populated at startup by register_plugin_commands(); queried by routes.py dispatch.
+# Also stores optional help text per plugin: _PLUGIN_HELP[plugin_name] -> str
+_PLUGIN_COMMANDS: dict = {}   # cmd_name -> async handler
+_PLUGIN_HELP: dict = {}       # plugin_name -> help string (from get_help())
+
 
 def register_gate_tools(plugin_name: str, gate_tools: dict):
     """
@@ -94,6 +101,32 @@ def get_gate_tools_by_type(tool_type: str) -> list[str]:
 def get_all_gate_tools() -> dict:
     """Return the full gate tool registry."""
     return _PLUGIN_GATE_TOOLS
+
+
+def register_plugin_commands(plugin_name: str, commands: dict, help_text: str = ""):
+    """
+    Register !command handlers contributed by a plugin.
+
+    Args:
+        plugin_name: Plugin identifier (for logging)
+        commands: Dict mapping command_name -> async handler(args: str) -> str
+        help_text: Optional help section string from plugin.get_help()
+    """
+    global _PLUGIN_COMMANDS, _PLUGIN_HELP
+    _PLUGIN_COMMANDS.update(commands)
+    if help_text:
+        _PLUGIN_HELP[plugin_name] = help_text
+    log.info(f"Registered {len(commands)} command(s) from {plugin_name}: {list(commands.keys())}")
+
+
+def get_plugin_command(cmd_name: str):
+    """Return the handler for a plugin-registered command, or None if not found."""
+    return _PLUGIN_COMMANDS.get(cmd_name)
+
+
+def get_plugin_help_sections() -> list[str]:
+    """Return all plugin help section strings, in registration order."""
+    return list(_PLUGIN_HELP.values())
 
 
 def register_plugin_tools(plugin_name: str, tool_defs: dict):

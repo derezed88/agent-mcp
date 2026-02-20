@@ -547,6 +547,39 @@ class TmuxPlugin(BasePlugin):
             except Exception:
                 pass
 
+    def get_commands(self) -> Dict[str, Any]:
+        """
+        Return !command handlers contributed by this plugin.
+
+        routes.py dispatches !tmux and !tmux_call_limit through these handlers.
+        Each handler signature: async (client_id: str, arg: str) -> None
+        The wrapper in routes.py handles push_tok / push_done.
+        """
+        return {
+            "tmux":           tmux_command,
+            "tmux_call_limit": tmux_call_limit_command,
+        }
+
+    def get_help(self) -> str:
+        """Return the !help section for this plugin."""
+        return (
+            "Shell Sessions (tmux):\n"
+            "  !tmux new <name>                          - create a new PTY shell session\n"
+            "  !tmux exec <session> <command>            - run a command in a session\n"
+            "  !tmux ls                                  - list active sessions\n"
+            "  !tmux kill-session <name>                 - terminate a session\n"
+            "  !tmux kill-server                         - terminate all sessions\n"
+            "  !tmux a <name>                            - show recent history for a session\n"
+            "  !tmux history-limit [n]                   - get/set rolling history line limit\n"
+            "  !tmux filters                             - show ALLOWED/BLOCKED command filter lists\n"
+            "  !tmux_call_limit                          - show current tmux rate limit\n"
+            "  !tmux_call_limit <calls> <window_sec>     - set rate limit (auto-disables on breach)\n"
+            "  !tmux_gate_write <t|f>                    - gate ALL tmux tools: true=gated, false=auto-allow\n"
+            "  !tmux_<toolname>_gate_write <t|f>         - per-tool override (e.g. !tmux_exec_gate_write)\n"
+            "  !tmux_call_limit_gate_read <t|f>          - gate tmux_call_limit reads\n"
+            "  !tmux_call_limit_gate_write <t|f>         - gate tmux_call_limit writes\n"
+        )
+
     def get_gate_tools(self) -> Dict[str, Any]:
         """
         All tmux tools are write-gated.

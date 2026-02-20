@@ -315,47 +315,29 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         pending_gates.pop(gate_id, None)
         return decision == "allow"
 
-    # tmux: all tools are write-gated.
-    # Per-tool gate (e.g. "tmux_exec") takes precedence; "tmux" is the shared
-    # group fallback; wildcard "*" is the last resort.
-    # No read gate — tmux_ls and tmux_history expose session topology and history.
-    if tool_name in ("tmux_new", "tmux_exec", "tmux_ls", "tmux_history",
-                     "tmux_kill_session", "tmux_kill_server", "tmux_history_limit"):
+    # tmux: all registered tmux tools — checked dynamically from plugin registry.
+    # Group gate "tmux" covers all tools of this type; per-tool gates override.
+    # Tools with only ["write"] ops use write gate; tools with ["read","write"] ops
+    # infer perm_type from whether any mutation args are present.
+    if tool_name in get_gate_tools_by_type("tmux"):
+        from tools import get_all_gate_tools as _all_gt
+        tool_meta = _all_gt().get(tool_name, {})
+        ops = tool_meta.get("operations", ["write"])
+        if "read" in ops and "write" in ops:
+            # Mixed read/write: infer from presence of non-None args (tmux_call_limit pattern)
+            has_write_args = bool(tool_args and any(v is not None for v in tool_args.values()))
+            perm_type = "write" if has_write_args else "read"
+        else:
+            perm_type = ops[0] if ops else "write"
+
         default_perms = tool_gate_state.get("*", {})
         group_perms  = tool_gate_state.get("tmux", {})
         per_tool     = tool_gate_state.get(tool_name, {})
-        # per-tool setting overrides group; group overrides wildcard
-        allowed = per_tool.get("write",
-                      group_perms.get("write",
-                          default_perms.get("write", False)))
+        # per-tool overrides group; group overrides wildcard
+        allowed = per_tool.get(perm_type,
+                      group_perms.get(perm_type,
+                          default_perms.get(perm_type, False)))
         if allowed:
-            return True
-        if is_non_interactive:
-            return False
-        gate_data = {
-            "gate_id": str(uuid.uuid4()),
-            "tool_name": tool_name,
-            "tool_args": {**tool_args, "operation_type": "write"},
-            "tables": [],
-        }
-        if is_api_client:
-            return await do_api_gate(gate_data)
-        gate_id = gate_data["gate_id"]
-        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
-        await push_gate(client_id, gate_data)
-        await pending_gates[gate_id]["event"].wait()
-        decision = pending_gates[gate_id].pop("decision", "reject")
-        pending_gates.pop(gate_id, None)
-        return decision == "allow"
-
-    # tmux_call_limit: read gate for show, write gate for set
-    if tool_name == "tmux_call_limit":
-        # Distinguish read (no args / calls=None) from write (calls+window supplied)
-        has_write_args = tool_args.get("calls") is not None or tool_args.get("window_seconds") is not None
-        perm_type = "write" if has_write_args else "read"
-        default_perms = tool_gate_state.get("*", {})
-        tool_perms = tool_gate_state.get("tmux_call_limit", {})
-        if tool_perms.get(perm_type, default_perms.get(perm_type, False)):
             return True
         if is_non_interactive:
             return False

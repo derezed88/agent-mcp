@@ -12,7 +12,7 @@ from prompt import (sp_list_files, sp_read_prompt, sp_read_file, sp_write_file,
                     sp_delete_file, sp_delete_directory, sp_copy_directory, sp_set_directory,
                     sp_resolve_model)
 from agents import dispatch_llm
-from tools import get_all_gate_tools, get_tool_executor
+from tools import get_all_gate_tools, get_tool_executor, get_plugin_command, get_plugin_help_sections
 
 # Context flag for batch command processing
 _batch_mode = {}  # client_id -> bool
@@ -70,22 +70,8 @@ async def cmd_help(client_id: str):
         "  !google_drive_gate_read <t|f>             - gate Drive reads: true=gated, false=auto-allow\n"
         "  !google_drive_gate_write <t|f>            - gate Drive writes: true=gated, false=auto-allow\n"
         "\n"
-        "Shell Sessions (tmux):\n"
-        "  !tmux new <name>                          - create a new PTY shell session\n"
-        "  !tmux exec <session> <command>            - run a command in a session\n"
-        "  !tmux ls                                  - list active sessions\n"
-        "  !tmux kill-session <name>                 - terminate a session\n"
-        "  !tmux kill-server                         - terminate all sessions\n"
-        "  !tmux a <name>                            - show recent history for a session\n"
-        "  !tmux history-limit [n]                   - get/set rolling history line limit\n"
-        "  !tmux filters                             - show ALLOWED/BLOCKED command filter lists\n"
-        "  !tmux_call_limit                          - show current tmux rate limit\n"
-        "  !tmux_call_limit <calls> <window_sec>     - set rate limit (auto-disables on breach)\n"
-        "  !tmux_gate_write <t|f>                    - gate ALL tmux tools: true=gated, false=auto-allow\n"
-        "  !tmux_<toolname>_gate_write <t|f>         - per-tool override (e.g. !tmux_exec_gate_write)\n"
-        "  !tmux_call_limit_gate_read <t|f>          - gate tmux_call_limit reads\n"
-        "  !tmux_call_limit_gate_write <t|f>         - gate tmux_call_limit writes\n"
-        "\n"
+        + "".join(get_plugin_help_sections())
+        + "\n"
         "Gate Management (per-tool):\n"
         "  !gate_list                                - show live gate status for all tools\n"
         "  !gate_list_gate_read <t|f>                - gate gate_list: true=gated, false=auto-allow\n"
@@ -476,67 +462,22 @@ async def cmd_google_drive(client_id: str, args: str):
     await conditional_push_done(client_id)
 
 
-async def cmd_tmux(client_id: str, args: str):
+async def cmd_plugin_command(client_id: str, cmd: str, args: str):
     """
-    Dispatch !tmux subcommands to the tmux plugin.
-    Usage:
-      !tmux new <name>              - create a new shell session
-      !tmux exec <session> <cmd>    - run a command in a session
-      !tmux ls                      - list active sessions
-      !tmux kill-session <name>     - terminate a session
-      !tmux kill-server             - terminate all sessions
-      !tmux a <name>                - show recent history for a session
-      !tmux history-limit [n]       - get/set rolling history limit
+    Generic dispatcher for plugin-registered !commands.
+    Looks up cmd in the _PLUGIN_COMMANDS registry and calls the handler.
+    Handler signature: async (args: str) -> str
     """
-    from tools import get_tool_executor
-    if get_tool_executor("tmux_exec") is None:
-        await push_tok(client_id, "ERROR: tmux plugin not loaded.")
-        await conditional_push_done(client_id)
-        return
-
-    parts = args.split(maxsplit=1)
-    if not parts:
-        await push_tok(client_id,
-            "Usage: !tmux <subcommand> [args]\n"
-            "  !tmux new <name>              - create a new shell session\n"
-            "  !tmux exec <session> <cmd>    - run a command in a session\n"
-            "  !tmux ls                      - list active sessions\n"
-            "  !tmux kill-session <name>     - terminate a session\n"
-            "  !tmux kill-server             - terminate all sessions\n"
-            "  !tmux a <name>                - show recent history for a session\n"
-            "  !tmux history-limit [n]       - get/set rolling history limit")
-        await conditional_push_done(client_id)
-        return
-
-    subcommand = parts[0].strip()
-    sub_args = parts[1].strip() if len(parts) > 1 else ""
-
-    try:
-        from plugin_tmux import tmux_command
-        result = await tmux_command(subcommand, sub_args)
-        await push_tok(client_id, result)
-    except Exception as exc:
-        await push_tok(client_id, f"ERROR: !tmux {subcommand} failed: {exc}")
-    await conditional_push_done(client_id)
-
-
-async def cmd_tmux_call_limit(client_id: str, args: str):
-    """
-    Get or set the tmux tool rate limit.
-    !tmux_call_limit                      - show current limit
-    !tmux_call_limit <calls> <window_sec> - set rate limit
-    """
-    from tools import get_tool_executor
-    if get_tool_executor("tmux_exec") is None:
-        await push_tok(client_id, "ERROR: tmux plugin not loaded.")
+    handler = get_plugin_command(cmd)
+    if handler is None:
+        await push_tok(client_id, f"Unknown command: !{cmd}\nUse !help to see available commands.")
         await conditional_push_done(client_id)
         return
     try:
-        from plugin_tmux import tmux_call_limit_command
-        result = await tmux_call_limit_command(args)
+        result = await handler(args)
         await push_tok(client_id, result)
     except Exception as exc:
-        await push_tok(client_id, f"ERROR: !tmux_call_limit failed: {exc}")
+        await push_tok(client_id, f"ERROR: !{cmd} failed: {exc}")
     await conditional_push_done(client_id)
 
 
@@ -1013,10 +954,6 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_url_extract(client_id, arg)
                 elif cmd == "google_drive":
                     await cmd_google_drive(client_id, arg)
-                elif cmd == "tmux":
-                    await cmd_tmux(client_id, arg)
-                elif cmd == "tmux_call_limit":
-                    await cmd_tmux_call_limit(client_id, arg)
                 elif cmd == "get_system_info":
                     await cmd_get_system_info(client_id)
                 elif cmd == "llm_list":
@@ -1053,6 +990,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                         tool_name = cmd[:-len("_gate_write")]
                         perm = "write"
                     await cmd_gate(client_id, tool_name, perm, arg)
+                elif get_plugin_command(cmd) is not None:
+                    await cmd_plugin_command(client_id, cmd, arg)
                 else:
                     await push_tok(client_id, f"Unknown command: !{cmd}\nUse !help to see available commands.\n")
 
@@ -1125,12 +1064,6 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "google_drive":
             await cmd_google_drive(client_id, arg)
             return
-        if cmd == "tmux":
-            await cmd_tmux(client_id, arg)
-            return
-        if cmd == "tmux_call_limit":
-            await cmd_tmux_call_limit(client_id, arg)
-            return
         if cmd == "get_system_info":
             await cmd_get_system_info(client_id)
             return
@@ -1179,6 +1112,11 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                 tool_name = cmd[:-len("_gate_write")]
                 perm = "write"
             await cmd_gate(client_id, tool_name, perm, arg)
+            return
+
+        # Plugin-registered commands (e.g. !tmux, !tmux_call_limit from plugin_tmux)
+        if get_plugin_command(cmd) is not None:
+            await cmd_plugin_command(client_id, cmd, arg)
             return
 
         # Catch-all for unknown commands - don't pass to LLM

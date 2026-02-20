@@ -276,22 +276,30 @@ def get_config(self) -> dict:
 ## `get_commands()` — Optional (either plugin type)
 
 Plugins may contribute `!command` handlers. Return a dict of command name →
-async handler. The handler signature must be `async def handler(client_id: str, arg: str)`.
+async handler. The handler signature is `async def handler(args: str) -> str`.
+The dispatcher in `routes.py` calls the handler and pushes the returned string
+to the client — the plugin does not call `push_tok` directly.
 
 ```python
 def get_commands(self) -> Dict[str, Any]:
-    async def my_cmd(client_id: str, arg: str):
-        from state import push_tok
-        from routes import conditional_push_done
-        await push_tok(client_id, f"mycommand received: {arg}")
-        await conditional_push_done(client_id)
+    async def my_cmd(args: str) -> str:
+        return f"mycommand received: {args}"
 
     return {"mycommand": my_cmd}
 ```
 
-> **Note:** `get_commands()` is defined on `BasePlugin` but is not yet
-> auto-wired by `agent-mcp.py`. Commands must currently be added manually
-> to `routes.py`. This is a planned improvement.
+Pair with `get_help()` to add a section to `!help`:
+
+```python
+def get_help(self) -> str:
+    return (
+        "My Plugin:\n"
+        "  !mycommand <args>   - do something\n"
+    )
+```
+
+Commands are auto-registered at startup by `agent-mcp.py` via `register_plugin_commands()`
+and dispatched generically by `cmd_plugin_command()` in `routes.py`.
 
 ---
 
