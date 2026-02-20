@@ -36,24 +36,7 @@
       "api_port": 8767,
       "api_host": "0.0.0.0",
       "OUTBOUND_AGENT_ALLOWED_COMMANDS": [],
-      "OUTBOUND_AGENT_BLOCKED_COMMANDS": [
-        "rm -rf",
-        "rm -f /",
-        "dd if=",
-        "mkfs",
-        ":(){ :|:& };:",
-        "> /dev/sd",
-        "chmod -r /",
-        "chown -r /",
-        "curl | bash",
-        "curl | sh",
-        "wget | bash",
-        "wget | sh",
-        "shutdown",
-        "reboot",
-        "halt",
-        "poweroff"
-      ]
+      "OUTBOUND_AGENT_BLOCKED_COMMANDS": []
     },
     "plugin_tmux": {
       "enabled": true,
