@@ -172,38 +172,19 @@ fi
 echo "Cloning repo (branch: $BRANCH)..."
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 
-# If SOURCE_DIR is local (no SOURCE_HOST, or SOURCE_HOST is localhost/127.0.0.1
-# or the same hostname), skip GitHub entirely and rsync from source.
-_is_local=false
-if [ -z "$SOURCE_HOST" ]; then
-    _is_local=true
-elif [ "$SOURCE_HOST" = "localhost" ] || [ "$SOURCE_HOST" = "127.0.0.1" ]; then
-    _is_local=true
-elif [ "$SOURCE_HOST" = "$(hostname -I | awk '{print $1}')" ] || \
-     [ "$SOURCE_HOST" = "$(hostname)" ]; then
-    _is_local=true
-fi
+# Disable all interactive git prompts — clone must succeed non-interactively
+# or fail immediately. This prevents hangs in PTY/non-interactive sessions.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
 
-if [ "$_is_local" = true ] && [ -d "$SOURCE_DIR/.git" ]; then
-    echo "  Source is local — copying repo directly (skipping GitHub clone)"
-    cp -r "$SOURCE_DIR" "$TARGET_DIR"
-    cd "$TARGET_DIR"
-    git checkout "$BRANCH" 2>/dev/null || true
-elif [ -n "$SOURCE_HOST" ] && [ "$_is_local" = true ] && [ -d "$SOURCE_DIR/.git" ]; then
-    echo "  Source is local via SSH — rsync repo directly"
-    rsync -a --exclude='venv/' --exclude='__pycache__/' \
-        "${SOURCE_USER}@${SOURCE_HOST}:${SOURCE_DIR}/" "$TARGET_DIR/"
-    cd "$TARGET_DIR"
-else
-    # Prefer SSH clone; fall back to HTTPS for machines without a GitHub SSH key.
-    REPO="$REPO_SSH"
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 git@github.com true 2>/dev/null; then
-        echo "  No GitHub SSH key found — using HTTPS clone"
-        REPO="$REPO_HTTPS"
-    fi
-    git clone --branch "$BRANCH" "$REPO" "$TARGET_DIR"
-    cd "$TARGET_DIR"
+# Prefer SSH clone; fall back to HTTPS for machines without a GitHub SSH key.
+REPO="$REPO_SSH"
+if ! ssh -o BatchMode=yes -o ConnectTimeout=5 git@github.com true 2>/dev/null; then
+    echo "  No GitHub SSH key found — using HTTPS clone"
+    REPO="$REPO_HTTPS"
 fi
+git clone --branch "$BRANCH" "$REPO" "$TARGET_DIR"
+cd "$TARGET_DIR"
 
 # ── 2. Python version check ──────────────────────────────────────────────────
 # Ensure pyenv shims are in PATH even in non-interactive SSH sessions.
