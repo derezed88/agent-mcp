@@ -70,9 +70,20 @@ system_prompt/
 
 Give a local low-power model a stripped prompt; give frontier models the full PDDS memory chain. Each model's folder is set in `llm-models.json` — one field, no code.
 
-#### Let the LLM Evolve Its Own Behavior
+#### A Self-Learning, Self-Evolving System
 
-Say "remember permanently: always respond in bullet points" — the LLM calls `update_system_prompt`, writes a new section file, and that rule persists across restarts. Say "show me your system prompt" — it calls `read_system_prompt` and shows you. This is a live, self-evolving configuration controlled by natural language.
+The combination of persistent memory, writable system prompt, and LLM access to the admin command surface enables something beyond simple configuration: **a system that can learn from interactions and evolve its own behavior over time.**
+
+The pieces that make this possible:
+
+- **Persistent memory via MySQL and Google Drive** — the LLM stores facts, preferences, and outcomes across sessions. It can query what it learned yesterday and act on it today.
+- **Writable, modular system prompt** — the LLM can append, replace, or delete sections of its own operating rules. A rule learned in one conversation becomes part of how it behaves in all future conversations.
+- **Full admin command access** — gate permissions, model selection, context limits, and rate limits are all tools the LLM can invoke. Tell it "use the local model for searches from now on" and it switches and remembers.
+- **PDDS memory hierarchy** — the agent follows a defined lookup chain (pretrain → DB → Drive → search) so it automatically draws on accumulated knowledge before reaching out to external sources.
+
+The result: an agent that gets better at your specific workflows the more you use it. It learns your terminology, stores your preferences, tightens its own behavior rules, and adapts its tool usage — without you writing code or editing config files. The operator retains control through gates and the system prompt's keyword guards, but within those bounds the agent is free to evolve.
+
+This is the foundation for building an agent that isn't just a stateless tool — it's an accumulating, adapting system.
 
 #### Runtime Admin Without Code
 
@@ -89,7 +100,7 @@ All configuration is JSON + commands. Nothing requires a restart:
 
 Rate limits, session timeouts, tool permissions, model timeouts — all configurable live via `!commands` or `plugin-manager.py` CLI.
 
-**The LLM has access to the same command surface you do.** Gate commands, model switching, session inspection, system prompt edits, and limit adjustments are all available as tools the LLM can call. This is intentional — it means you can instruct the agent in natural language ("switch to gemini", "allow drive reads from now on") and it will execute the corresponding command itself, without you typing it.
+**The LLM has access to the same command surface you do.** Gate commands, model switching, session inspection, system prompt edits, and limit adjustments are all available as tools the LLM can call. You can instruct the agent in natural language ("switch to gemini", "allow drive reads from now on") and it executes the corresponding command itself, without you typing it.
 
 ---
 
