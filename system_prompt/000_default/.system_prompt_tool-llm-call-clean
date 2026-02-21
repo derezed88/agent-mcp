@@ -20,9 +20,9 @@ Constraints:
 - Returns a descriptive error string if the model is unavailable, rate-limited, or times out.
 
 When to use:
-- [This section is intentionally left for the user to fill in — specify which models
-  to call for which purposes, e.g., "call grok4 for factual verification",
-  "call gemini25 for summarization tasks", etc.]
+- Call llm_list() first to discover available models and their capabilities.
+- Use any model with tool_call_available=YES. Do not assume specific model names —
+  available models vary by deployment.
 
 Workflow:
 1. Call llm_list() to identify a model with tool_call_available=YES.
