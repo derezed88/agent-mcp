@@ -5,22 +5,14 @@
 # installs requirements, then copies working config from the reference
 # installation so agent-mcp.py is ready to run immediately.
 #
-# Files copied from the reference install (NOT in the repo):
-#   .env, credentials.json, token.json, <service-account>.json
-#   llm-models.json          (has local hosts/keys not in repo)
-#   gate-defaults.json       (gate auto-allow defaults, optional)
-#   system_prompt/           (any folders beyond 000_default, optional)
-#
-# Files NOT copied (repo defaults are used):
-#   plugins-enabled.json     (adjust ports with plugin-manager.py port-set)
-#
 # Usage (local, same machine):
 #   cd /some/target/dir
-#   ./setup-agent-mcp.sh --source-dir /path/to/your/dev/install
+#   ./setup-agent-mcp.sh --source-dir /home/markj/projects/kaliLinuxNWScripts/mymcp
 #
 # Usage (remote machine — SSH back to the dev host to pull secrets/config):
-#   ./setup-agent-mcp.sh --source-host 192.168.1.10 --source-dir /path/to/dev/install \
-#                        [--source-user <user>] [--branch <branch>] [--name <dirname>]
+#   ./setup-agent-mcp.sh --source-host 192.168.10.111 \
+#                        --source-dir /home/markj/projects/kaliLinuxNWScripts/mymcp \
+#                        [--source-user markj] [--branch <branch>] [--name <dirname>]
 #
 # Options:
 #   --branch <branch>       Git branch to check out after clone (default: main)
@@ -46,7 +38,7 @@ BRANCH="main"
 DIR_NAME="agent-mcp"
 SOURCE_HOST=""
 SOURCE_USER="${USER}"
-SOURCE_DIR=""
+SOURCE_DIR=""   # derived below after arg parsing
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -80,15 +72,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# SOURCE_DIR is required whenever pulling config (local or remote).
-# There is no universal default — it depends on where you keep your dev install.
+# SOURCE_DIR is required — no hardcoded default so the script is portable.
 if [ -z "$SOURCE_DIR" ]; then
     echo "ERROR: --source-dir is required (absolute path to your reference install)."
     echo "  Local:   --source-dir /path/to/your/dev/install"
     echo "  Remote:  --source-host <host> --source-dir /path/to/dev/install"
     echo ""
     echo "  Tip: the reference install is the directory containing your .env,"
-    echo "       credentials.json, llm-models.json, and system_prompt/ folder."
+    echo "       credentials.json, llm-models.json, and .system_prompt* files."
     exit 1
 fi
 
@@ -120,6 +111,15 @@ copy_file() {
     fi
 }
 
+# ── Helper: list files matching a glob on source (local or remote) ───────────
+list_source_files() {
+    local pattern="$1"
+    if [ -n "$SOURCE_HOST" ]; then
+        ssh "${SOURCE_USER}@${SOURCE_HOST}" "ls ${SOURCE_DIR}/${pattern} 2>/dev/null || true"
+    else
+        ls ${SOURCE_DIR}/${pattern} 2>/dev/null || true
+    fi
+}
 
 # ── 0a. System package preflight ─────────────────────────────────────────────
 # Only needed when falling back to the system Python (not pyenv).
@@ -170,9 +170,7 @@ if [ -d "$TARGET_DIR" ]; then
 fi
 
 echo "Cloning repo (branch: $BRANCH)..."
-# Seed GitHub's host key so SSH clone doesn't fail on first-time machines
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
-ssh-keyscan -t ed25519 github.com 2>/dev/null >> ~/.ssh/known_hosts
 
 # Prefer SSH clone (uses local SSH agent / key); fall back to HTTPS for machines
 # without a GitHub SSH key (e.g. fresh remote nodes).
@@ -241,18 +239,14 @@ copy_file "token.json"
 # Model registry (may have local hosts/keys not in repo copy)
 copy_file "llm-models.json"
 
-# Gate defaults (gate auto-allow settings; optional — all gates ON if absent)
-copy_file "gate-defaults.json"
-
 # Service account JSON referenced in .env (SERVICE_ACCOUNT_FILE=./gen-lang-*.json)
-# Extract the filename from .env — handles quoted and unquoted values.
-# Pattern: SERVICE_ACCOUNT_FILE=["']?./FILENAME["']?
+# Extract the filename from .env if present, then copy it too.
 SA_FILE=""
-_sa_grep='grep -oP "(?<=SERVICE_ACCOUNT_FILE=[\"'"'"']?\./)([^\s\"'"'"']+)" '"${SOURCE_DIR}/.env"' 2>/dev/null | head -1 || true'
 if [ -n "$SOURCE_HOST" ]; then
-    SA_FILE=$(ssh "${SOURCE_USER}@${SOURCE_HOST}" "$_sa_grep")
+    SA_FILE=$(ssh "${SOURCE_USER}@${SOURCE_HOST}" \
+        "grep -oP 'SERVICE_ACCOUNT_FILE=\"\./\K[^\"]+' ${SOURCE_DIR}/.env 2>/dev/null || true")
 else
-    SA_FILE=$(eval "$_sa_grep")
+    SA_FILE=$(grep -oP 'SERVICE_ACCOUNT_FILE="\./\K[^"]+' "${SOURCE_DIR}/.env" 2>/dev/null || true)
 fi
 if [ -n "$SA_FILE" ]; then
     copy_file "$SA_FILE"
@@ -262,35 +256,17 @@ fi
 # The repo's version has clean defaults. Port overrides are applied below via
 # plugin-manager.py port-set so each instance gets its own port assignments.
 
-# system_prompt/ — the repo ships 000_default/ but the reference may have
-# additional custom folders (e.g. system_prompt/my_custom_model/).
-# Merge: copy the entire system_prompt/ tree from source, skipping files that
-# already exist in the target (repo clone wins for 000_default).
-echo ""
-echo "Syncing system_prompt/ folders from reference..."
-if [ -n "$SOURCE_HOST" ]; then
-    # Check the directory exists on the remote before rsync to avoid confusing errors
-    if ssh "${SOURCE_USER}@${SOURCE_HOST}" "test -d '${SOURCE_DIR}/system_prompt'" 2>/dev/null; then
-        # --ignore-existing preserves repo's 000_default files
-        if rsync -a --ignore-existing \
-                 "${SOURCE_USER}@${SOURCE_HOST}:${SOURCE_DIR}/system_prompt/" \
-                 "$TARGET_DIR/system_prompt/"; then
-            echo "  ✓ system_prompt/ synced from ${SOURCE_USER}@${SOURCE_HOST}"
-        else
-            echo "  ✗ system_prompt/ rsync failed (skipping)"
-        fi
+# Live system prompt sections (repo has defaults, but reference may have customizations)
+while IFS= read -r fpath; do
+    [ -f "$fpath" ] || [ -n "$SOURCE_HOST" ] || continue
+    fname=$(basename "$fpath")
+    if [ -n "$SOURCE_HOST" ]; then
+        copy_file "$fname" "$TARGET_DIR/$fname"
     else
-        echo "  ✗ system_prompt/ not found on source (skipping)"
+        cp "$fpath" "$TARGET_DIR/$fname"
+        echo "  ✓ $fname"
     fi
-else
-    if [ -d "${SOURCE_DIR}/system_prompt" ]; then
-        # cp -rn: skip existing files so repo's 000_default content is not overwritten
-        cp -rn "${SOURCE_DIR}/system_prompt/." "$TARGET_DIR/system_prompt/"
-        echo "  ✓ system_prompt/ synced (new folders only)"
-    else
-        echo "  ✗ system_prompt/ not found in reference dir (skipping)"
-    fi
-fi
+done < <(list_source_files ".system_prompt*")
 
 # ── 6. Verify ────────────────────────────────────────────────────────────────
 echo ""
