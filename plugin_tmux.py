@@ -25,7 +25,7 @@ User commands (dispatched from routes.py cmd_tmux):
     !tmux ls
     !tmux kill-session <name>
     !tmux kill-server
-    !tmux a <name>
+    !tmux buf <name>
     !tmux history-limit [n]
     !tmux_call_limit              - show current limit
     !tmux_call_limit <calls> <window_seconds>  - set limit
@@ -599,7 +599,7 @@ class TmuxPlugin(BasePlugin):
             "  !tmux ls                                  - list active sessions\n"
             "  !tmux kill-session <name>                 - terminate a session\n"
             "  !tmux kill-server                         - terminate all sessions\n"
-            "  !tmux a <name>                            - show recent history for a session\n"
+            "  !tmux buf <name>                          - show output buffer (recent history) for a session\n"
             "  !tmux history-limit [n]                   - get/set rolling history line limit\n"
             "  !tmux filters                             - show ALLOWED/BLOCKED command filter lists\n"
             "  !tmux_call_limit                          - show current tmux rate limit\n"
@@ -710,7 +710,7 @@ async def tmux_command(args: str) -> str:
     if not parts:
         return (
             "Usage: !tmux <subcommand> [args]\n"
-            "Available: new, exec, ls, kill-session, kill-server, a, history-limit, filters"
+            "Available: new, exec, ls, kill-session, kill-server, buf, history-limit, filters"
         )
     sub = parts[0].lower().strip()
     args = parts[1].strip() if len(parts) > 1 else ""
@@ -746,10 +746,10 @@ async def tmux_command(args: str) -> str:
     elif sub == "kill-server":
         return await _do_kill_all()
 
-    elif sub == "a":
+    elif sub == "buf":
         name = args.strip()
         if not name:
-            return "Usage: !tmux a <name>"
+            return "Usage: !tmux buf <name>"
         return _do_history(name)
 
     elif sub == "history-limit":
@@ -770,7 +770,7 @@ async def tmux_command(args: str) -> str:
     else:
         return (
             f"Unknown tmux subcommand: '{sub}'\n"
-            "Available: new, exec, ls, kill-session, kill-server, a, history-limit, filters"
+            "Available: new, exec, ls, kill-session, kill-server, buf, history-limit, filters"
         )
 
 
