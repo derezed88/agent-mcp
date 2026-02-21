@@ -47,15 +47,16 @@ Switch the active model at runtime: `!model gemini25f` — persisted to disk imm
 
 #### Control What the LLM Can Touch
 
-Gates are per-tool, per-table read/write permissions. Set defaults in `gate-defaults.json` or change live in chat:
+Gates are per-tool, per-table read/write permissions. The pattern is `!<toolname>_gate_read` / `!<toolname>_gate_write`. Set defaults in `gate-defaults.json` or change live in chat:
 
 ```
-!autogate drive read true          # allow Drive reads this session
-!autoAIdb write true               # allow DB writes for all tables
-!autoAISysPrompt read true         # allow LLM to inspect its own prompt
+!google_drive_gate_read false      # auto-allow Drive reads (gate off)
+!db_query_gate_write * false       # auto-allow DB writes for all tables
+!sysprompt_gate_write false        # auto-allow system prompt updates
+!search_ddgs_gate_read false       # auto-allow DuckDuckGo searches
 ```
 
-Wildcard `"*"` key sets the default for all tables or all tools at once. Non-interactive clients (open-webui, Slack) auto-reject gated calls rather than hanging — the LLM is told why and asks for alternatives.
+`true` = gated (human must approve each call), `false` = auto-allow. Non-interactive clients (open-webui, Slack) auto-reject gated calls rather than hanging — the LLM is told why and asks for alternatives. Use `!gate_list` to see live status of every gate.
 
 #### Tune Agent Behavior via Text Files
 
@@ -78,15 +79,17 @@ Say "remember permanently: always respond in bullet points" — the LLM calls `u
 All configuration is JSON + commands. Nothing requires a restart:
 
 ```
-!model gemini25f               # switch LLM
-!autogate search read true     # allow web searches
-!maxctx 50                     # set history window
-!session                       # list active sessions with shorthand IDs
-!session 102 delete            # drop a session
-!limit_set max_agent_call_depth 2   # raise swarm recursion limit
+!model gemini25f                       # switch LLM
+!search_ddgs_gate_read false           # auto-allow DuckDuckGo searches
+!maxctx 50                             # set history window
+!session                               # list active sessions with shorthand IDs
+!session 102 delete                    # drop a session
+!limit_set max_agent_call_depth 2      # raise swarm recursion limit
 ```
 
 Rate limits, session timeouts, tool permissions, model timeouts — all configurable live via `!commands` or `plugin-manager.py` CLI.
+
+**The LLM has access to the same command surface you do.** Gate commands, model switching, session inspection, system prompt edits, and limit adjustments are all available as tools the LLM can call. This is intentional — it means you can instruct the agent in natural language ("switch to gemini", "allow drive reads from now on") and it will execute the corresponding command itself, without you typing it.
 
 ---
 
