@@ -1,0 +1,12 @@
+## tool-outbound-agent-filters: outbound_agent_filters tool definition
+
+### outbound_agent_filters() → str
+Show the current outbound agent message filter configuration.
+Returns the OUTBOUND_AGENT_ALLOWED_COMMANDS and OUTBOUND_AGENT_BLOCKED_COMMANDS lists
+that are applied to messages sent via agent_call to remote agents.
+
+When to use:
+- Before using agent_call, if you want to confirm your message will pass the outbound filters.
+- When diagnosing why an agent_call message was blocked or rejected by the filter layer.
+
+Always allowed — no gate required.

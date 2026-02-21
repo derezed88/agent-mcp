@@ -1,0 +1,17 @@
+## tool-llm-delegation: llm_call, llm_timeout, and stream tool definitions
+
+### llm_call(action: str, model_key: str = "", value: bool = None) → str
+Manage the tool_call_available flag for LLM models.
+- action="list" — show all models with their tool_call_available status. Always allowed.
+- action="set"  — enable or disable delegation for a specific model, or all models if model_key is omitted.
+
+### llm_timeout(action: str, model_key: str = "", seconds: int = None) → str
+Manage llm_call_timeout for LLM delegation.
+- action="list" — show current timeouts for all models. Always allowed.
+- action="set"  — update the timeout in seconds. Omit model_key to set all models.
+
+### stream(action: str, value: bool = None) → str
+Control agent_call streaming for the current session.
+- action="get" — show current streaming setting.
+- action="set" — enable or disable real-time token relay (value=true/false).
+Always allowed — no gate required.
