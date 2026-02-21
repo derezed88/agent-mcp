@@ -25,8 +25,8 @@
 # After completion:
 #   cd agent-mcp                                   (or --name value)
 #   source venv/bin/activate
-#   python plugin-manager.py port-list             # verify/adjust ports BEFORE starting
-#   python plugin-manager.py port-set <plugin> <port>  # if ports conflict with other instances
+#   python agentctl.py port-list             # verify/adjust ports BEFORE starting
+#   python agentctl.py port-set <plugin> <port>  # if ports conflict with other instances
 #   python agent-mcp.py      # terminal 1 - server
 #   python shell.py          # terminal 2 - client
 
@@ -258,7 +258,7 @@ fi
 
 # NOTE: plugins-enabled.json is intentionally NOT copied from the reference.
 # The repo's version has clean defaults. Port overrides are applied below via
-# plugin-manager.py port-set so each instance gets its own port assignments.
+# agentctl.py port-set so each instance gets its own port assignments.
 
 # Live system prompt sections (repo has defaults, but reference may have customizations)
 while IFS= read -r fpath; do
@@ -293,7 +293,7 @@ else:
 # ── 7. Show port configuration ───────────────────────────────────────────────
 echo ""
 echo "Configured listening ports:"
-python plugin-manager.py port-list
+python agentctl.py port-list
 
 # ── 8. Summary ───────────────────────────────────────────────────────────────
 echo "=== Setup complete ==="
@@ -304,11 +304,11 @@ echo "  cd $TARGET_DIR"
 echo "  source venv/bin/activate"
 echo ""
 echo "  If running multiple instances on the same machine, change ports first:"
-echo "  python plugin-manager.py port-set plugin_client_shellpy 8770"
-echo "  python plugin-manager.py port-set plugin_client_api     8777"
+echo "  python agentctl.py port-set plugin_client_shellpy 8770"
+echo "  python agentctl.py port-set plugin_client_api     8777"
 echo ""
 echo "  python agent-mcp.py          # terminal 1 - server"
 echo "  python shell.py              # terminal 2 - client"
 echo ""
-echo "  python plugin-manager.py     # manage plugins, models, and ports"
+echo "  python agentctl.py     # manage plugins, models, and ports"
 echo ""

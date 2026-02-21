@@ -18,7 +18,7 @@ Type `!help` to see all commands.
 
 Enable the llama proxy plugin first:
 ```bash
-python plugin-manager.py enable plugin_proxy_llama
+python agentctl.py enable plugin_proxy_llama
 ```
 
 Then start the server — it now listens on both ports:
@@ -50,9 +50,9 @@ Prefix any message with `@ModelName` to use a different model for one turn (bypa
 ## Managing plugins and models
 
 ```bash
-python plugin-manager.py           # interactive menu
-python plugin-manager.py list      # plugin status overview
-python plugin-manager.py models    # model list
+python agentctl.py           # interactive menu
+python agentctl.py list      # plugin status overview
+python agentctl.py models    # model list
 ```
 
 See [ADMINISTRATION.md](ADMINISTRATION.md) for full details.

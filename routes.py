@@ -1,5 +1,7 @@
 import asyncio
 import json
+import importlib
+import os
 from typing import AsyncGenerator
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -13,6 +15,87 @@ from prompt import (sp_list_files, sp_read_prompt, sp_read_file, sp_write_file,
                     sp_resolve_model)
 from agents import dispatch_llm
 from tools import get_all_gate_tools, get_tool_executor, get_plugin_command, get_plugin_help_sections
+
+# ---------------------------------------------------------------------------
+# History plugin chain
+# ---------------------------------------------------------------------------
+_PLUGINS_ENABLED_PATH = os.path.join(os.path.dirname(__file__), "plugins-enabled.json")
+
+def _load_history_chain() -> list:
+    """Load and return the ordered list of history plugin module objects."""
+    try:
+        with open(_PLUGINS_ENABLED_PATH) as f:
+            cfg = json.load(f)
+        chain_names = (
+            cfg.get("plugin_config", {})
+               .get("plugin_history_default", {})
+               .get("chain", ["plugin_history_default"])
+        )
+    except Exception:
+        chain_names = ["plugin_history_default"]
+
+    chain = []
+    for name in chain_names:
+        try:
+            mod = importlib.import_module(name)
+            chain.append(mod)
+        except ImportError as e:
+            log.warning(f"History chain: cannot load '{name}': {e}")
+    if not chain:
+        # Always fall back to default to prevent unguarded raw appends
+        import plugin_history_default as _phd
+        chain = [_phd]
+    return chain
+
+_history_chain: list = _load_history_chain()
+
+def _run_history_chain(history: list[dict], session: dict, model_cfg: dict) -> list[dict]:
+    """Pass history through all plugins in chain order. Returns final list."""
+    for plugin in _history_chain:
+        history = plugin.process(history, session, model_cfg)
+    return history
+
+def _notify_chain_model_switch(session: dict, old_model: str, new_model: str,
+                                old_cfg: dict, new_cfg: dict) -> list[dict]:
+    """Notify each chain plugin of a model switch; return final history."""
+    history = list(session.get("history", []))
+    for plugin in _history_chain:
+        if hasattr(plugin, "on_model_switch"):
+            history = plugin.on_model_switch(session, old_model, new_model, old_cfg, new_cfg)
+    return history
+
+def _load_system_int(key: str, default: int) -> int:
+    """Read a top-level integer from plugins-enabled.json."""
+    try:
+        with open(_PLUGINS_ENABLED_PATH) as f:
+            return int(json.load(f).get(key, default))
+    except Exception:
+        return default
+
+def _save_system_int(key: str, value: int) -> None:
+    """Persist a top-level integer to plugins-enabled.json."""
+    try:
+        with open(_PLUGINS_ENABLED_PATH) as f:
+            data = json.load(f)
+        data[key] = value
+        with open(_PLUGINS_ENABLED_PATH, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.warning(f"Could not save {key} to plugins-enabled.json: {e}")
+
+# Runtime overrides (survive until restart if not persisted)
+_runtime_max_users: int | None = None
+_runtime_session_idle_timeout: int | None = None
+
+def get_max_users() -> int:
+    if _runtime_max_users is not None:
+        return _runtime_max_users
+    return _load_system_int("max_users", 50)
+
+def get_session_idle_timeout() -> int:
+    if _runtime_session_idle_timeout is not None:
+        return _runtime_session_idle_timeout
+    return _load_system_int("session_idle_timeout_minutes", 60)
 
 # Context flag for batch command processing
 _batch_mode = {}  # client_id -> bool
@@ -81,10 +164,13 @@ async def cmd_help(client_id: str):
         "  !model_gate_write <t|f>                   - gate model set: true=gated, false=auto-allow\n"
         "  !reset_gate_write <t|f>                   - gate reset: true=gated, false=auto-allow\n"
         "\n"
-        "Session:\n"
+        "Session & History:\n"
         "  !session                                  - list all active sessions\n"
         "  !session <ID> delete                      - delete a session from server\n"
         "  !tool_preview_length [n]                  - get/set tool result display limit (0=unlimited, default=500)\n"
+        "  !maxctx [n]                               - get/set agent-wide max history messages\n"
+        "  !maxusers [n]                             - get/set max simultaneous sessions\n"
+        "  !sessiontimeout [minutes]                 - get/set session idle timeout\n"
         "\n"
         "Utilities:\n"
         "  !get_system_info                          - show date/time/status\n"
@@ -565,9 +651,20 @@ async def cmd_set_model(client_id: str, key: str, session: dict):
     key = key.strip()
     if key in LLM_REGISTRY:
         await cancel_active_task(client_id)
+        old_model = session["model"]
+        old_cfg = LLM_REGISTRY.get(old_model, {})
+        new_cfg = LLM_REGISTRY.get(key, {})
         session["model"] = key
+        # Recompute effective window and trim history immediately
+        trimmed = _notify_chain_model_switch(session, old_model, key, old_cfg, new_cfg)
+        prev_len = len(session.get("history", []))
+        session["history"] = trimmed
+        dropped = prev_len - len(trimmed)
         await push_model(client_id, key)
-        await push_tok(client_id, f"Model set to '{key}'.")
+        msg = f"Model set to '{key}'."
+        if dropped > 0:
+            msg += f" History trimmed: {dropped} message(s) removed ({len(trimmed)} kept)."
+        await push_tok(client_id, msg)
     else:
         available = ", ".join(LLM_REGISTRY.keys())
         await push_tok(client_id,
@@ -581,6 +678,10 @@ async def cmd_reset(client_id: str, session: dict):
     """Clear conversation history for current session."""
     history_len = len(session.get("history", []))
     session["history"] = []
+    # Recompute history_max_ctx in case it was not set
+    model_cfg = LLM_REGISTRY.get(session.get("model", ""), {})
+    import plugin_history_default as _phd
+    session["history_max_ctx"] = _phd.compute_effective_max_ctx(model_cfg)
     await push_tok(client_id, f"Conversation history cleared ({history_len} messages removed).")
     await conditional_push_done(client_id)
 
@@ -895,11 +996,148 @@ async def cmd_stream(client_id: str, arg: str, session: dict):
     await conditional_push_done(client_id)
 
 
+async def cmd_maxctx(client_id: str, arg: str):
+    """
+    Get or set the agent-wide maximum history window (agent_max_ctx).
+
+    !maxctx           - show current setting (effective and configured values)
+    !maxctx <n>       - set agent_max_ctx to n messages (persists to plugins-enabled.json)
+    !maxctx <n> temp  - set in-memory only (lost on restart)
+    """
+    import plugin_history_default as _phd
+    arg = arg.strip()
+    if not arg:
+        agent_val = _phd.get_agent_max_ctx()
+        await push_tok(client_id,
+            f"agent_max_ctx: {agent_val} messages\n"
+            f"  (effective per session = min(agent_max_ctx, model.max_context))\n"
+            f"  Manage via: agentctl.py history-maxctx <n>")
+        await conditional_push_done(client_id)
+        return
+    parts = arg.split()
+    try:
+        n = int(parts[0])
+    except ValueError:
+        await push_tok(client_id, f"ERROR: '{parts[0]}' is not a number.\nUsage: !maxctx <n>")
+        await conditional_push_done(client_id)
+        return
+    if n < 1:
+        await push_tok(client_id, "ERROR: agent_max_ctx must be at least 1.")
+        await conditional_push_done(client_id)
+        return
+    temp_only = len(parts) > 1 and parts[1].lower() in ("temp", "temporary")
+    _phd.set_runtime_agent_max_ctx(n)
+    if not temp_only:
+        try:
+            with open(_PLUGINS_ENABLED_PATH) as f:
+                data = json.load(f)
+            data.setdefault("plugin_config", {}).setdefault("plugin_history_default", {})["agent_max_ctx"] = n
+            with open(_PLUGINS_ENABLED_PATH, "w") as f:
+                json.dump(data, f, indent=2)
+            await push_tok(client_id, f"agent_max_ctx set to {n} (persisted).")
+        except Exception as e:
+            await push_tok(client_id, f"agent_max_ctx set to {n} in memory; WARNING: could not persist: {e}")
+    else:
+        await push_tok(client_id, f"agent_max_ctx set to {n} (runtime only, not persisted).")
+    await conditional_push_done(client_id)
+
+
+async def cmd_maxusers(client_id: str, arg: str):
+    """
+    Get or set the maximum number of simultaneous sessions (max_users).
+
+    !maxusers           - show current setting
+    !maxusers <n>       - set max_users to n (persists to plugins-enabled.json)
+    !maxusers <n> temp  - set in-memory only
+    """
+    global _runtime_max_users
+    arg = arg.strip()
+    if not arg:
+        current = get_max_users()
+        live = len(sessions)
+        await push_tok(client_id,
+            f"max_users: {current}\n"
+            f"  Active sessions: {live}/{current}\n"
+            f"  Manage via: agentctl.py max-users <n>")
+        await conditional_push_done(client_id)
+        return
+    parts = arg.split()
+    try:
+        n = int(parts[0])
+    except ValueError:
+        await push_tok(client_id, f"ERROR: '{parts[0]}' is not a number.\nUsage: !maxusers <n>")
+        await conditional_push_done(client_id)
+        return
+    if n < 1:
+        await push_tok(client_id, "ERROR: max_users must be at least 1.")
+        await conditional_push_done(client_id)
+        return
+    temp_only = len(parts) > 1 and parts[1].lower() in ("temp", "temporary")
+    _runtime_max_users = n
+    if not temp_only:
+        _save_system_int("max_users", n)
+        await push_tok(client_id, f"max_users set to {n} (persisted).")
+    else:
+        await push_tok(client_id, f"max_users set to {n} (runtime only, not persisted).")
+    await conditional_push_done(client_id)
+
+
+async def cmd_sessiontimeout(client_id: str, arg: str):
+    """
+    Get or set the session idle timeout in minutes.
+
+    !sessiontimeout           - show current setting
+    !sessiontimeout <n>       - set timeout to n minutes (persists)
+    !sessiontimeout 0         - disable idle timeout
+    """
+    global _runtime_session_idle_timeout
+    arg = arg.strip()
+    if not arg:
+        current = get_session_idle_timeout()
+        status = f"{current} minutes" if current > 0 else "disabled"
+        await push_tok(client_id,
+            f"session_idle_timeout: {status}\n"
+            f"  Manage via: agentctl.py session-timeout <minutes>")
+        await conditional_push_done(client_id)
+        return
+    try:
+        n = int(arg)
+    except ValueError:
+        await push_tok(client_id, f"ERROR: '{arg}' is not a number.\nUsage: !sessiontimeout <minutes>")
+        await conditional_push_done(client_id)
+        return
+    if n < 0:
+        await push_tok(client_id, "ERROR: timeout must be 0 (disabled) or a positive number of minutes.")
+        await conditional_push_done(client_id)
+        return
+    _runtime_session_idle_timeout = n
+    _save_system_int("session_idle_timeout_minutes", n)
+    status = f"{n} minutes" if n > 0 else "disabled"
+    await push_tok(client_id, f"session_idle_timeout set to {status} (persisted).")
+    await conditional_push_done(client_id)
+
+
 async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip: str = None):
     from state import get_or_create_shorthand_id
 
     if client_id not in sessions:
-        sessions[client_id] = {"model": raw_payload.get("default_model", DEFAULT_MODEL), "history": []}
+        # Enforce max_users limit before creating new session
+        max_u = get_max_users()
+        if max_u > 0 and len(sessions) >= max_u:
+            await push_tok(client_id,
+                f"ERROR: Session limit reached ({max_u} active sessions). "
+                f"Try again later or ask an administrator to increase !maxusers.")
+            await push_done(client_id)
+            return
+        model_key = raw_payload.get("default_model", DEFAULT_MODEL)
+        model_cfg = LLM_REGISTRY.get(model_key, {})
+        import plugin_history_default as _phd
+        effective_ctx = _phd.compute_effective_max_ctx(model_cfg)
+        sessions[client_id] = {
+            "model": model_key,
+            "history": [],
+            "history_max_ctx": effective_ctx,
+        }
         # Assign shorthand ID when session is created
         get_or_create_shorthand_id(client_id)
     # Store/update peer IP whenever we have it
@@ -981,6 +1219,12 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_limit_list(client_id)
                 elif cmd == "limit_set":
                     await cmd_limit_set(client_id, arg)
+                elif cmd == "maxctx":
+                    await cmd_maxctx(client_id, arg)
+                elif cmd == "maxusers":
+                    await cmd_maxusers(client_id, arg)
+                elif cmd == "sessiontimeout":
+                    await cmd_sessiontimeout(client_id, arg)
                 elif cmd.endswith("_gate_read") or cmd.endswith("_gate_write"):
                     # Generic per-tool gate command: !<toolname>_gate_read / !<toolname>_gate_write
                     if cmd.endswith("_gate_read"):
@@ -1103,6 +1347,15 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "limit_set":
             await cmd_limit_set(client_id, arg)
             return
+        if cmd == "maxctx":
+            await cmd_maxctx(client_id, arg)
+            return
+        if cmd == "maxusers":
+            await cmd_maxusers(client_id, arg)
+            return
+        if cmd == "sessiontimeout":
+            await cmd_sessiontimeout(client_id, arg)
+            return
         # Generic per-tool gate command: !<toolname>_gate_read / !<toolname>_gate_write
         if cmd.endswith("_gate_read") or cmd.endswith("_gate_write"):
             if cmd.endswith("_gate_read"):
@@ -1156,9 +1409,11 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             await conditional_push_done(client_id)
             return
 
-    max_ctx = LLM_REGISTRY.get(session["model"], {}).get("max_context", 50)
+    import time as _time
+    session["last_active"] = _time.time()
+    model_cfg = LLM_REGISTRY.get(session["model"], {})
     session["history"].append({"role": "user", "content": stripped})
-    session["history"] = session["history"][-max_ctx:]
+    session["history"] = _run_history_chain(session["history"], session, model_cfg)
 
     try:
         final = await dispatch_llm(session["model"], session["history"], client_id)

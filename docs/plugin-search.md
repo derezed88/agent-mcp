@@ -23,7 +23,7 @@ No API key required. Returns titles, URLs, and snippets. First choice in the PDD
 
 ```bash
 pip install ddgs
-python plugin-manager.py enable plugin_search_ddgs
+python agentctl.py enable plugin_search_ddgs
 ```
 
 ---
@@ -39,7 +39,7 @@ AI-curated results with an answer summary. Use when DuckDuckGo results are insuf
 ```bash
 pip install tavily-python
 # .env: TAVILY_API_KEY=...
-python plugin-manager.py enable plugin_search_tavily
+python agentctl.py enable plugin_search_tavily
 ```
 
 ---
@@ -55,7 +55,7 @@ Real-time web and X/Twitter search via xAI Grok. Use for current events and soci
 ```bash
 pip install xai-sdk
 # .env: XAI_API_KEY=...
-python plugin-manager.py enable plugin_search_xai
+python agentctl.py enable plugin_search_xai
 ```
 
 ---
@@ -69,7 +69,7 @@ Google Search via Gemini grounding. Use when Gemini-grounded results are specifi
 ```bash
 pip install httpx
 # .env: GEMINI_API_KEY=...
-python plugin-manager.py enable plugin_search_google
+python agentctl.py enable plugin_search_google
 ```
 
 ---
@@ -85,7 +85,7 @@ Extracts full page content from a URL in markdown format. Optionally filter to c
 ```bash
 pip install tavily-python
 # .env: TAVILY_API_KEY=...
-python plugin-manager.py enable plugin_urlextract_tavily
+python agentctl.py enable plugin_urlextract_tavily
 ```
 
 Gate type: `extract` (separate from search):

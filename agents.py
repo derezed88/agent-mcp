@@ -892,9 +892,9 @@ async def at_llm(model: str, prompt: str) -> str:
     # Append the new prompt as a user turn (not stored in session history)
     history.append({"role": "user", "content": prompt})
 
-    # Truncate to model's max_context
-    max_ctx = cfg.get("max_context", 50)
-    history = history[-max_ctx:]
+    # Run history chain for dispatch (does not modify session["history"])
+    from routes import _run_history_chain
+    history = _run_history_chain(history, session, cfg)
 
     await push_tok(client_id, f"\n[@{model} ▶] {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n")
 

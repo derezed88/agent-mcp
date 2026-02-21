@@ -135,8 +135,8 @@ async def run_agent(host: str = "0.0.0.0"):
         log.error("")
         log.error("Fix options:")
         log.error("  1. Stop the process already using the port")
-        log.error("  2. Change the port:  python plugin-manager.py port-set <plugin> <new_port>")
-        log.error("  3. List configured ports:  python plugin-manager.py port-list")
+        log.error("  2. Change the port:  python agentctl.py port-set <plugin> <new_port>")
+        log.error("  3. List configured ports:  python agentctl.py port-list")
         log.error("=" * 70)
         sys.exit(1)
 
@@ -172,8 +172,32 @@ async def run_agent(host: str = "0.0.0.0"):
     log.info("="*70)
     log.info("")
 
-    # Run all servers concurrently
-    await asyncio.gather(*servers_to_run)
+    # Session idle-timeout reaper: periodically evict sessions that have been
+    # inactive longer than session_idle_timeout_minutes.  A timeout of 0 disables.
+    async def _session_reaper():
+        import time
+        from state import sessions, remove_shorthand_mapping
+        while True:
+            await asyncio.sleep(60)  # check every minute
+            try:
+                from routes import get_session_idle_timeout
+                timeout_minutes = get_session_idle_timeout()
+                if timeout_minutes <= 0:
+                    continue
+                cutoff = time.time() - timeout_minutes * 60
+                stale = [
+                    cid for cid, data in list(sessions.items())
+                    if data.get("last_active", 0) < cutoff
+                ]
+                for cid in stale:
+                    sessions.pop(cid, None)
+                    remove_shorthand_mapping(cid)
+                    log.info(f"Session reaped (idle timeout): {cid}")
+            except Exception as e:
+                log.warning(f"Session reaper error: {e}")
+
+    # Run all servers and reaper concurrently
+    await asyncio.gather(*servers_to_run, _session_reaper())
 
 
 def main():
@@ -184,8 +208,8 @@ def main():
         epilog="""
 Examples:
   python agent-mcp.py                 # Start with plugins from plugins-enabled.json
-  python plugin-manager.py list       # List available plugins
-  python plugin-manager.py enable plugin_llama_proxy  # Enable llama proxy
+  python agentctl.py list       # List available plugins
+  python agentctl.py enable plugin_llama_proxy  # Enable llama proxy
 
 Configuration Files:
   plugins-enabled.json    - Which plugins to enable

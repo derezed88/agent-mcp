@@ -50,22 +50,22 @@ python agent-mcp.py --help
 
 ---
 
-## Plugin Management (`plugin-manager.py`)
+## System Administration (`agentctl.py`)
 
-All plugin and model configuration is done through `plugin-manager.py`. Run interactively or with CLI arguments.
+All plugin and model configuration is done through `agentctl.py`. Run interactively or with CLI arguments.
 
 ```bash
-python plugin-manager.py           # interactive menu
-python plugin-manager.py <cmd>     # direct CLI
+python agentctl.py           # interactive menu
+python agentctl.py <cmd>     # direct CLI
 ```
 
 ### Plugin Commands
 
 ```bash
-python plugin-manager.py list                    # list all plugins with status
-python plugin-manager.py info <plugin_name>      # detailed info + setup instructions
-python plugin-manager.py enable <plugin_name>    # enable a plugin
-python plugin-manager.py disable <plugin_name>   # disable a plugin
+python agentctl.py list                    # list all plugins with status
+python agentctl.py info <plugin_name>      # detailed info + setup instructions
+python agentctl.py enable <plugin_name>    # enable a plugin
+python agentctl.py disable <plugin_name>   # disable a plugin
 ```
 
 **Plugin status indicators:**
@@ -128,16 +128,16 @@ The JSON value takes precedence over `.env` if both are set.
 ### Model Commands
 
 ```bash
-python plugin-manager.py models                              # list all models
-python plugin-manager.py model-info <model_name>            # detailed model info
-python plugin-manager.py model-add                          # interactive wizard
-python plugin-manager.py model-remove <model_name>          # remove a model
-python plugin-manager.py model-enable <model_name>          # enable a model
-python plugin-manager.py model-disable <model_name>         # disable a model
-python plugin-manager.py model <model_name>                 # set as default model
-python plugin-manager.py model-llmcall <model_name> <t|f>  # set tool_call_available
-python plugin-manager.py model-llmcall-all <t|f>           # set for all models
-python plugin-manager.py model-timeout <model_name> <secs> # set llm_call_timeout
+python agentctl.py models                              # list all models
+python agentctl.py model-info <model_name>            # detailed model info
+python agentctl.py model-add                          # interactive wizard
+python agentctl.py model-remove <model_name>          # remove a model
+python agentctl.py model-enable <model_name>          # enable a model
+python agentctl.py model-disable <model_name>         # disable a model
+python agentctl.py model <model_name>                 # set as default model
+python agentctl.py model-llmcall <model_name> <t|f>  # set tool_call_available
+python agentctl.py model-llmcall-all <t|f>           # set for all models
+python agentctl.py model-timeout <model_name> <secs> # set llm_call_timeout
 ```
 
 **Safety rules:** The default model cannot be disabled or removed. Change the default first with `model <name>`.
@@ -145,9 +145,9 @@ python plugin-manager.py model-timeout <model_name> <secs> # set llm_call_timeou
 ### Rate Limit Commands
 
 ```bash
-python plugin-manager.py ratelimit-list                     # show current limits
-python plugin-manager.py ratelimit-set <type> <n> <secs>   # set limit
-python plugin-manager.py ratelimit-autodisable <type> <t|f> # set auto-disable
+python agentctl.py ratelimit-list                     # show current limits
+python agentctl.py ratelimit-set <type> <n> <secs>   # set limit
+python agentctl.py ratelimit-autodisable <type> <t|f> # set auto-disable
 ```
 
 Tool types: `llm_call`, `search`, `extract`, `drive`, `db`, `system`, `tmux`
@@ -574,14 +574,14 @@ If a runaway delegation chain occurs, switch models in shell.py:
 This calls `cancel_active_task()` which propagates `CancelledError` through all nested `at_llm`
 and `agent_call` awaits in the current coroutine chain, terminating the entire tree.
 
-#### Managing Limits via `plugin-manager.py`
+#### Managing Limits via `agentctl.py`
 
 View and update limits from the command line (requires agent restart to take effect):
 
 ```bash
-python plugin-manager.py limit-list                         # show current values
-python plugin-manager.py limit-set max_at_llm_depth 1       # set at_llm depth
-python plugin-manager.py limit-set max_agent_call_depth 1   # set agent_call depth
+python agentctl.py limit-list                         # show current values
+python agentctl.py limit-set max_at_llm_depth 1       # set at_llm depth
+python agentctl.py limit-set max_agent_call_depth 1   # set agent_call depth
 ```
 
 Limits are stored in the `"limits"` section of `llm-models.json`:
@@ -608,11 +608,11 @@ These commands are also available as gated LLM tool calls:
 - `limit_list()` — read gate (controlled by `!limit_list_gate_read`, default: gated)
 - `limit_set(key, value)` — write gate (controlled by `!limit_set_gate_write`, default: gated)
 
-Set gate defaults for startup via `plugin-manager.py gate-set`:
+Set gate defaults for startup via `agentctl.py gate-set`:
 
 ```bash
-python plugin-manager.py gate-set limit_list read true     # auto-allow reads
-python plugin-manager.py gate-set limit_set write false    # keep writes gated
+python agentctl.py gate-set limit_list read true     # auto-allow reads
+python agentctl.py gate-set limit_set write false    # keep writes gated
 ```
 
 ### System Prompt
@@ -730,9 +730,9 @@ to `llm-models.json` for any models served via that tunnel.
 | File | Purpose | Edited by |
 |---|---|---|
 | `.env` | API keys and credentials | Admin manually |
-| `plugins-enabled.json` | Which plugins are active + per-plugin config + rate limits | `plugin-manager.py` or direct edit |
+| `plugins-enabled.json` | Which plugins are active + per-plugin config + rate limits | `agentctl.py` or direct edit |
 | `plugin-manifest.json` | Plugin registry — metadata, deps, env vars (read-only) | Plugin authors only |
-| `llm-models.json` | Model registry (enabled, model_id, type, etc.) | `plugin-manager.py` |
+| `llm-models.json` | Model registry (enabled, model_id, type, etc.) | `agentctl.py` |
 | `.system_prompt` | Root system prompt file | Admin manually or LLM via tool |
 | `.system_prompt_*` | Individual section files | Admin manually or LLM via tool |
 | `.aiops_session_id` | shell.py session persistence | shell.py automatically |
@@ -746,7 +746,7 @@ These two files have distinct, non-overlapping roles:
 Declares that a plugin *exists* and what it needs to run: its Python file, type,
 pip dependencies, required `.env` variables, and load priority.  This file is
 maintained by plugin authors and committed to the repo.  The agent and
-`plugin-manager.py` read it purely for validation — to check whether a plugin's
+`agentctl.py` read it purely for validation — to check whether a plugin's
 dependencies and credentials are present before attempting to load it.  You never
 edit this file to enable or disable plugins.
 
@@ -756,25 +756,25 @@ Determines what actually runs.  It has three jobs:
 
 1. **`enabled_plugins` list** — the ordered list of plugin names the agent will
    attempt to load at startup.  Add a plugin here to activate it; remove it to
-   deactivate it entirely.  Managed by `plugin-manager.py enable/disable` or by
+   deactivate it entirely.  Managed by `agentctl.py enable/disable` or by
    direct edit.
 
 2. **`plugin_config` blocks** — per-plugin runtime settings such as port, host,
    and the `enabled` flag.  The `enabled: false` pattern lets you keep a plugin
    in `enabled_plugins` (preserving its config) without starting it.  This is how
    `plugin_proxy_llama` and `plugin_client_slack` ship: configured but off until
-   you flip `"enabled": true` or run `plugin-manager.py enable <plugin>`.
+   you flip `"enabled": true` or run `agentctl.py enable <plugin>`.
 
 3. **`rate_limits`** and **`default_model`** — server-wide settings also stored here.
 
-**Practical rule:** to enable or disable a plugin, always use `plugin-manager.py`
+**Practical rule:** to enable or disable a plugin, always use `agentctl.py`
 or edit `plugins-enabled.json`.  Never add enable/disable logic to `plugin-manifest.json`.
 
 **Fresh installs:** `setup-agent-mcp.sh` clones the repo and copies credentials
 (`.env`, `credentials.json`, `llm-models.json`) from a reference installation.
 It intentionally does *not* copy `plugins-enabled.json` — the repo's version is
 the authoritative default for new installs, and port assignments are adjusted
-per-instance afterward with `plugin-manager.py port-set`.
+per-instance afterward with `agentctl.py port-set`.
 
 ---
 
