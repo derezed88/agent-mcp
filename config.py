@@ -175,7 +175,7 @@ FALLBACK_LLM_REGISTRY = {
         "tool_call_available": False,
         "llm_call_timeout": 60,
     },
-    "gemini25": {
+    "gemini25fl": {
         "model_id": "gemini-2.5-flash",
         "type": "GEMINI",
         "host": None,
