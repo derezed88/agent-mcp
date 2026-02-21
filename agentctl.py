@@ -1163,18 +1163,18 @@ class PluginManager:
             print(f"  {tool:<22} {' '.join(parts)}")
 
         print()
-        print(f"  Set:   {Colors.BOLD}gate-set db <table|*> <read|write> <true|false>{Colors.RESET}  (true=auto-allow/gate-OFF, false=gated/gate-ON)")
-        print(f"         {Colors.BOLD}gate-set <tool> <read|write> <true|false>{Colors.RESET}")
+        print(f"  Set:   {Colors.BOLD}llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}  (true=auto-allow/gate-OFF, false=gated/gate-ON)")
+        print(f"         {Colors.BOLD}llm-allow <tool> <read|write> <true|false>{Colors.RESET}")
         print(f"  Reset: {Colors.BOLD}gate-reset{Colors.RESET}  (sets all to gated/gate-ON)")
         print(f"\n  {Colors.CYAN}Changes take effect after restarting agent-mcp.py{Colors.RESET}")
         print()
 
-    def gate_set(self, args: list[str]) -> bool:
+    def llm_allow(self, args: list[str]) -> bool:
         """
-        Set a gate default.
+        Set a gate default (true=auto-allow/gate-OFF, false=gated/gate-ON).
         Usage:
-          gate-set db <table|*> <read|write> <true|false>
-          gate-set <tool> <read|write> <true|false>
+          llm-allow db <table|*> <read|write> <true|false>
+          llm-allow <tool> <read|write> <true|false>
         """
         BOOL_TRUE = {"true", "1", "yes", "on"}
         BOOL_FALSE = {"false", "0", "no", "off"}
@@ -1188,16 +1188,16 @@ class PluginManager:
             return None
 
         if not args:
-            print(f"{Colors.RED}Usage: gate-set db <table|*> <read|write> <true|false>{Colors.RESET}")
-            print(f"       gate-set <tool> <read|write> <true|false>")
+            print(f"{Colors.RED}Usage: llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}")
+            print(f"       llm-allow <tool> <read|write> <true|false>")
             return False
 
         data = self._load_gate_defaults()
 
         if args[0].lower() == "db":
-            # gate-set db <table> <read|write> <true|false>
+            # llm-allow db <table> <read|write> <true|false>
             if len(args) != 4:
-                print(f"{Colors.RED}Usage: gate-set db <table|*> <read|write> <true|false>{Colors.RESET}")
+                print(f"{Colors.RED}Usage: llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}")
                 return False
             table, perm, flag_str = args[1], args[2].lower(), args[3]
             if perm not in ("read", "write"):
@@ -1223,9 +1223,9 @@ class PluginManager:
             return False
 
         else:
-            # gate-set <tool> <read|write> <true|false>
+            # llm-allow <tool> <read|write> <true|false>
             if len(args) != 3:
-                print(f"{Colors.RED}Usage: gate-set <tool> <read|write> <true|false>{Colors.RESET}")
+                print(f"{Colors.RED}Usage: llm-allow <tool> <read|write> <true|false>{Colors.RESET}")
                 print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
                 return False
             tool, perm, flag_str = args[0].lower(), args[1].lower(), args[2]
@@ -1369,8 +1369,8 @@ class PluginManager:
         print(f"  Valid keys: {', '.join(sorted(PluginManager._LIMIT_KEYS.keys()))}")
         print(f"\n{Colors.BOLD}Gate Default Commands:{Colors.RESET}")
         print("  gate-list                                         - Show all gate defaults")
-        print("  gate-set db <table|*> <read|write> <true|false>  - Set DB gate default")
-        print("  gate-set <tool> <read|write> <true|false>         - Set tool gate default")
+        print("  llm-allow db <table|*> <read|write> <true|false>  - Set DB gate default (true=auto-allow)")
+        print("  llm-allow <tool> <read|write> <true|false>         - Set tool gate default (true=auto-allow)")
         print("  gate-reset                                        - Reset all gates to gated (false)")
         print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
         print(f"\n{Colors.BOLD}History Management Commands:{Colors.RESET}")
@@ -1617,8 +1617,8 @@ class PluginManager:
                         print(f"{Colors.RED}Must be an integer (minutes){Colors.RESET}")
             elif action == "gate-list":
                 self.gate_list()
-            elif action == "gate-set":
-                self.gate_set(arg.split())
+            elif action == "llm-allow":
+                self.llm_allow(arg.split())
             elif action == "gate-reset":
                 self.gate_reset()
             else:
@@ -1935,10 +1935,10 @@ def main():
         # Gate commands
         elif cmd == "gate-list":
             manager.gate_list()
-        elif cmd == "gate-set":
-            # gate-set db <table> <read|write> <true|false>
-            # gate-set <tool> <read|write> <true|false>
-            if not manager.gate_set(sys.argv[2:]):
+        elif cmd == "llm-allow":
+            # llm-allow db <table> <read|write> <true|false>
+            # llm-allow <tool> <read|write> <true|false>
+            if not manager.llm_allow(sys.argv[2:]):
                 return 1
         elif cmd == "gate-reset":
             manager.gate_reset()

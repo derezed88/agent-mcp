@@ -129,8 +129,8 @@ python agentctl.py model-timeout gemini25f 120   # set LLM delegation timeout (s
 **Gate defaults** (persisted to `gate-defaults.json`, loaded at every startup):
 ```bash
 python agentctl.py gate-list                          # show all gate defaults
-python agentctl.py gate-set google_drive read false   # auto-allow Drive reads by default
-python agentctl.py gate-set db * write false          # auto-allow all DB writes by default
+python agentctl.py llm-allow google_drive read false   # auto-allow Drive reads by default
+python agentctl.py llm-allow db * write false          # auto-allow all DB writes by default
 python agentctl.py gate-reset                         # restore factory defaults
 ```
 
@@ -361,7 +361,7 @@ Every tool call passes through `check_human_gate()` before execution. Gates are 
 | `sysprompt_write` | `!sysprompt_gate_write true/false` | System prompt writes |
 | `session` / `model` / `reset` | `!session_gate_read/write true/false` etc. | Per operation |
 
-Gate defaults persist across restarts via `gate-defaults.json` (managed with `plugin-manager.py gate-set`).
+Gate defaults persist across restarts via `gate-defaults.json` (managed with `agentctl.py llm-allow`).
 
 Non-interactive clients (llama proxy, Slack) auto-reject gated calls immediately with an instructive message to the LLM. API clients get a 2-second window for programmatic approval.
 
@@ -548,5 +548,5 @@ python plugin-manager.py disable <plugin_name>
 | `.env` | API keys and credentials (never commit) |
 | `llm-models.json` | Model registry — `type`, `host`, `env_key`, `enabled`, `tool_call_available`, `system_prompt_folder` |
 | `plugins-enabled.json` | Active plugins, rate limits, per-plugin config |
-| `gate-defaults.json` | Gate auto-allow defaults loaded at startup (managed via `plugin-manager.py gate-set`) |
+| `gate-defaults.json` | Gate auto-allow defaults loaded at startup (managed via `agentctl.py llm-allow`) |
 | `system_prompt/<folder>/` | Modular system prompt sections; `000_default/` ships with the repo |

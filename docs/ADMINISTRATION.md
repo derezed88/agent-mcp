@@ -608,11 +608,11 @@ These commands are also available as gated LLM tool calls:
 - `limit_list()` — read gate (controlled by `!limit_list_gate_read`, default: gated)
 - `limit_set(key, value)` — write gate (controlled by `!limit_set_gate_write`, default: gated)
 
-Set gate defaults for startup via `agentctl.py gate-set`:
+Set gate defaults for startup via `agentctl.py llm-allow`:
 
 ```bash
-python agentctl.py gate-set limit_list read true     # auto-allow reads
-python agentctl.py gate-set limit_set write false    # keep writes gated
+python agentctl.py llm-allow limit_list read true     # auto-allow reads
+python agentctl.py llm-allow limit_set write false    # keep writes gated
 ```
 
 ### System Prompt
