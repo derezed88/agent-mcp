@@ -52,11 +52,11 @@ async def test_session_shorthand():
     # Create test sessions
     print("Step 1: Creating test sessions...")
     sessions["slack-CTEST123456-1234567890.123456"] = {
-        "model": "gemini25",
+        "model": "test-model",
         "history": [{"role": "user", "content": f"msg {i}"} for i in range(18)]
     }
     sessions["llama-192.168.1.100"] = {
-        "model": "gemini25",
+        "model": "test-model",
         "history": [{"role": "user", "content": "msg 1"}, {"role": "assistant", "content": "msg 2"}]
     }
 

@@ -78,14 +78,14 @@ def _match_outbound_pattern(msg_lower: str, pattern: str) -> bool:
 
     Special commands have multiple forms:
       !reset                       (no args)
-      !model / !model gemini25     (optional args after space)
+      !model / !model <name>        (optional args after space)
       !tmux new foo / !tmux ls     (subcommand + optional args)
 
     Rules:
     - If pattern ends with a space: raw prefix match (caller controls boundary).
     - Otherwise: match if msg == pattern OR msg starts with pattern + " ".
       This prevents "!mod" from matching "!model" while still matching
-      "!model", "!model gemini25", and "!model list".
+      "!model", "!model <name>", and "!model list".
     - Non-! patterns (plain text prefixes) use the same boundary logic.
     """
     if pattern.endswith(" "):
@@ -99,7 +99,7 @@ def _check_outbound_agent_message(message: str) -> str | None:
     Returns None if permitted, or an error string if blocked.
 
     Patterns are lowercased at load time. Matching is word-boundary aware:
-    pattern '!model' matches '!model' and '!model gemini25' but NOT '!modelx'.
+    pattern '!model' matches '!model' and '!model <name>' but NOT '!modelx'.
     To match any prefix including mid-word, end the pattern with a space.
     """
     msg_lower = message.strip().lower()
@@ -552,7 +552,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 # Flush immediately after each streaming agent_call so Slack posts
                 # per-turn progress as it arrives rather than batching all turns.
                 # Without this, when the LLM issues N agent_calls in one batch
-                # (grok4 batches all turns), a single push_done at the end causes
+                # (some models batch all turns), a single push_done at the end causes
                 # the Slack consumer to post the entire N-turn conversation as one
                 # block — the batch behaviour observed in Test 6 (5-turn).
                 if is_streaming_agent_call:

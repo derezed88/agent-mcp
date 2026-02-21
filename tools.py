@@ -354,7 +354,7 @@ class _GetSystemInfoArgs(BaseModel):
 
 
 class _LlmCleanTextArgs(BaseModel):
-    model: str = Field(description="Model key name (e.g., 'nuc11Local', 'gemini25'). Use llm_list() to see valid names.")
+    model: str = Field(description="Model key name. Use llm_list() to see valid names.")
     prompt: str = Field(description="The complete self-contained prompt. Embed all data the target model needs here.")
 
 
@@ -370,7 +370,7 @@ class _LlmCleanToolArgs(BaseModel):
 
 class _SyspromptListArgs(BaseModel):
     model: str = Field(
-        description="Model key name (e.g., 'gemini25', 'grok4') or 'self' for the current model."
+        description="Model key name (use llm_list() to see valid names) or 'self' for the current model."
     )
 
 
@@ -517,7 +517,7 @@ class _ToolPreviewLengthArgs(BaseModel):
 
 class _AtLlmArgs(BaseModel):
     model: str = Field(
-        description="Model key name (e.g., 'gemini25', 'grok4'). Use llm_list() to see valid names."
+        description="Model key name. Use llm_list() to see valid names."
     )
     prompt: str = Field(
         description="The prompt to send. The model receives the full chat history plus this prompt as a new user turn."
@@ -845,7 +845,18 @@ async def _tool_preview_length_exec(action: str, length: int = None) -> str:
 async def _gate_list_exec() -> str:
     from state import auto_aidb_state, tool_gate_state
     from tools import get_all_gate_tools
-    lines = ["Gate status (true=auto-allow/gate OFF, false=gated/requires approval):"]
+
+    def perm_str(is_auto: bool, perm: str) -> str:
+        """Format one permission: gate=ON/OFF then effect."""
+        if is_auto:
+            return f"gate=OFF ({perm}=auto-allow)"
+        else:
+            return f"gate=ON  ({perm}=gated)"
+
+    lines = [
+        "Gate status  (gate=ON → requires approval; gate=OFF → auto-allow)",
+        "  Runtime toggle: !<tool>_gate_read/write true=gate-ON  false=gate-OFF",
+    ]
 
     # DB gates
     lines.append("\ndb_query (per-table):")
@@ -855,14 +866,14 @@ async def _gate_list_exec() -> str:
         for table in sorted(auto_aidb_state.keys()):
             perms = auto_aidb_state[table]
             label = "(default *)" if table == "*" else ("(metadata)" if table == "__meta__" else table)
-            r = "auto-allow" if perms.get("read", False) else "gated"
-            w = "auto-allow" if perms.get("write", False) else "gated"
-            lines.append(f"  {label:<20} read={r}  write={w}")
+            r = perms.get("read", False)
+            w = perms.get("write", False)
+            lines.append(f"  {label:<20} read: {perm_str(r, 'read')}  write: {perm_str(w, 'write')}")
 
     # Tool gates — iterate all gate-able tools from registry
     lines.append("\nTool gates:")
     gate_tools = get_all_gate_tools()
-    # Also include core gated tools not in plugin registry
+    # Core gated tools not in plugin registry
     _CORE_GATED = {
         "at_llm":          ["write"],
         "sysprompt_write": ["write"],
@@ -877,6 +888,8 @@ async def _gate_list_exec() -> str:
     for name, meta in gate_tools.items():
         ops = meta.get("operations", ["read"])
         all_tools[name] = ops
+    # db_query is handled separately via auto_aidb_state (per-table), never in Tool gates
+    all_tools.pop("db_query", None)
     for tool in sorted(all_tools.keys()):
         ops = all_tools[tool]
         perms = tool_gate_state.get(tool, {})
@@ -884,8 +897,8 @@ async def _gate_list_exec() -> str:
         parts = []
         for op in ops:
             val = perms.get(op, default_perms.get(op, False))
-            parts.append(f"{op}={'auto-allow' if val else 'gated'}")
-        lines.append(f"  {tool:<25} {' '.join(parts)}")
+            parts.append(f"{op}: {perm_str(val, op)}")
+        lines.append(f"  {tool:<22} {' '.join(parts)}")
 
     return "\n".join(lines)
 

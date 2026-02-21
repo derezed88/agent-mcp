@@ -30,10 +30,10 @@ def load_default_model():
     try:
         with open(LLM_MODELS_FILE, 'r') as f:
             data = json.load(f)
-        return data.get('default_model', 'gemini25')
+        return data.get('default_model', '')
     except (FileNotFoundError, Exception) as e:
         log.warning(f"Could not load default_model from llm-models.json: {e}")
-        return 'gemini25'
+        return ''
 
 
 def save_default_model(model_key: str) -> bool:
