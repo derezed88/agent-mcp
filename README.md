@@ -432,19 +432,33 @@ Agent B ────HTTP──►    │   ChatOpenAI              │──► 
 
 ## Plugins
 
-| Plugin | Type | What it adds |
+**Client interfaces** — how users and other agents connect:
+
+| Plugin | Port | What it adds |
 |---|---|---|
-| `plugin_client_shellpy` | client_interface | shell.py terminal client (SSE, port 8765) |
-| `plugin_proxy_llama` | client_interface | OpenAI/Ollama API (configurable port, default 11434) |
-| `plugin_client_slack` | client_interface | Slack bidirectional interface |
-| `plugin_client_api` | client_interface | JSON/SSE HTTP API for programmatic access and swarm (port 8767) |
-| `plugin_database_mysql` | data_tool | `db_query` — SQL against MySQL |
-| `plugin_storage_googledrive` | data_tool | `google_drive` — CRUD within authorised folder |
-| `plugin_search_ddgs` | data_tool | `search_ddgs` — DuckDuckGo (no API key) |
-| `plugin_search_tavily` | data_tool | `search_tavily` — AI-curated results |
-| `plugin_search_xai` | data_tool | `search_xai` — Grok x_search (web + X/Twitter) |
-| `plugin_search_google` | data_tool | `search_google` — Gemini grounding |
-| `plugin_urlextract_tavily` | data_tool | `url_extract` — web page content extraction |
+| `plugin_client_shellpy` | 8765 | Interactive terminal (`shell.py`) with streaming and gate approval UI |
+| `plugin_proxy_llama` | 11434 | OpenAI/Ollama-compatible proxy for open-webui, LM Studio, Enchanted, etc. |
+| `plugin_client_slack` | — | Slack bidirectional bot via Socket Mode; per-thread sessions |
+| `plugin_client_api` | 8767 | JSON/SSE HTTP API for programmatic access and agent-to-agent (swarm) calls |
+
+**Data tools** — what the LLM can read and write:
+
+| Plugin | Tool(s) | What it adds |
+|---|---|---|
+| `plugin_database_mysql` | `db_query` | SQL against MySQL; per-table read/write gates |
+| `plugin_storage_googledrive` | `google_drive` | List, read, write, search files within an authorised Drive folder |
+| `plugin_search_ddgs` | `search_ddgs` | DuckDuckGo web search — no API key required |
+| `plugin_search_tavily` | `search_tavily` | Tavily AI-curated search results |
+| `plugin_search_xai` | `search_xai` | xAI Grok search (web + X/Twitter) |
+| `plugin_search_google` | `search_google` | Google search via Gemini grounding |
+| `plugin_urlextract_tavily` | `url_extract` | Extract full text content from any URL via Tavily |
+| `plugin_tmux` | `tmux_new`, `tmux_exec`, `tmux_ls`, `tmux_kill_session`, `tmux_kill_server`, `tmux_history`, `tmux_history_limit` | Persistent PTY shell sessions — LLM can run shell commands and read output; whitelist/blacklist configurable |
+
+**History** — how conversation context is managed:
+
+| Plugin | What it adds |
+|---|---|
+| `plugin_history_default` | Sliding-window history trimming: keeps last N messages where N = min(agent_max_ctx, model.max_context). Always first in the chain. Additional `plugin_history_*.py` plugins can be appended to the chain for compression, vector retrieval, or custom strategies. |
 
 Manage plugins:
 
