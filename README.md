@@ -102,6 +102,62 @@ Rate limits, session timeouts, tool permissions, model timeouts — all configur
 
 **The LLM has access to the same command surface you do.** Gate commands, model switching, session inspection, system prompt edits, and limit adjustments are all available as tools the LLM can call. You can instruct the agent in natural language ("switch to gemini", "allow drive reads from now on") and it executes the corresponding command itself, without you typing it.
 
+#### agentctl.py — Offline System Configuration
+
+`agentctl.py` is the operator's configuration tool, run while the server is stopped (or to set persistent defaults before first start). It edits `plugins-enabled.json`, `llm-models.json`, and `gate-defaults.json` directly. It also has an interactive menu mode (`python agentctl.py` with no arguments).
+
+**Plugins:**
+```bash
+python agentctl.py list                          # show all plugins and enabled status
+python agentctl.py enable plugin_tmux            # enable a plugin
+python agentctl.py disable plugin_client_slack   # disable a plugin
+python agentctl.py info plugin_database_mysql    # show deps, env vars, tools
+```
+
+**Models:**
+```bash
+python agentctl.py models                        # list all models
+python agentctl.py model gemini25f               # set default model
+python agentctl.py model-add                     # interactive: add a new model
+python agentctl.py model-enable gpt4om           # enable a disabled model
+python agentctl.py model-disable gpt4om          # disable without removing
+python agentctl.py model-context gemini25f 200   # set context window
+python agentctl.py model-llmcall gemini25f true  # allow model to call other LLMs
+python agentctl.py model-timeout gemini25f 120   # set LLM delegation timeout (s)
+```
+
+**Gate defaults** (persisted to `gate-defaults.json`, loaded at every startup):
+```bash
+python agentctl.py gate-list                          # show all gate defaults
+python agentctl.py gate-set google_drive read false   # auto-allow Drive reads by default
+python agentctl.py gate-set db * write false          # auto-allow all DB writes by default
+python agentctl.py gate-reset                         # restore factory defaults
+```
+
+**Rate limits:**
+```bash
+python agentctl.py ratelimit-list                     # show current limits
+python agentctl.py ratelimit-set search 10 30         # 10 calls per 30s for search tools
+python agentctl.py ratelimit-autodisable llm_call true  # auto-disable on breach
+```
+
+**Ports, limits, session defaults:**
+```bash
+python agentctl.py port-list                          # show configured ports
+python agentctl.py port-set llama_port 11435          # change llama proxy port
+python agentctl.py limit-set max_agent_call_depth 2   # raise swarm recursion limit
+python agentctl.py history-maxctx 100                 # set global history window
+python agentctl.py max-users 20                       # max simultaneous sessions
+python agentctl.py session-timeout 120                # idle session timeout (minutes)
+```
+
+**History chain** (for custom history backends):
+```bash
+python agentctl.py history-list                          # show chain and plugins
+python agentctl.py history-chain-add plugin_history_vec  # append custom plugin
+python agentctl.py history-chain-remove plugin_history_vec
+```
+
 ---
 
 ### Audience 2: Code-Level Developers
