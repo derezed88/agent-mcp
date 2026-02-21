@@ -176,29 +176,52 @@ def _decode_pty(raw: bytes) -> str:
 async def _read_output(master_fd: int,
                        timeout: float = _READ_TIMEOUT_DEFAULT,
                        drain_pause: float = _DRAIN_PAUSE) -> str:
+    """
+    Read PTY output using loop.add_reader (event-driven, no thread pool).
+
+    Waits up to `timeout` seconds for the first byte, then resets the deadline
+    to `drain_pause` seconds after each chunk to catch burst output.
+    Returns when `drain_pause` seconds of silence follows the last chunk,
+    or when the absolute deadline is exceeded.
+    """
     loop = asyncio.get_event_loop()
     buf = b""
-    got_data = False
-    deadline = loop.time() + timeout
+    readable = asyncio.Event()
 
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            break
-        wait = drain_pause if got_data else remaining
-        try:
-            chunk = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: os.read(master_fd, _CHUNK)),
-                timeout=wait,
-            )
-        except asyncio.TimeoutError:
-            break
-        except OSError:
-            break
-        if chunk:
-            buf += chunk
-            got_data = True
-            deadline = loop.time() + drain_pause
+    def _on_readable():
+        readable.set()
+
+    loop.add_reader(master_fd, _on_readable)
+    try:
+        got_data = False
+        deadline = loop.time() + timeout
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            wait = drain_pause if got_data else remaining
+            readable.clear()
+            try:
+                await asyncio.wait_for(readable.wait(), timeout=wait)
+            except asyncio.TimeoutError:
+                break
+
+            # Drain all available bytes without blocking
+            while True:
+                try:
+                    chunk = os.read(master_fd, _CHUNK)
+                except (BlockingIOError, InterruptedError):
+                    break
+                except OSError:
+                    return _decode_pty(buf)
+                if not chunk:
+                    break
+                buf += chunk
+                got_data = True
+                deadline = loop.time() + drain_pause
+    finally:
+        loop.remove_reader(master_fd)
 
     return _decode_pty(buf)
 
