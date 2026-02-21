@@ -26,23 +26,23 @@ log = logging.getLogger("AISvc")
 
 
 def load_default_model():
-    """Load default model from llm-models.json."""
+    """Load default model from plugins-enabled.json."""
     try:
-        with open(LLM_MODELS_FILE, 'r') as f:
+        with open(PLUGINS_ENABLED_FILE, 'r') as f:
             data = json.load(f)
         return data.get('default_model', '')
     except (FileNotFoundError, Exception) as e:
-        log.warning(f"Could not load default_model from llm-models.json: {e}")
+        log.warning(f"Could not load default_model from plugins-enabled.json: {e}")
         return ''
 
 
 def save_default_model(model_key: str) -> bool:
-    """Persist default_model to llm-models.json. Returns True on success."""
+    """Persist default_model to plugins-enabled.json. Returns True on success."""
     try:
-        with open(LLM_MODELS_FILE, 'r') as f:
+        with open(PLUGINS_ENABLED_FILE, 'r') as f:
             data = json.load(f)
         data['default_model'] = model_key
-        with open(LLM_MODELS_FILE, 'w') as f:
+        with open(PLUGINS_ENABLED_FILE, 'w') as f:
             json.dump(data, f, indent=2)
         return True
     except Exception as e:
@@ -85,11 +85,11 @@ def load_llm_registry():
 
         return registry
     except FileNotFoundError:
-        log.warning(f"llm-models.json not found, using fallback registry")
-        return FALLBACK_LLM_REGISTRY
+        log.error("llm-models.json not found — no models available. Create llm-models.json to use the server.")
+        return {}
     except Exception as e:
-        log.error(f"Error loading llm-models.json: {e}, using fallback")
-        return FALLBACK_LLM_REGISTRY
+        log.error(f"Error loading llm-models.json: {e} — no models available.")
+        return {}
 
 
 def save_llm_model_field(model_name: str, field: str, value) -> bool:
@@ -153,39 +153,6 @@ def save_rate_limit(tool_type: str, field: str, value) -> bool:
         return False
 
 
-# Fallback LLM Registry (used if llm-models.json doesn't exist)
-FALLBACK_LLM_REGISTRY = {
-    "grok4": {
-        "model_id": "grok-4-1-fast-reasoning",
-        "type": "OPENAI",
-        "host": "https://api.x.ai/v1",
-        "key": os.getenv("XAI_API_KEY"),
-        "max_context": 50,
-        "description": "xAI Grok-4 with fast reasoning",
-        "tool_call_available": False,
-        "llm_call_timeout": 60,
-    },
-    "gpt52": {
-        "model_id": "gpt-5.2",
-        "type": "OPENAI",
-        "host": "https://api.openai.com/v1",
-        "key": os.getenv("OPENAI_API_KEY"),
-        "max_context": 100,
-        "description": "OpenAI GPT-5.2",
-        "tool_call_available": False,
-        "llm_call_timeout": 60,
-    },
-    "gemini25fl": {
-        "model_id": "gemini-2.5-flash",
-        "type": "GEMINI",
-        "host": None,
-        "key": os.getenv("GEMINI_API_KEY"),
-        "max_context": 100,
-        "description": "Google Gemini 2.5 Flash",
-        "tool_call_available": False,
-        "llm_call_timeout": 60,
-    },
-}
 
 def load_limits() -> dict:
     """Load depth/iteration limits from llm-models.json 'limits' section."""
@@ -224,7 +191,3 @@ MAX_AGENT_CALL_DEPTH = int(_limits.get("max_agent_call_depth", 1))
 
 # Rate limits by tool type — loaded from plugins-enabled.json
 RATE_LIMITS = load_rate_limits()
-
-# Lightweight model used for the one-shot topic classifier call.
-# Must be a key in LLM_REGISTRY.  Gemini Flash is ideal — fast, cheap, tiny output.
-CLASSIFIER_MODEL = "gemini_flash"
