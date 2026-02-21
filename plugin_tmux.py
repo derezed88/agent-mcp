@@ -168,7 +168,14 @@ def _drain_sync(master_fd: int) -> bytes:
 
 def _decode_pty(raw: bytes) -> str:
     text = raw.decode("utf-8", errors="replace")
-    ansi = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    # Strip ANSI/VT escape sequences:
+    #   CSI sequences:  \x1b[ ... final-byte  (colors, cursor movement, etc.)
+    #   OSC sequences:  \x1b] ... \x07|\x1b\\ (shell integration, title, etc.)
+    #   Other Fe seqs:  \x1b[@-Z\-_]          (SS2, SS3, DCS, etc.)
+    ansi = re.compile(
+        r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC: ESC ] ... BEL or ESC \
+        r"|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"  # CSI + other Fe
+    )
     text = ansi.sub("", text)
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
