@@ -552,7 +552,7 @@ class TmuxPlugin(BasePlugin):
         Return !command handlers contributed by this plugin.
 
         routes.py dispatches !tmux and !tmux_call_limit through these handlers.
-        Each handler signature: async (client_id: str, arg: str) -> None
+        Handler signature: async (args: str) -> str
         The wrapper in routes.py handles push_tok / push_done.
         """
         return {
@@ -671,12 +671,19 @@ class TmuxPlugin(BasePlugin):
 
 
 # ---------------------------------------------------------------------------
-# Public API for routes.py cmd_tmux() and cmd_tmux_call_limit()
+# Public API — registered via get_commands() and dispatched by routes.py
 # ---------------------------------------------------------------------------
 
-async def tmux_command(subcommand: str, args: str) -> str:
+async def tmux_command(args: str) -> str:
     """Dispatch a !tmux subcommand. Returns string for push_tok."""
-    sub = subcommand.lower().strip()
+    parts = args.split(maxsplit=1)
+    if not parts:
+        return (
+            "Usage: !tmux <subcommand> [args]\n"
+            "Available: new, exec, ls, kill-session, kill-server, a, history-limit, filters"
+        )
+    sub = parts[0].lower().strip()
+    args = parts[1].strip() if len(parts) > 1 else ""
 
     if sub == "new":
         name = args.strip()
