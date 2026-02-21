@@ -183,7 +183,7 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=5 git@github.com true 2>/dev/null; t
     echo "  No GitHub SSH key found — using HTTPS clone"
     REPO="$REPO_HTTPS"
 fi
-git clone --branch "$BRANCH" "$REPO" "$TARGET_DIR"
+git clone --branch "$BRANCH" --depth 1 --no-progress "$REPO" "$TARGET_DIR"
 cd "$TARGET_DIR"
 
 # ── 2. Python version check ──────────────────────────────────────────────────
