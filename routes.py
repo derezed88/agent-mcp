@@ -1794,6 +1794,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "sysprompt_set_dir":
             await cmd_sysprompt_set_dir(client_id, arg, session)
             return
+        if cmd == "sysprompt_list_dir":
+            await cmd_sysprompt_list_dir(client_id)
+            return
         if cmd in ("search_ddgs", "search_google", "search_tavily", "search_xai"):
             engine = cmd[len("search_"):]
             await cmd_search(client_id, engine, arg)
