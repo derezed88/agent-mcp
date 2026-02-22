@@ -7,7 +7,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from config import log, LLM_REGISTRY, DEFAULT_MODEL, save_llm_model_field
+from config import log, LLM_REGISTRY, DEFAULT_MODEL
 from state import sessions, get_queue, push_tok, push_done, push_model, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task
 from database import execute_sql
 from prompt import (sp_list_files, sp_read_prompt, sp_read_file, sp_write_file,
@@ -72,18 +72,7 @@ def _load_system_int(key: str, default: int) -> int:
     except Exception:
         return default
 
-def _save_system_int(key: str, value: int) -> None:
-    """Persist a top-level integer to plugins-enabled.json."""
-    try:
-        with open(_PLUGINS_ENABLED_PATH) as f:
-            data = json.load(f)
-        data[key] = value
-        with open(_PLUGINS_ENABLED_PATH, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        log.warning(f"Could not save {key} to plugins-enabled.json: {e}")
-
-# Runtime overrides (survive until restart if not persisted)
+# Runtime overrides (survive until restart)
 _runtime_max_users: int | None = None
 _runtime_session_idle_timeout: int | None = None
 
@@ -116,6 +105,7 @@ async def cmd_help(client_id: str):
         "Available commands:\n"
         "  !model                                    - list available models (current marked)\n"
         "  !model <key>                              - switch active LLM\n"
+        "  !stop                                     - interrupt the running LLM job\n"
         "  !reset                                    - clear conversation history\n"
         "  !help                                     - this help\n"
         "  !input_lines <n>                          - resize input area (client-side only)\n"
@@ -177,6 +167,8 @@ async def cmd_help(client_id: str):
         "  !llm_list                                 - list LLM models\n"
         "  !llm_clean_text <model> <prompt>          - call model with clean context\n"
         "  !llm_clean_tool <model> <tool> <args>     - delegate tool call to model\n"
+        "  !sleep <seconds>                          - sleep 1–300 seconds\n"
+        "  !sleep_gate_read <t|f>                    - gate sleep: true=gated, false=auto-allow\n"
         "\n"
         "LLM Delegation:\n"
         "  !llm_call                                 - list models with tool_call_available status\n"
@@ -185,24 +177,39 @@ async def cmd_help(client_id: str):
         "  !llm_timeout <model> <seconds>            - set llm_call_timeout for a model\n"
         "  !llm_timeout <seconds>                    - set timeout for ALL models\n"
         "  !stream <true|false>                      - enable/disable agent_call streaming\n"
+        "  !agent_call_gate_write <t|f>              - gate agent_call: true=gated (default), false=auto-allow\n"
         "  !at_llm_gate_write <t|f>                  - gate at_llm: true=gated (default), false=auto-allow\n"
         "\n"
         "Limits:\n"
-        "  !limit_list                               - show depth/iteration limits\n"
-        "  !limit_set <key> <value>                  - set a limit (persists to llm-models.json)\n"
-        "  !limit_list_gate_read <t|f>               - gate limit_list: true=gated (default), false=auto-allow\n"
-        "  !limit_set_gate_write <t|f>               - gate limit_set: true=gated (default), false=auto-allow\n"
+        "  !limit_depth_list                         - show depth/iteration limits (runtime)\n"
+        "  !limit_depth_set <key> <value>            - set depth limit immediately (runtime only)\n"
+        "  !limit_depth_list_gate_read <t|f>         - gate limit_depth_list: false=auto-allow (default)\n"
+        "  !limit_depth_set_gate_write <t|f>         - gate limit_depth_set: true=gated (default)\n"
+        "  !limit_rate_list                          - show rate limits by tool type (runtime)\n"
+        "  !limit_rate_set <type> <calls> <window>   - set rate limit immediately (runtime only)\n"
+        "  !limit_rate_list_gate_read <t|f>          - gate limit_rate_list: false=auto-allow (default)\n"
+        "  !limit_rate_set_gate_write <t|f>          - gate limit_rate_set: true=gated (default)\n"
+        "  !limit_max_iteration_list                 - show max_tool_iterations (runtime)\n"
+        "  !limit_max_iteration_set <n>              - set max_tool_iterations immediately (runtime only)\n"
+        "  !limit_max_iteration_list_gate_read <t|f> - gate limit_max_iteration_list: false=auto-allow (default)\n"
+        "  !limit_max_iteration_set_gate_write <t|f> - gate limit_max_iteration_set: true=gated (default)\n"
         "\n"
         "AI tools (gated unless noted):\n"
         + "\n".join(tool_lines) + "\n"
         + "  get_system_info()                         - auto-allowed, no gate\n"
         "  llm_clean_text(model, prompt)             - rate limited\n"
         "  llm_clean_tool(model, tool, args)         - rate limited\n"
+        "  agent_call(agent_url, message)            - write-gated; send message to remote agent\n"
         "  at_llm(model, prompt)                     - write-gated; full context call\n"
         "  gate_list()                               - read-gated; show live gate status for all tools\n"
-        "  limit_list()                              - read-gated; show limits\n"
-        "  limit_set(key, value)                     - write-gated; update a limit\n"
+        "  limit_depth_list()                        - read gate (default: auto-allowed); show depth limits\n"
+        "  limit_depth_set(key, value)               - write-gated; update depth limit immediately\n"
+        "  limit_rate_list()                         - read gate (default: auto-allowed); show rate limits\n"
+        "  limit_rate_set(type, calls, window_secs)  - write-gated; update rate limit immediately\n"
+        "  limit_max_iteration_list()                - read gate (default: auto-allowed); show max iterations\n"
+        "  limit_max_iteration_set(value)            - write-gated; update max iterations immediately\n"
         "  outbound_agent_filters()                  - auto-allowed; show agent_call filter config\n"
+        "  sleep(seconds)                            - read-gated; pause 1–300s\n"
         "  llm_list()                                - auto-allowed\n"
         "  sysprompt_list/read                       - auto-allowed\n"
         "  sysprompt_write/delete/copy_dir/set_dir   - write gate\n"
@@ -413,23 +420,24 @@ async def cmd_gate_list(client_id: str):
     await conditional_push_done(client_id)
 
 
-async def cmd_limit_list(client_id: str):
+async def cmd_limit_depth_list(client_id: str):
     """Show all configurable depth/iteration limits."""
-    from tools import _limit_list_exec
-    result = await _limit_list_exec()
+    from tools import _limit_depth_list_exec
+    result = await _limit_depth_list_exec()
     await push_tok(client_id, result)
     await conditional_push_done(client_id)
 
 
-async def cmd_limit_set(client_id: str, args: str):
-    """Set a depth/iteration limit."""
+async def cmd_limit_depth_set(client_id: str, args: str):
+    """Set a depth/iteration limit (takes effect immediately, runtime only)."""
     parts = args.split()
     if len(parts) != 2:
         await push_tok(client_id,
-            "Usage: !limit_set <key> <value>\n"
+            "Usage: !limit_depth_set <key> <value>\n"
             "  key: max_at_llm_depth | max_agent_call_depth\n"
             "  value: integer >= 0  (1 = no nesting/recursion)\n"
-            "Example: !limit_set max_at_llm_depth 2")
+            "Example: !limit_depth_set max_at_llm_depth 2\n"
+            "Note: runtime only — use agentctl limit-depth-set to persist across restarts.")
         await conditional_push_done(client_id)
         return
     key, val_str = parts[0], parts[1]
@@ -442,8 +450,79 @@ async def cmd_limit_set(client_id: str, args: str):
             f"ERROR: Invalid value '{val_str}' — must be an integer >= 0")
         await conditional_push_done(client_id)
         return
-    from tools import _limit_set_exec
-    result = await _limit_set_exec(key=key, value=value)
+    from tools import _limit_depth_set_exec
+    result = await _limit_depth_set_exec(key=key, value=value)
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_limit_rate_list(client_id: str):
+    """Show all rate limits by tool type."""
+    from tools import _limit_rate_list_exec
+    result = await _limit_rate_list_exec()
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_limit_rate_set(client_id: str, args: str):
+    """Set a rate limit for a tool type (takes effect immediately, runtime only)."""
+    parts = args.split()
+    if len(parts) != 3:
+        await push_tok(client_id,
+            "Usage: !limit_rate_set <tool_type> <calls> <window_seconds>\n"
+            "  tool_type: llm_call | search | drive | db | extract | system | agent_call | tmux\n"
+            "  calls: max calls in window (0 = unlimited)\n"
+            "  window_seconds: window duration in seconds (0 = unlimited)\n"
+            "Example: !limit_rate_set search 10 30\n"
+            "Note: runtime only — use agentctl ratelimit-set to persist across restarts.")
+        await conditional_push_done(client_id)
+        return
+    tool_type, calls_str, window_str = parts[0], parts[1], parts[2]
+    try:
+        calls = int(calls_str)
+        window_seconds = int(window_str)
+        if calls < 0 or window_seconds < 0:
+            raise ValueError
+    except ValueError:
+        await push_tok(client_id,
+            f"ERROR: calls and window_seconds must be integers >= 0")
+        await conditional_push_done(client_id)
+        return
+    from tools import _limit_rate_set_exec
+    result = await _limit_rate_set_exec(tool_type=tool_type, calls=calls, window_seconds=window_seconds)
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_limit_max_iteration_list(client_id: str):
+    """Show current max_tool_iterations limit."""
+    from tools import _limit_max_iteration_list_exec
+    result = await _limit_max_iteration_list_exec()
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
+
+async def cmd_limit_max_iteration_set(client_id: str, args: str):
+    """Set max_tool_iterations (takes effect immediately, runtime only)."""
+    parts = args.split()
+    if len(parts) != 1:
+        await push_tok(client_id,
+            "Usage: !limit_max_iteration_set <value>\n"
+            "  value: integer >= 1  (default: 10)\n"
+            "Example: !limit_max_iteration_set 25\n"
+            "Note: runtime only — use agentctl limit-max-iteration-set to persist across restarts.")
+        await conditional_push_done(client_id)
+        return
+    try:
+        value = int(parts[0])
+        if value < 1:
+            raise ValueError
+    except ValueError:
+        await push_tok(client_id, "ERROR: value must be an integer >= 1")
+        await conditional_push_done(client_id)
+        return
+    from tools import _limit_max_iteration_set_exec
+    result = await _limit_max_iteration_set_exec(value=value)
     await push_tok(client_id, result)
     await conditional_push_done(client_id)
 
@@ -640,6 +719,16 @@ async def cmd_list_models(client_id: str, current: str):
     await push_tok(client_id, "\n".join(lines))
     await conditional_push_done(client_id)
 
+async def cmd_stop(client_id: str):
+    """Cancel the currently running LLM job for this client, if any."""
+    cancelled = await cancel_active_task(client_id)
+    if cancelled:
+        await push_tok(client_id, "Job stopped.")
+    else:
+        await push_tok(client_id, "No job running.")
+    await push_done(client_id)
+
+
 async def cmd_set_model(client_id: str, key: str, session: dict):
     """Set the active LLM model for this session."""
     if not key or not key.strip():
@@ -780,17 +869,15 @@ async def cmd_llm_call(client_id: str, args: str):
     if len(parts) == 1:
         flag = parts[0].lower()
         if is_valid_bool(flag):
-            # Bulk set all enabled models
+            # Bulk set all enabled models (runtime only)
             value = parse_bool(flag)
-            changed = []
+            changed = list(LLM_REGISTRY.keys())
             for name, cfg in LLM_REGISTRY.items():
                 cfg["tool_call_available"] = value
-                if save_llm_model_field(name, "tool_call_available", value):
-                    changed.append(name)
             status = "enabled" if value else "disabled"
             await push_tok(client_id,
                 f"tool_call_available={status} set for all models: {', '.join(changed)}\n"
-                f"Changes persisted to llm-models.json.")
+                f"Runtime only — use agentctl model-llmcall-all to persist.")
         else:
             await push_tok(client_id,
                 f"ERROR: Unknown argument '{parts[0]}'\n"
@@ -821,14 +908,9 @@ async def cmd_llm_call(client_id: str, args: str):
 
         value = parse_bool(flag)
         LLM_REGISTRY[model_name]["tool_call_available"] = value
-        if save_llm_model_field(model_name, "tool_call_available", value):
-            status = "enabled" if value else "disabled"
-            await push_tok(client_id,
-                f"tool_call_available={status} for '{model_name}'. Persisted to llm-models.json.")
-        else:
-            await push_tok(client_id,
-                f"WARNING: Updated in-memory but FAILED to persist to llm-models.json. "
-                f"Change will be lost on restart.")
+        status = "enabled" if value else "disabled"
+        await push_tok(client_id,
+            f"tool_call_available={status} for '{model_name}' (runtime only — use agentctl model-llmcall to persist).")
         await conditional_push_done(client_id)
         return
 
@@ -876,14 +958,12 @@ async def cmd_llm_timeout(client_id: str, args: str):
             await conditional_push_done(client_id)
             return
 
-        changed = []
+        changed = list(LLM_REGISTRY.keys())
         for name, cfg in LLM_REGISTRY.items():
             cfg["llm_call_timeout"] = secs
-            if save_llm_model_field(name, "llm_call_timeout", secs):
-                changed.append(name)
         await push_tok(client_id,
             f"llm_call_timeout={secs}s set for all models: {', '.join(changed)}\n"
-            "Changes persisted to llm-models.json.")
+            "Runtime only — use agentctl model-timeout to persist.")
         await conditional_push_done(client_id)
         return
 
@@ -910,12 +990,8 @@ async def cmd_llm_timeout(client_id: str, args: str):
             return
 
         LLM_REGISTRY[model_name]["llm_call_timeout"] = secs
-        if save_llm_model_field(model_name, "llm_call_timeout", secs):
-            await push_tok(client_id,
-                f"llm_call_timeout={secs}s for '{model_name}'. Persisted to llm-models.json.")
-        else:
-            await push_tok(client_id,
-                f"WARNING: Updated in-memory but FAILED to persist to llm-models.json.")
+        await push_tok(client_id,
+            f"llm_call_timeout={secs}s for '{model_name}' (runtime only — use agentctl model-timeout to persist).")
         await conditional_push_done(client_id)
         return
 
@@ -1002,9 +1078,8 @@ async def cmd_maxctx(client_id: str, arg: str):
     """
     Get or set the agent-wide maximum history window (agent_max_ctx).
 
-    !maxctx           - show current setting (effective and configured values)
-    !maxctx <n>       - set agent_max_ctx to n messages (persists to plugins-enabled.json)
-    !maxctx <n> temp  - set in-memory only (lost on restart)
+    !maxctx      - show current setting
+    !maxctx <n>  - set agent_max_ctx to n messages (runtime only)
     """
     import plugin_history_default as _phd
     arg = arg.strip()
@@ -1013,44 +1088,30 @@ async def cmd_maxctx(client_id: str, arg: str):
         await push_tok(client_id,
             f"agent_max_ctx: {agent_val} messages\n"
             f"  (effective per session = min(agent_max_ctx, model.max_context))\n"
-            f"  Manage via: agentctl.py history-maxctx <n>")
+            f"  Persist via: agentctl history-maxctx <n>")
         await conditional_push_done(client_id)
         return
-    parts = arg.split()
     try:
-        n = int(parts[0])
+        n = int(arg.split()[0])
     except ValueError:
-        await push_tok(client_id, f"ERROR: '{parts[0]}' is not a number.\nUsage: !maxctx <n>")
+        await push_tok(client_id, f"ERROR: '{arg}' is not a number.\nUsage: !maxctx <n>")
         await conditional_push_done(client_id)
         return
     if n < 1:
         await push_tok(client_id, "ERROR: agent_max_ctx must be at least 1.")
         await conditional_push_done(client_id)
         return
-    temp_only = len(parts) > 1 and parts[1].lower() in ("temp", "temporary")
     _phd.set_runtime_agent_max_ctx(n)
-    if not temp_only:
-        try:
-            with open(_PLUGINS_ENABLED_PATH) as f:
-                data = json.load(f)
-            data.setdefault("plugin_config", {}).setdefault("plugin_history_default", {})["agent_max_ctx"] = n
-            with open(_PLUGINS_ENABLED_PATH, "w") as f:
-                json.dump(data, f, indent=2)
-            await push_tok(client_id, f"agent_max_ctx set to {n} (persisted).")
-        except Exception as e:
-            await push_tok(client_id, f"agent_max_ctx set to {n} in memory; WARNING: could not persist: {e}")
-    else:
-        await push_tok(client_id, f"agent_max_ctx set to {n} (runtime only, not persisted).")
+    await push_tok(client_id, f"agent_max_ctx set to {n} (runtime only — use agentctl history-maxctx to persist).")
     await conditional_push_done(client_id)
 
 
 async def cmd_maxusers(client_id: str, arg: str):
     """
-    Get or set the maximum number of simultaneous sessions (max_users).
+    Get or set the maximum number of simultaneous sessions (max_users). Runtime only.
 
-    !maxusers           - show current setting
-    !maxusers <n>       - set max_users to n (persists to plugins-enabled.json)
-    !maxusers <n> temp  - set in-memory only
+    !maxusers      - show current setting
+    !maxusers <n>  - set max_users to n (runtime only)
     """
     global _runtime_max_users
     arg = arg.strip()
@@ -1060,37 +1121,30 @@ async def cmd_maxusers(client_id: str, arg: str):
         await push_tok(client_id,
             f"max_users: {current}\n"
             f"  Active sessions: {live}/{current}\n"
-            f"  Manage via: agentctl.py max-users <n>")
+            f"  Persist via: agentctl max-users <n>")
         await conditional_push_done(client_id)
         return
-    parts = arg.split()
     try:
-        n = int(parts[0])
+        n = int(arg.split()[0])
     except ValueError:
-        await push_tok(client_id, f"ERROR: '{parts[0]}' is not a number.\nUsage: !maxusers <n>")
+        await push_tok(client_id, f"ERROR: '{arg}' is not a number.\nUsage: !maxusers <n>")
         await conditional_push_done(client_id)
         return
     if n < 1:
         await push_tok(client_id, "ERROR: max_users must be at least 1.")
         await conditional_push_done(client_id)
         return
-    temp_only = len(parts) > 1 and parts[1].lower() in ("temp", "temporary")
     _runtime_max_users = n
-    if not temp_only:
-        _save_system_int("max_users", n)
-        await push_tok(client_id, f"max_users set to {n} (persisted).")
-    else:
-        await push_tok(client_id, f"max_users set to {n} (runtime only, not persisted).")
+    await push_tok(client_id, f"max_users set to {n} (runtime only — use agentctl max-users to persist).")
     await conditional_push_done(client_id)
 
 
 async def cmd_sessiontimeout(client_id: str, arg: str):
     """
-    Get or set the session idle timeout in minutes.
+    Get or set the session idle timeout in minutes. Runtime only.
 
-    !sessiontimeout           - show current setting
-    !sessiontimeout <n>       - set timeout to n minutes (persists)
-    !sessiontimeout 0         - disable idle timeout
+    !sessiontimeout      - show current setting
+    !sessiontimeout <n>  - set timeout to n minutes (runtime only; 0 = disabled)
     """
     global _runtime_session_idle_timeout
     arg = arg.strip()
@@ -1099,7 +1153,7 @@ async def cmd_sessiontimeout(client_id: str, arg: str):
         status = f"{current} minutes" if current > 0 else "disabled"
         await push_tok(client_id,
             f"session_idle_timeout: {status}\n"
-            f"  Manage via: agentctl.py session-timeout <minutes>")
+            f"  Persist via: agentctl session-timeout <minutes>")
         await conditional_push_done(client_id)
         return
     try:
@@ -1113,9 +1167,36 @@ async def cmd_sessiontimeout(client_id: str, arg: str):
         await conditional_push_done(client_id)
         return
     _runtime_session_idle_timeout = n
-    _save_system_int("session_idle_timeout_minutes", n)
     status = f"{n} minutes" if n > 0 else "disabled"
-    await push_tok(client_id, f"session_idle_timeout set to {status} (persisted).")
+    await push_tok(client_id, f"session_idle_timeout set to {status} (runtime only — use agentctl session-timeout to persist).")
+    await conditional_push_done(client_id)
+
+
+async def cmd_sleep(client_id: str, arg: str):
+    """
+    Sleep for a specified number of seconds.
+
+    !sleep <seconds>  - pause for 1–300 seconds
+    """
+    import asyncio as _asyncio
+    arg = arg.strip()
+    if not arg:
+        await push_tok(client_id, "Usage: !sleep <seconds>  (1–300)")
+        await conditional_push_done(client_id)
+        return
+    try:
+        seconds = int(arg.split()[0])
+    except ValueError:
+        await push_tok(client_id, f"ERROR: '{arg}' is not a valid integer.\nUsage: !sleep <seconds>")
+        await conditional_push_done(client_id)
+        return
+    if seconds < 1 or seconds > 300:
+        await push_tok(client_id, "ERROR: seconds must be between 1 and 300.")
+        await conditional_push_done(client_id)
+        return
+    await push_tok(client_id, f"Sleeping for {seconds} second(s)...")
+    await _asyncio.sleep(seconds)
+    await push_tok(client_id, f"Done. Slept for {seconds} second(s).")
     await conditional_push_done(client_id)
 
 
@@ -1217,16 +1298,28 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_tool_preview_length(client_id, arg, session)
                 elif cmd == "stream":
                     await cmd_stream(client_id, arg, session)
-                elif cmd == "limit_list":
-                    await cmd_limit_list(client_id)
-                elif cmd == "limit_set":
-                    await cmd_limit_set(client_id, arg)
+                elif cmd == "limit_depth_list":
+                    await cmd_limit_depth_list(client_id)
+                elif cmd == "limit_depth_set":
+                    await cmd_limit_depth_set(client_id, arg)
+                elif cmd == "limit_rate_list":
+                    await cmd_limit_rate_list(client_id)
+                elif cmd == "limit_rate_set":
+                    await cmd_limit_rate_set(client_id, arg)
+                elif cmd == "limit_max_iteration_list":
+                    await cmd_limit_max_iteration_list(client_id)
+                elif cmd == "limit_max_iteration_set":
+                    await cmd_limit_max_iteration_set(client_id, arg)
                 elif cmd == "maxctx":
                     await cmd_maxctx(client_id, arg)
                 elif cmd == "maxusers":
                     await cmd_maxusers(client_id, arg)
                 elif cmd == "sessiontimeout":
                     await cmd_sessiontimeout(client_id, arg)
+                elif cmd == "stop":
+                    await cmd_stop(client_id)
+                elif cmd == "sleep":
+                    await cmd_sleep(client_id, arg)
                 elif cmd.endswith("_gate_read") or cmd.endswith("_gate_write"):
                     # Generic per-tool gate command: !<toolname>_gate_read / !<toolname>_gate_write
                     if cmd.endswith("_gate_read"):
@@ -1343,11 +1436,23 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "stream":
             await cmd_stream(client_id, arg, session)
             return
-        if cmd == "limit_list":
-            await cmd_limit_list(client_id)
+        if cmd == "limit_depth_list":
+            await cmd_limit_depth_list(client_id)
             return
-        if cmd == "limit_set":
-            await cmd_limit_set(client_id, arg)
+        if cmd == "limit_depth_set":
+            await cmd_limit_depth_set(client_id, arg)
+            return
+        if cmd == "limit_rate_list":
+            await cmd_limit_rate_list(client_id)
+            return
+        if cmd == "limit_rate_set":
+            await cmd_limit_rate_set(client_id, arg)
+            return
+        if cmd == "limit_max_iteration_list":
+            await cmd_limit_max_iteration_list(client_id)
+            return
+        if cmd == "limit_max_iteration_set":
+            await cmd_limit_max_iteration_set(client_id, arg)
             return
         if cmd == "maxctx":
             await cmd_maxctx(client_id, arg)
@@ -1357,6 +1462,12 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "sessiontimeout":
             await cmd_sessiontimeout(client_id, arg)
+            return
+        if cmd == "sleep":
+            await cmd_sleep(client_id, arg)
+            return
+        if cmd == "stop":
+            await cmd_stop(client_id)
             return
         # Generic per-tool gate command: !<toolname>_gate_read / !<toolname>_gate_write
         if cmd.endswith("_gate_read") or cmd.endswith("_gate_write"):
@@ -1489,6 +1600,18 @@ async def endpoint_gate_response(request: Request) -> JSONResponse:
         pending_gates[gate_id]["event"].set()
         return JSONResponse({"status": "OK"})
     return JSONResponse({"error": "unknown gate"}, 404)
+
+async def endpoint_stop(request: Request) -> JSONResponse:
+    """Cancel the active LLM job for a client without starting a new one."""
+    try: payload = await request.json()
+    except: return JSONResponse({"error": "json"}, 400)
+    client_id = payload.get("client_id")
+    if not client_id: return JSONResponse({"error": "Missing client_id"}, 400)
+    cancelled = await cancel_active_task(client_id)
+    if cancelled:
+        await push_done(client_id)
+    return JSONResponse({"status": "OK", "cancelled": cancelled})
+
 
 async def endpoint_health(request: Request) -> JSONResponse:
     return JSONResponse({

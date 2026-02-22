@@ -166,11 +166,11 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         pending_gates.pop(gate_id, None)
         return decision == "allow"
 
-    # limit_list: read-only, gatable via limit_list_gate_read
-    if tool_name == "limit_list":
+    # limit_depth_list: read-only, gatable via limit_depth_list_gate_read
+    if tool_name == "limit_depth_list":
         default_perms = tool_gate_state.get("*", {})
-        tool_perms = tool_gate_state.get("limit_list", {})
-        if tool_perms.get("read", default_perms.get("read", False)):
+        tool_perms = tool_gate_state.get("limit_depth_list", {})
+        if tool_perms.get("read", default_perms.get("read", True)):
             return True
         if is_non_interactive:
             return False
@@ -190,10 +190,106 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         pending_gates.pop(gate_id, None)
         return decision == "allow"
 
-    # limit_set: write operation, gatable via limit_set_gate_write
-    if tool_name == "limit_set":
+    # limit_depth_set: write operation, gatable via limit_depth_set_gate_write
+    if tool_name == "limit_depth_set":
         default_perms = tool_gate_state.get("*", {})
-        tool_perms = tool_gate_state.get("limit_set", {})
+        tool_perms = tool_gate_state.get("limit_depth_set", {})
+        if tool_perms.get("write", default_perms.get("write", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "write"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
+    # limit_rate_list: read-only, gatable via limit_rate_list_gate_read (default: auto-allowed)
+    if tool_name == "limit_rate_list":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("limit_rate_list", {})
+        if tool_perms.get("read", default_perms.get("read", True)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {"operation_type": "read"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
+    # limit_rate_set: write operation, gatable via limit_rate_set_gate_write (default: gated)
+    if tool_name == "limit_rate_set":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("limit_rate_set", {})
+        if tool_perms.get("write", default_perms.get("write", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "write"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
+    # limit_max_iteration_list: read-only, gatable via limit_max_iteration_list_gate_read (default: auto-allowed)
+    if tool_name == "limit_max_iteration_list":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("limit_max_iteration_list", {})
+        if tool_perms.get("read", default_perms.get("read", True)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "read"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
+    # limit_max_iteration_set: write operation, gatable via limit_max_iteration_set_gate_write (default: gated)
+    if tool_name == "limit_max_iteration_set":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("limit_max_iteration_set", {})
         if tool_perms.get("write", default_perms.get("write", False)):
             return True
         if is_non_interactive:
@@ -450,6 +546,55 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await push_gate(client_id, gate_data)
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
+        return decision == "allow"
+
+    # agent_call: write gate (sends message to remote agent — outbound action)
+    if tool_name == "agent_call":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("agent_call", {})
+        if tool_perms.get("write", default_perms.get("write", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "write"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        return decision == "allow"
+
+    # sleep: write gate (sleeping affects execution flow)
+    if tool_name == "sleep":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("sleep", {})
+        if tool_perms.get("read", default_perms.get("read", False)):
+            return True
+        if is_non_interactive:
+            return False
+        seconds = tool_args.get("seconds", "?")
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {"seconds": seconds, "operation_type": "read"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
         return decision == "allow"
 
     return True
