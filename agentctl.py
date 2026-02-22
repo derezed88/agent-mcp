@@ -265,7 +265,7 @@ class PluginManager:
             if all_missing_envs or all_missing_files:
                 print(f"  Then configure: .env vars and config files")
 
-            print(f"\n{Colors.CYAN}Detailed help:{Colors.RESET} {Colors.BOLD}python plugin-manager.py info <plugin_name>{Colors.RESET}")
+            print(f"\n{Colors.CYAN}Detailed help:{Colors.RESET} {Colors.BOLD}python agentctl.py info <plugin_name>{Colors.RESET}")
 
         print()
 
@@ -478,7 +478,7 @@ class PluginManager:
             print(f"  {color}{plugin_name:<30}{Colors.RESET} {current_port:>6}  {port_key}{marker}")
 
         print()
-        print(f"  Change port: {Colors.BOLD}python plugin-manager.py port-set <plugin> <port>{Colors.RESET}")
+        print(f"  Change port: {Colors.BOLD}python agentctl.py port-set <plugin> <port>{Colors.RESET}")
         print()
 
     def port_set(self, plugin_name: str, port: int) -> bool:
@@ -1037,25 +1037,75 @@ class PluginManager:
         return False
 
     # ------------------------------------------------------------------
+    # Tmux plugin configuration
+    # ------------------------------------------------------------------
+
+    def tmux_exec_timeout(self, seconds: float):
+        """Set TMUX_EXEC_TIMEOUT in plugins-enabled.json plugin_config.plugin_tmux."""
+        if seconds <= 0:
+            print(f"{Colors.RED}Timeout must be > 0 seconds{Colors.RESET}")
+            return False
+
+        plugin_config = self.config.setdefault('plugin_config', {})
+        tmux_cfg = plugin_config.setdefault('plugin_tmux', {})
+        old = tmux_cfg.get('TMUX_EXEC_TIMEOUT', 10)
+        tmux_cfg['TMUX_EXEC_TIMEOUT'] = seconds
+
+        if self.save_config():
+            print(f"{Colors.GREEN}✓ TMUX_EXEC_TIMEOUT: {old}s → {seconds}s{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            return True
+        return False
+
+    # ------------------------------------------------------------------
     # Gate defaults management
     # ------------------------------------------------------------------
 
-    # All known gate-able tools and the permission types they support.
+    # Core gate-able tools and the permission types they support.
+    # Plugin gate tools are loaded at runtime from plugin-manifest.json gate_tools sections.
     # db_query is handled separately (per-table keys in the "db" section).
-    _GATE_TOOLS: dict[str, list[str]] = {
-        "at_llm":         ["write"],
-        "gate_list":      ["read"],
-        "search_ddgs":    ["read"],
-        "search_google":  ["read"],
-        "search_tavily":  ["read"],
-        "search_xai":     ["read"],
-        "url_extract":    ["read"],
-        "google_drive":   ["read", "write"],
+    _CORE_GATE_TOOLS: dict[str, list[str]] = {
+        "at_llm":          ["write"],
+        "gate_list":            ["read"],
+        "limit_depth_list":     ["read"],
+        "limit_depth_set":      ["write"],
+        "limit_rate_list":          ["read"],
+        "limit_rate_set":           ["write"],
+        "limit_max_iteration_list": ["read"],
+        "limit_max_iteration_set":  ["write"],
+        "search_ddgs":     ["read"],
+        "search_google":   ["read"],
+        "search_tavily":   ["read"],
+        "search_xai":      ["read"],
+        "url_extract":     ["read"],
+        "google_drive":    ["read", "write"],
         "sysprompt_write": ["write"],
-        "session":        ["read", "write"],
-        "model":          ["write"],
-        "reset":          ["write"],
+        "session":         ["read", "write"],
+        "model":           ["write"],
+        "reset":           ["write"],
+        "sleep":           ["read"],
     }
+
+    def _load_plugin_gate_tools(self) -> dict[str, list[str]]:
+        """
+        Load gate_tools metadata from self.manifest for all enabled plugins.
+        Returns a dict of tool_name -> list[str] (operations), merged from all plugins.
+        """
+        result: dict[str, list[str]] = {}
+        enabled = set(self.config.get("enabled_plugins", []))
+        for plugin_name, plugin_meta in self.manifest.get("plugins", {}).items():
+            if plugin_name not in enabled:
+                continue
+            for tool_name, gate_meta in plugin_meta.get("gate_tools", {}).items():
+                result[tool_name] = gate_meta.get("operations", ["write"])
+        return result
+
+    @property
+    def _GATE_TOOLS(self) -> dict[str, list[str]]:
+        """Combined gate tools: core + plugin manifest entries."""
+        merged = dict(self._CORE_GATE_TOOLS)
+        merged.update(self._load_plugin_gate_tools())
+        return merged
 
     def _load_gate_defaults(self) -> dict:
         """Load gate-defaults.json, returning empty structure if not present."""
@@ -1084,7 +1134,15 @@ class PluginManager:
         db_section = data.get("db", {})
         tool_section = data.get("tools", {})
 
-        print(f"\n{Colors.BOLD}Gate Defaults{Colors.RESET}  (True = auto-allow, False = gated/requires approval)")
+        def perm_str(is_auto: bool, perm: str) -> str:
+            """Format one permission: gate=ON/OFF then effect."""
+            if is_auto:
+                return f"gate=OFF ({perm}=auto-allow)"
+            else:
+                return f"{Colors.YELLOW}gate=ON{Colors.RESET}  ({perm}={Colors.YELLOW}gated{Colors.RESET})"
+
+        print(f"\n{Colors.BOLD}Gate Defaults{Colors.RESET}  (gate=ON → requires approval; gate=OFF → auto-allow)")
+        print(f"  Runtime toggle: !<tool>_gate_read/write true=gate-ON  false=gate-OFF")
         print(f"{Colors.CYAN}{'='*70}{Colors.RESET}")
 
         # DB gates
@@ -1097,9 +1155,7 @@ class PluginManager:
                 label = "(default *)" if table == "*" else ("(metadata)" if table == "__meta__" else table)
                 r = perms.get("read", False)
                 w = perms.get("write", False)
-                r_str = f"{Colors.GREEN}auto-allow{Colors.RESET}" if r else f"{Colors.YELLOW}gated{Colors.RESET}"
-                w_str = f"{Colors.GREEN}auto-allow{Colors.RESET}" if w else f"{Colors.YELLOW}gated{Colors.RESET}"
-                print(f"  {label:<20} read={r_str}  write={w_str}")
+                print(f"  {label:<20} read: {perm_str(r, 'read')}  write: {perm_str(w, 'write')}")
 
         # Tool gates
         print(f"\n{Colors.BOLD}Tool gates:{Colors.RESET}")
@@ -1108,23 +1164,22 @@ class PluginManager:
             parts = []
             for perm in supported_perms:
                 val = perms.get(perm, False)
-                val_str = f"{Colors.GREEN}auto-allow{Colors.RESET}" if val else f"{Colors.YELLOW}gated{Colors.RESET}"
-                parts.append(f"{perm}={val_str}")
-            print(f"  {tool:<20} {' '.join(parts)}")
+                parts.append(f"{perm}: {perm_str(val, perm)}")
+            print(f"  {tool:<22} {' '.join(parts)}")
 
         print()
-        print(f"  Set:   {Colors.BOLD}gate-set db <table|*> <read|write> <true|false>{Colors.RESET}")
-        print(f"         {Colors.BOLD}gate-set <tool> <read|write> <true|false>{Colors.RESET}")
-        print(f"  Reset: {Colors.BOLD}gate-reset{Colors.RESET}  (sets all to gated/false)")
+        print(f"  Set:   {Colors.BOLD}llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}  (true=auto-allow/gate-OFF, false=gated/gate-ON)")
+        print(f"         {Colors.BOLD}llm-allow <tool> <read|write> <true|false>{Colors.RESET}")
+        print(f"  Reset: {Colors.BOLD}gate-reset{Colors.RESET}  (sets all to gated/gate-ON)")
         print(f"\n  {Colors.CYAN}Changes take effect after restarting agent-mcp.py{Colors.RESET}")
         print()
 
-    def gate_set(self, args: list[str]) -> bool:
+    def llm_allow(self, args: list[str]) -> bool:
         """
-        Set a gate default.
+        Set a gate default (true=auto-allow/gate-OFF, false=gated/gate-ON).
         Usage:
-          gate-set db <table|*> <read|write> <true|false>
-          gate-set <tool> <read|write> <true|false>
+          llm-allow db <table|*> <read|write> <true|false>
+          llm-allow <tool> <read|write> <true|false>
         """
         BOOL_TRUE = {"true", "1", "yes", "on"}
         BOOL_FALSE = {"false", "0", "no", "off"}
@@ -1138,16 +1193,16 @@ class PluginManager:
             return None
 
         if not args:
-            print(f"{Colors.RED}Usage: gate-set db <table|*> <read|write> <true|false>{Colors.RESET}")
-            print(f"       gate-set <tool> <read|write> <true|false>")
+            print(f"{Colors.RED}Usage: llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}")
+            print(f"       llm-allow <tool> <read|write> <true|false>")
             return False
 
         data = self._load_gate_defaults()
 
         if args[0].lower() == "db":
-            # gate-set db <table> <read|write> <true|false>
+            # llm-allow db <table> <read|write> <true|false>
             if len(args) != 4:
-                print(f"{Colors.RED}Usage: gate-set db <table|*> <read|write> <true|false>{Colors.RESET}")
+                print(f"{Colors.RED}Usage: llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}")
                 return False
             table, perm, flag_str = args[1], args[2].lower(), args[3]
             if perm not in ("read", "write"):
@@ -1165,17 +1220,17 @@ class PluginManager:
                 db_section.setdefault("__meta__", {"read": False, "write": False})[perm] = val
 
             if self._save_gate_defaults(data):
-                status = f"{Colors.GREEN}auto-allow{Colors.RESET}" if val else f"{Colors.YELLOW}gated{Colors.RESET}"
+                gate_str = f"{Colors.GREEN}gate=OFF (auto-allow){Colors.RESET}" if val else f"{Colors.YELLOW}gate=ON (gated){Colors.RESET}"
                 label = "default (*)" if table == "*" else table
-                print(f"{Colors.GREEN}✓{Colors.RESET} db_query [{label}] {perm}: {status}")
+                print(f"{Colors.GREEN}✓{Colors.RESET} db_query [{label}] {perm}: {gate_str}")
                 print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
                 return True
             return False
 
         else:
-            # gate-set <tool> <read|write> <true|false>
+            # llm-allow <tool> <read|write> <true|false>
             if len(args) != 3:
-                print(f"{Colors.RED}Usage: gate-set <tool> <read|write> <true|false>{Colors.RESET}")
+                print(f"{Colors.RED}Usage: llm-allow <tool> <read|write> <true|false>{Colors.RESET}")
                 print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
                 return False
             tool, perm, flag_str = args[0].lower(), args[1].lower(), args[2]
@@ -1198,8 +1253,8 @@ class PluginManager:
             tool_section.setdefault(tool, {})[perm] = val
 
             if self._save_gate_defaults(data):
-                status = f"{Colors.GREEN}auto-allow{Colors.RESET}" if val else f"{Colors.YELLOW}gated{Colors.RESET}"
-                print(f"{Colors.GREEN}✓{Colors.RESET} {tool} {perm}: {status}")
+                gate_str = f"{Colors.GREEN}gate=OFF (auto-allow){Colors.RESET}" if val else f"{Colors.YELLOW}gate=ON (gated){Colors.RESET}"
+                print(f"{Colors.GREEN}✓{Colors.RESET} {tool} {perm}: {gate_str}")
                 print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
                 return True
             return False
@@ -1209,9 +1264,13 @@ class PluginManager:
     # ------------------------------------------------------------------
 
     _LIMIT_KEYS: dict[str, str] = {
-        "max_at_llm_depth":    "Max nested at_llm hops before rejection (1 = no recursion)",
+        "max_at_llm_depth":     "Max nested at_llm hops before rejection (1 = no recursion)",
         "max_agent_call_depth": "Max nested agent_call hops before rejection (1 = no recursion)",
     }
+
+    _ITER_KEY = "max_tool_iterations"
+    _ITER_DEFAULT = 10
+    _ITER_DESC = "Max LLM<->tool round-trips per request before [Max iterations] is emitted"
 
     def _load_limits(self) -> dict:
         """Load limits section from llm-models.json."""
@@ -1235,7 +1294,7 @@ class PluginManager:
             print(f"{Colors.RED}Error saving limit: {e}{Colors.RESET}")
             return False
 
-    def limit_list(self):
+    def limit_depth_list(self):
         """List all depth/iteration limits from llm-models.json."""
         limits = self._load_limits()
 
@@ -1249,12 +1308,12 @@ class PluginManager:
             print(f"  {key:<26} {str(val):>6}  {Colors.GRAY}{desc}{Colors.RESET}")
 
         print()
-        print(f"  Set: {Colors.BOLD}limit-set <key> <value>{Colors.RESET}")
-        print(f"  {Colors.CYAN}Changes take effect after restarting agent-mcp.py{Colors.RESET}")
+        print(f"  Set: {Colors.BOLD}limit-depth-set <key> <value>{Colors.RESET}")
+        print(f"  {Colors.CYAN}Persists to llm-models.json; runtime !limit_depth_set takes effect immediately{Colors.RESET}")
         print()
 
-    def limit_set(self, key: str, value: int) -> bool:
-        """Set a depth limit in llm-models.json."""
+    def limit_depth_set(self, key: str, value: int) -> bool:
+        """Set a depth limit in llm-models.json (persists across restarts)."""
         if key not in self._LIMIT_KEYS:
             print(f"{Colors.RED}Unknown limit key '{key}'{Colors.RESET}")
             print(f"  Valid keys: {', '.join(sorted(self._LIMIT_KEYS.keys()))}")
@@ -1269,7 +1328,37 @@ class PluginManager:
 
         if self._save_limit(key, value):
             print(f"{Colors.GREEN}✓ {key}: {old} → {value}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Persisted to llm-models.json (restart agent-mcp.py or use !limit_depth_set for runtime effect){Colors.RESET}")
+            return True
+        return False
+
+    def limit_max_iteration_list(self):
+        """Show the current max_tool_iterations limit from llm-models.json."""
+        limits = self._load_limits()
+        val = limits.get(self._ITER_KEY, f"(not set — using default: {self._ITER_DEFAULT})")
+
+        print(f"\n{Colors.BOLD}Max Tool Iterations{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
+        print(f"  {'Key':<26} {'Value':>6}  Description")
+        print(f"  {'-'*26} {'-'*6}  {'-'*50}")
+        print(f"  {self._ITER_KEY:<26} {str(val):>6}  {Colors.GRAY}{self._ITER_DESC}{Colors.RESET}")
+        print()
+        print(f"  Set: {Colors.BOLD}limit-max-iteration-set <value>{Colors.RESET}")
+        print(f"  {Colors.CYAN}Persists to llm-models.json; runtime !limit_max_iteration_set takes effect immediately{Colors.RESET}")
+        print()
+
+    def limit_max_iteration_set(self, value: int) -> bool:
+        """Set max_tool_iterations in llm-models.json (persists across restarts)."""
+        if value < 1:
+            print(f"{Colors.RED}Value must be >= 1{Colors.RESET}")
+            return False
+
+        limits = self._load_limits()
+        old = limits.get(self._ITER_KEY, self._ITER_DEFAULT)
+
+        if self._save_limit(self._ITER_KEY, value):
+            print(f"{Colors.GREEN}\u2713 {self._ITER_KEY}: {old} \u2192 {value}{Colors.RESET}")
+            print(f"{Colors.CYAN}Persisted to llm-models.json (restart agent-mcp.py or use !limit_max_iteration_set for runtime effect){Colors.RESET}")
             return True
         return False
 
@@ -1277,6 +1366,17 @@ class PluginManager:
         """Reset all gate defaults to gated (false) — delete gate-defaults.json."""
         if self._save_gate_defaults({"db": {}, "tools": {}}):
             print(f"{Colors.GREEN}✓ All gate defaults reset — everything will be gated on next restart{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            return True
+        return False
+
+    def sleep_gate_allow(self, value: bool) -> bool:
+        """Set the sleep gate default. true=auto-allow (gate OFF), false=gated (gate ON)."""
+        data = self._load_gate_defaults()
+        data.setdefault("tools", {}).setdefault("sleep", {})["read"] = value
+        if self._save_gate_defaults(data):
+            gate_str = f"{Colors.GREEN}gate=OFF (auto-allow){Colors.RESET}" if value else f"{Colors.YELLOW}gate=ON (gated){Colors.RESET}"
+            print(f"{Colors.GREEN}✓{Colors.RESET} sleep read: {gate_str}")
             print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
             return True
         return False
@@ -1307,20 +1407,38 @@ class PluginManager:
         print("  port-list                         - Show listening ports for all client plugins")
         print("  port-set <plugin> <port>          - Set listening port for a plugin")
         print(f"\n{Colors.BOLD}Rate Limit Commands:{Colors.RESET}")
-        print("  ratelimit-list                            - Show all rate limit settings")
-        print("  ratelimit-set <type> <calls> <window>     - Set rate limit (calls=0 = unlimited)")
+        print("  ratelimit-list                            - Show all rate limit settings (from plugins-enabled.json)")
+        print("  ratelimit-set <type> <calls> <window>     - Set rate limit and persist (calls=0 = unlimited)")
         print("  ratelimit-autodisable <type> <true|false> - Set auto_disable flag")
-        print(f"  Valid types: llm_call, search, extract, drive, db, system")
+        print(f"  Valid types: llm_call, search, extract, drive, db, system, agent_call, tmux")
+        print(f"  Note: !limit_rate_set in the running agent applies immediately (runtime only)")
+        print(f"\n{Colors.BOLD}Tmux Plugin Commands:{Colors.RESET}")
+        print("  tmux-exec-timeout <seconds>               - Set exec read timeout (default 10)")
         print(f"\n{Colors.BOLD}Depth Limit Commands:{Colors.RESET}")
-        print("  limit-list                        - Show depth/iteration limits")
-        print("  limit-set <key> <value>           - Set a depth limit")
+        print("  limit-depth-list                  - Show depth/iteration limits (from llm-models.json)")
+        print("  limit-depth-set <key> <value>     - Set a depth limit (persists to llm-models.json)")
         print(f"  Valid keys: {', '.join(sorted(PluginManager._LIMIT_KEYS.keys()))}")
+        print(f"\n{Colors.BOLD}Max Iterations Commands:{Colors.RESET}")
+        print("  limit-max-iteration-list          - Show max_tool_iterations (from llm-models.json)")
+        print("  limit-max-iteration-set <value>   - Set max_tool_iterations (persists to llm-models.json)")
+        print(f"  Default: {PluginManager._ITER_DEFAULT}  |  Runtime: !limit_max_iteration_set <value>")
         print(f"\n{Colors.BOLD}Gate Default Commands:{Colors.RESET}")
         print("  gate-list                                         - Show all gate defaults")
-        print("  gate-set db <table|*> <read|write> <true|false>  - Set DB gate default")
-        print("  gate-set <tool> <read|write> <true|false>         - Set tool gate default")
+        print("  llm-allow db <table|*> <read|write> <true|false>  - Set DB gate default (true=auto-allow)")
+        print("  llm-allow <tool> <read|write> <true|false>         - Set tool gate default (true=auto-allow)")
         print("  gate-reset                                        - Reset all gates to gated (false)")
-        print(f"  Valid tools: {', '.join(sorted(PluginManager._GATE_TOOLS.keys()))}")
+        print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
+        print(f"\n{Colors.BOLD}Sleep Gate Command:{Colors.RESET}")
+        print("  sleep-gate-allow <true|false>             - Set sleep gate default (true=auto-allow, false=gated)")
+        print(f"\n{Colors.BOLD}History Management Commands:{Colors.RESET}")
+        print("  history-list                              - Show history config and chain")
+        print("  history-chain-add <plugin_name>          - Add plugin_history_*.py to chain")
+        print("  history-chain-remove <plugin_name>       - Remove plugin from chain")
+        print("  history-chain-move <plugin_name> <pos>   - Move plugin to position in chain")
+        print("  history-maxctx <n>                       - Set agent-wide max history messages")
+        print(f"\n{Colors.BOLD}Session Configuration:{Colors.RESET}")
+        print("  max-users <n>                            - Set max simultaneous sessions")
+        print("  session-timeout <minutes>                - Set session idle timeout (0=disabled)")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
         print("  quit                              - Exit plugin manager")
@@ -1331,7 +1449,7 @@ class PluginManager:
 
         while True:
             try:
-                cmd = input(f"\n{Colors.CYAN}plugin-manager>{Colors.RESET} ").strip()
+                cmd = input(f"\n{Colors.CYAN}agentctl>{Colors.RESET} ").strip()
             except (KeyboardInterrupt, EOFError):
                 print("\nExiting...")
                 break
@@ -1478,6 +1596,14 @@ class PluginManager:
                     print(f"{Colors.RED}Usage: ratelimit-autodisable <type> <true|false>{Colors.RESET}")
                 else:
                     self.ratelimit_auto_disable(args[0], args[1].lower() in ("true", "1", "yes"))
+            elif action == "tmux-exec-timeout":
+                if not arg:
+                    print(f"{Colors.RED}Usage: tmux-exec-timeout <seconds>{Colors.RESET}")
+                else:
+                    try:
+                        self.tmux_exec_timeout(float(arg))
+                    except ValueError:
+                        print(f"{Colors.RED}Timeout must be a number (seconds){Colors.RESET}")
             elif action == "port-list":
                 self.port_list()
             elif action == "port-set":
@@ -1489,24 +1615,84 @@ class PluginManager:
                         self.port_set(args[0], int(args[1]))
                     except ValueError:
                         print(f"{Colors.RED}Port must be an integer{Colors.RESET}")
-            elif action == "limit-list":
-                self.limit_list()
-            elif action == "limit-set":
+            elif action == "limit-depth-list":
+                self.limit_depth_list()
+            elif action == "limit-depth-set":
                 args = arg.split()
                 if len(args) != 2:
-                    print(f"{Colors.RED}Usage: limit-set <key> <value>{Colors.RESET}")
+                    print(f"{Colors.RED}Usage: limit-depth-set <key> <value>{Colors.RESET}")
                     print(f"  Valid keys: {', '.join(sorted(self._LIMIT_KEYS.keys()))}")
                 else:
                     try:
-                        self.limit_set(args[0], int(args[1]))
+                        self.limit_depth_set(args[0], int(args[1]))
                     except ValueError:
                         print(f"{Colors.RED}Value must be an integer{Colors.RESET}")
+            elif action == "limit-max-iteration-list":
+                self.limit_max_iteration_list()
+            elif action == "limit-max-iteration-set":
+                if not arg:
+                    print(f"{Colors.RED}Usage: limit-max-iteration-set <value>{Colors.RESET}")
+                else:
+                    try:
+                        self.limit_max_iteration_set(int(arg))
+                    except ValueError:
+                        print(f"{Colors.RED}Value must be an integer{Colors.RESET}")
+            elif action == "history-list":
+                self.history_list()
+            elif action == "history-chain-add":
+                if not arg:
+                    print(f"{Colors.RED}Usage: history-chain-add <plugin_name>{Colors.RESET}")
+                else:
+                    self.history_chain_add(arg)
+            elif action == "history-chain-remove":
+                if not arg:
+                    print(f"{Colors.RED}Usage: history-chain-remove <plugin_name>{Colors.RESET}")
+                else:
+                    self.history_chain_remove(arg)
+            elif action == "history-chain-move":
+                args2 = arg.split()
+                if len(args2) < 2:
+                    print(f"{Colors.RED}Usage: history-chain-move <plugin_name> <position>{Colors.RESET}")
+                else:
+                    try:
+                        self.history_chain_move(args2[0], int(args2[1]))
+                    except ValueError:
+                        print(f"{Colors.RED}Position must be an integer{Colors.RESET}")
+            elif action == "history-maxctx":
+                if not arg:
+                    print(f"{Colors.RED}Usage: history-maxctx <n>{Colors.RESET}")
+                else:
+                    try:
+                        self.history_maxctx(int(arg))
+                    except ValueError:
+                        print(f"{Colors.RED}Must be an integer{Colors.RESET}")
+            elif action == "max-users":
+                if not arg:
+                    print(f"{Colors.RED}Usage: max-users <n>{Colors.RESET}")
+                else:
+                    try:
+                        self.set_max_users(int(arg))
+                    except ValueError:
+                        print(f"{Colors.RED}Must be an integer{Colors.RESET}")
+            elif action == "session-timeout":
+                if not arg:
+                    print(f"{Colors.RED}Usage: session-timeout <minutes>{Colors.RESET}")
+                else:
+                    try:
+                        self.set_session_timeout(int(arg))
+                    except ValueError:
+                        print(f"{Colors.RED}Must be an integer (minutes){Colors.RESET}")
             elif action == "gate-list":
                 self.gate_list()
-            elif action == "gate-set":
-                self.gate_set(arg.split())
+            elif action == "llm-allow":
+                self.llm_allow(arg.split())
             elif action == "gate-reset":
                 self.gate_reset()
+            elif action == "sleep-gate-allow":
+                if not arg or arg.lower() not in ("true", "false", "1", "0", "yes", "no"):
+                    print(f"{Colors.RED}Usage: sleep-gate-allow <true|false>{Colors.RESET}")
+                else:
+                    self.sleep_gate_allow(arg.lower() in ("true", "1", "yes"))
             else:
                 print(f"{Colors.RED}Unknown command: {action}{Colors.RESET}")
 
@@ -1553,6 +1739,153 @@ class PluginManager:
             print(f"\n{Colors.YELLOW}Cancelled{Colors.RESET}")
         except ValueError as e:
             print(f"{Colors.RED}Invalid input: {e}{Colors.RESET}")
+
+
+    # ------------------------------------------------------------------
+    # History chain management
+    # ------------------------------------------------------------------
+
+    def _get_history_cfg(self) -> dict:
+        """Return plugin_history_default config block (creates if missing)."""
+        self.config.setdefault("plugin_config", {}).setdefault("plugin_history_default", {})
+        return self.config["plugin_config"]["plugin_history_default"]
+
+    def _save_plugins_enabled(self) -> bool:
+        """Persist plugins-enabled.json."""
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(self.config, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"{Colors.RED}✗ Could not save plugins-enabled.json: {e}{Colors.RESET}")
+            return False
+
+    def _discover_history_plugins(self) -> list[str]:
+        """Find all plugin_history_*.py files in the same directory."""
+        import glob as _glob
+        pattern = os.path.join(os.path.dirname(self.config_path), "plugin_history_*.py")
+        files = _glob.glob(pattern)
+        return sorted([os.path.splitext(os.path.basename(f))[0] for f in files])
+
+    def history_list(self):
+        """List available and active history plugins."""
+        available = self._discover_history_plugins()
+        cfg = self._get_history_cfg()
+        chain = cfg.get("chain", ["plugin_history_default"])
+        agent_max_ctx = cfg.get("agent_max_ctx", 200)
+        max_users = self.config.get("max_users", 50)
+        timeout = self.config.get("session_idle_timeout_minutes", 60)
+
+        print(f"\n{Colors.BOLD}History Configuration:{Colors.RESET}")
+        print(f"  agent_max_ctx            : {agent_max_ctx} messages")
+        print(f"  max_users                : {max_users} simultaneous sessions")
+        timeout_str = f"{timeout} minutes" if timeout > 0 else "disabled"
+        print(f"  session_idle_timeout     : {timeout_str}")
+        print(f"\n{Colors.BOLD}Active chain (in order):{Colors.RESET}")
+        for i, name in enumerate(chain):
+            marker = f"{Colors.GREEN}✓{Colors.RESET}" if name in available else f"{Colors.RED}✗ MISSING{Colors.RESET}"
+            print(f"  [{i}] {name}  {marker}")
+        print(f"\n{Colors.BOLD}Available history plugins:{Colors.RESET}")
+        for name in available:
+            in_chain = name in chain
+            status = f"{Colors.GREEN}in chain{Colors.RESET}" if in_chain else "not in chain"
+            print(f"  {name}  ({status})")
+
+    def history_chain_add(self, plugin_name: str) -> bool:
+        """Append a history plugin to the chain."""
+        available = self._discover_history_plugins()
+        if plugin_name not in available:
+            print(f"{Colors.RED}✗ '{plugin_name}' not found. Available: {available}{Colors.RESET}")
+            return False
+        cfg = self._get_history_cfg()
+        chain = cfg.get("chain", ["plugin_history_default"])
+        if plugin_name in chain:
+            print(f"{Colors.YELLOW}'{plugin_name}' is already in the chain.{Colors.RESET}")
+            return True
+        chain.append(plugin_name)
+        cfg["chain"] = chain
+        if self._save_plugins_enabled():
+            print(f"{Colors.GREEN}✓ Added '{plugin_name}' to history chain (position {len(chain)-1}).{Colors.RESET}")
+            return True
+        return False
+
+    def history_chain_remove(self, plugin_name: str) -> bool:
+        """Remove a history plugin from the chain (cannot remove plugin_history_default)."""
+        if plugin_name == "plugin_history_default":
+            print(f"{Colors.RED}✗ Cannot remove plugin_history_default — it must always be first.{Colors.RESET}")
+            return False
+        cfg = self._get_history_cfg()
+        chain = cfg.get("chain", ["plugin_history_default"])
+        if plugin_name not in chain:
+            print(f"{Colors.RED}✗ '{plugin_name}' is not in the chain.{Colors.RESET}")
+            return False
+        chain.remove(plugin_name)
+        cfg["chain"] = chain
+        if self._save_plugins_enabled():
+            print(f"{Colors.GREEN}✓ Removed '{plugin_name}' from history chain.{Colors.RESET}")
+            return True
+        return False
+
+    def history_chain_move(self, plugin_name: str, new_pos: int) -> bool:
+        """Move a history plugin to a specific position (0 = first, but default is always 0)."""
+        if plugin_name == "plugin_history_default" and new_pos != 0:
+            print(f"{Colors.RED}✗ plugin_history_default must always be at position 0.{Colors.RESET}")
+            return False
+        cfg = self._get_history_cfg()
+        chain = cfg.get("chain", ["plugin_history_default"])
+        if plugin_name not in chain:
+            print(f"{Colors.RED}✗ '{plugin_name}' is not in the chain.{Colors.RESET}")
+            return False
+        if new_pos == 0 and plugin_name != "plugin_history_default":
+            print(f"{Colors.RED}✗ Position 0 is reserved for plugin_history_default.{Colors.RESET}")
+            return False
+        chain.remove(plugin_name)
+        chain.insert(new_pos, plugin_name)
+        cfg["chain"] = chain
+        if self._save_plugins_enabled():
+            print(f"{Colors.GREEN}✓ Moved '{plugin_name}' to position {new_pos}.{Colors.RESET}")
+            return True
+        return False
+
+    def history_maxctx(self, value: int) -> bool:
+        """Set agent_max_ctx in plugins-enabled.json."""
+        if value < 1:
+            print(f"{Colors.RED}✗ agent_max_ctx must be at least 1.{Colors.RESET}")
+            return False
+        if value > 100000:
+            print(f"{Colors.YELLOW}Warning: agent_max_ctx={value} is very large.{Colors.RESET}")
+        cfg = self._get_history_cfg()
+        old = cfg.get("agent_max_ctx", 200)
+        cfg["agent_max_ctx"] = value
+        if self._save_plugins_enabled():
+            print(f"{Colors.GREEN}✓ agent_max_ctx: {old} → {value}{Colors.RESET}")
+            return True
+        return False
+
+    def set_max_users(self, value: int) -> bool:
+        """Set max_users in plugins-enabled.json."""
+        if value < 1:
+            print(f"{Colors.RED}✗ max_users must be at least 1.{Colors.RESET}")
+            return False
+        old = self.config.get("max_users", 50)
+        self.config["max_users"] = value
+        if self._save_plugins_enabled():
+            print(f"{Colors.GREEN}✓ max_users: {old} → {value}{Colors.RESET}")
+            return True
+        return False
+
+    def set_session_timeout(self, minutes: int) -> bool:
+        """Set session_idle_timeout_minutes in plugins-enabled.json."""
+        if minutes < 0:
+            print(f"{Colors.RED}✗ Timeout must be 0 (disabled) or positive minutes.{Colors.RESET}")
+            return False
+        old = self.config.get("session_idle_timeout_minutes", 60)
+        self.config["session_idle_timeout_minutes"] = minutes
+        if self._save_plugins_enabled():
+            status = f"{minutes} minutes" if minutes > 0 else "disabled"
+            print(f"{Colors.GREEN}✓ session_idle_timeout: {old} → {status}{Colors.RESET}")
+            return True
+        return False
 
 
 def main():
@@ -1653,12 +1986,30 @@ def main():
                 return 1
             manager.ratelimit_auto_disable(sys.argv[2], val in ("true", "1", "yes"))
 
-        # Depth limit commands
-        elif cmd == "limit-list":
-            manager.limit_list()
-        elif cmd == "limit-set" and len(sys.argv) > 3:
+        # Tmux plugin commands
+        elif cmd == "tmux-exec-timeout" and len(sys.argv) > 2:
             try:
-                manager.limit_set(sys.argv[2], int(sys.argv[3]))
+                manager.tmux_exec_timeout(float(sys.argv[2]))
+            except ValueError:
+                print(f"{Colors.RED}✗ Timeout must be a number (seconds){Colors.RESET}")
+                return 1
+
+        # Depth limit commands
+        elif cmd == "limit-depth-list":
+            manager.limit_depth_list()
+        elif cmd == "limit-depth-set" and len(sys.argv) > 3:
+            try:
+                manager.limit_depth_set(sys.argv[2], int(sys.argv[3]))
+            except ValueError:
+                print(f"{Colors.RED}✗ Value must be an integer{Colors.RESET}")
+                return 1
+
+        # Max iterations commands
+        elif cmd == "limit-max-iteration-list":
+            manager.limit_max_iteration_list()
+        elif cmd == "limit-max-iteration-set" and len(sys.argv) > 2:
+            try:
+                manager.limit_max_iteration_set(int(sys.argv[2]))
             except ValueError:
                 print(f"{Colors.RED}✗ Value must be an integer{Colors.RESET}")
                 return 1
@@ -1666,13 +2017,56 @@ def main():
         # Gate commands
         elif cmd == "gate-list":
             manager.gate_list()
-        elif cmd == "gate-set":
-            # gate-set db <table> <read|write> <true|false>
-            # gate-set <tool> <read|write> <true|false>
-            if not manager.gate_set(sys.argv[2:]):
+        elif cmd == "llm-allow":
+            # llm-allow db <table> <read|write> <true|false>
+            # llm-allow <tool> <read|write> <true|false>
+            if not manager.llm_allow(sys.argv[2:]):
                 return 1
         elif cmd == "gate-reset":
             manager.gate_reset()
+        elif cmd == "sleep-gate-allow" and len(sys.argv) > 2:
+            val = sys.argv[2].lower()
+            if val not in ("true", "false", "1", "0", "yes", "no"):
+                print(f"{Colors.RED}✗ Value must be true or false{Colors.RESET}")
+                return 1
+            manager.sleep_gate_allow(val in ("true", "1", "yes"))
+
+        # History management commands
+        elif cmd == "history-list":
+            manager.history_list()
+        elif cmd == "history-chain-add" and len(sys.argv) > 2:
+            if not manager.history_chain_add(sys.argv[2]):
+                return 1
+        elif cmd == "history-chain-remove" and len(sys.argv) > 2:
+            if not manager.history_chain_remove(sys.argv[2]):
+                return 1
+        elif cmd == "history-chain-move" and len(sys.argv) > 3:
+            try:
+                manager.history_chain_move(sys.argv[2], int(sys.argv[3]))
+            except ValueError:
+                print(f"{Colors.RED}✗ Position must be an integer{Colors.RESET}")
+                return 1
+        elif cmd == "history-maxctx" and len(sys.argv) > 2:
+            try:
+                if not manager.history_maxctx(int(sys.argv[2])):
+                    return 1
+            except ValueError:
+                print(f"{Colors.RED}✗ agent_max_ctx must be an integer{Colors.RESET}")
+                return 1
+        elif cmd == "max-users" and len(sys.argv) > 2:
+            try:
+                if not manager.set_max_users(int(sys.argv[2])):
+                    return 1
+            except ValueError:
+                print(f"{Colors.RED}✗ max_users must be an integer{Colors.RESET}")
+                return 1
+        elif cmd == "session-timeout" and len(sys.argv) > 2:
+            try:
+                if not manager.set_session_timeout(int(sys.argv[2])):
+                    return 1
+            except ValueError:
+                print(f"{Colors.RED}✗ Timeout must be an integer (minutes){Colors.RESET}")
+                return 1
 
         else:
             print(f"{Colors.RED}Unknown command: {cmd}{Colors.RESET}")

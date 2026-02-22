@@ -199,6 +199,48 @@ class SlackClientPlugin(BasePlugin):
             log.error(f"Error handling Socket Mode request: {e}", exc_info=True)
 
     # =========================================================================
+    # Slack mrkdwn de-formatting
+    # =========================================================================
+
+    # Slack auto-formats URLs, mentions, and channels in event text payloads.
+    # e.g. "bash new-node.sh" → "bash <http://new-node.sh|new-node.sh>"
+    # (.sh is a valid TLD so Slack auto-links it)
+    # This corrupts shell commands sent via !tmux exec and similar paths.
+    _SLACK_LINK_RE = re.compile(
+        r'<'
+        r'(?:https?://[^|>]+)\|'   # URL before the pipe — discard
+        r'([^>]+)'                  # display text after the pipe — keep
+        r'>'
+    )
+    _SLACK_BARE_URL_RE = re.compile(
+        r'<(https?://[^|>]+)>'      # bare URL with no pipe — keep URL
+    )
+    _SLACK_CHANNEL_RE = re.compile(
+        r'<#([A-Z0-9]+)(?:\|([^>]+))?>'  # channel: <#C123|name> or <#C123>
+    )
+
+    @classmethod
+    def _deformat_slack_text(cls, text: str) -> str:
+        """Strip Slack mrkdwn auto-formatting from incoming message text.
+
+        Converts:
+          <http://new-node.sh|new-node.sh>  →  new-node.sh
+          <https://example.com>              →  https://example.com
+          <#C123ABC|general>                 →  #general
+          <#C123ABC>                         →  #C123ABC
+        User mentions (<@U123>) are left intact — handled separately.
+        """
+        # URL with display text: keep display text
+        text = cls._SLACK_LINK_RE.sub(r'\1', text)
+        # Bare URL (no pipe): keep URL itself
+        text = cls._SLACK_BARE_URL_RE.sub(r'\1', text)
+        # Channel references: use name if available
+        def _channel_repl(m):
+            return f"#{m.group(2)}" if m.group(2) else f"#{m.group(1)}"
+        text = cls._SLACK_CHANNEL_RE.sub(_channel_repl, text)
+        return text
+
+    # =========================================================================
     # Event processing
     # =========================================================================
 
@@ -223,16 +265,20 @@ class SlackClientPlugin(BasePlugin):
         """Handle message event from Slack."""
         channel_id = event.get("channel")
         user_id = event.get("user")
-        text = event.get("text", "").strip()
+        raw_text = event.get("text", "").strip()
         thread_ts = event.get("thread_ts") or event.get("ts")  # Use thread or message ts
         message_ts = event.get("ts")
 
-        if not text or not channel_id:
+        if not raw_text or not channel_id:
             log.debug("Ignoring empty message or missing channel")
             return
 
+        # Strip Slack auto-formatting (auto-linked URLs, channels, etc.)
+        text = self._deformat_slack_text(raw_text)
+
         log.info(f"Slack message: channel={channel_id}, user={user_id}, thread={thread_ts}")
-        log.debug(f"Message text: {text}")
+        log.debug(f"Message text (raw): {raw_text}")
+        log.debug(f"Message text (clean): {text}")
 
         # Process the message through the agent
         await self._process_user_message(channel_id, thread_ts, user_id, text, message_ts)
@@ -241,12 +287,15 @@ class SlackClientPlugin(BasePlugin):
         """Handle app_mention event (when bot is @mentioned)."""
         channel_id = event.get("channel")
         user_id = event.get("user")
-        text = event.get("text", "").strip()
+        raw_text = event.get("text", "").strip()
         thread_ts = event.get("thread_ts") or event.get("ts")
         message_ts = event.get("ts")
 
-        if not text or not channel_id:
+        if not raw_text or not channel_id:
             return
+
+        # Strip Slack auto-formatting first (auto-linked URLs, channels, etc.)
+        text = self._deformat_slack_text(raw_text)
 
         # Remove the bot mention from text (e.g., "<@U12345> hello" -> "hello")
         # Slack mentions are in format <@U12345>
@@ -255,6 +304,7 @@ class SlackClientPlugin(BasePlugin):
         cleaned_text = " ".join(cleaned_words).strip()
 
         log.info(f"Slack app_mention: channel={channel_id}, user={user_id}, thread={thread_ts}")
+        log.debug(f"Cleaned text (raw): {raw_text}")
         log.debug(f"Cleaned text: {cleaned_text}")
 
         # Process through agent

@@ -11,16 +11,23 @@
     "plugin_search_xai",
     "plugin_proxy_llama",
     "plugin_client_slack",
-    "plugin_urlextract_tavily"
+    "plugin_urlextract_tavily",
+    "plugin_tmux"
   ],
   "plugin_config": {
+    "plugin_history_default": {
+      "agent_max_ctx": 200,
+      "chain": [
+        "plugin_history_default"
+      ]
+    },
     "plugin_proxy_llama": {
-      "enabled": false,
+      "enabled": true,
       "llama_port": 11434,
       "llama_host": "0.0.0.0"
     },
     "plugin_client_slack": {
-      "enabled": false,
+      "enabled": true,
       "slack_port": 8766,
       "slack_host": "0.0.0.0",
       "inter_turn_timeout": 30
@@ -33,7 +40,33 @@
     "plugin_client_api": {
       "enabled": true,
       "api_port": 8767,
-      "api_host": "0.0.0.0"
+      "api_host": "0.0.0.0",
+      "OUTBOUND_AGENT_ALLOWED_COMMANDS": [],
+      "OUTBOUND_AGENT_BLOCKED_COMMANDS": []
+    },
+    "plugin_tmux": {
+      "enabled": true,
+      "TMUX_HISTORY_LIMIT": 200,
+      "TMUX_EXEC_TIMEOUT": 10.0,
+      "TMUX_ALLOWED_COMMANDS": [],
+      "TMUX_BLOCKED_COMMANDS": [
+        "rm -rf",
+        "rm -f /",
+        "dd if=",
+        "mkfs",
+        ":(){ :|:& };:",
+        "> /dev/sd",
+        "chmod -r /",
+        "chown -r /",
+        "curl | bash",
+        "curl | sh",
+        "wget | bash",
+        "wget | sh",
+        "shutdown",
+        "reboot",
+        "halt",
+        "poweroff"
+      ]
     }
   },
   "rate_limits": {
@@ -71,10 +104,18 @@
       "calls": 5,
       "window_seconds": 60,
       "auto_disable": false
+    },
+    "tmux": {
+      "calls": 30,
+      "window_seconds": 60,
+      "auto_disable": true
     }
   },
   "metadata": {
-    "last_modified": "2026-02-18",
-    "notes": "Configuration for enabled plugins. Modified by plugin-manager.py"
-  }
+    "last_modified": "2026-02-21",
+    "notes": "Configuration for enabled plugins. Modified by agentctl.py"
+  },
+  "default_model": "gemini25fl",
+  "max_users": 50,
+  "session_idle_timeout_minutes": 60
 }

@@ -170,11 +170,40 @@
       "tools": [
         "url_extract"
       ]
+    },
+    "plugin_tmux": {
+      "type": "data_tool",
+      "file": "plugin_tmux.py",
+      "description": "PTY shell sessions with rolling history (tmux-like). Provides tmux_new, tmux_exec, tmux_ls, tmux_kill_session, tmux_kill_server, tmux_history, tmux_history_limit tools.",
+      "dependencies": [],
+      "env_vars": [],
+      "config_files": [],
+      "priority": 500,
+      "tools": [
+        "tmux_new",
+        "tmux_exec",
+        "tmux_ls",
+        "tmux_kill_session",
+        "tmux_kill_server",
+        "tmux_history",
+        "tmux_history_limit"
+      ],
+      "gate_tools": {
+        "tmux":                { "operations": ["write"],         "group": true },
+        "tmux_new":            { "operations": ["write"] },
+        "tmux_exec":           { "operations": ["write"] },
+        "tmux_ls":             { "operations": ["write"] },
+        "tmux_history":        { "operations": ["write"] },
+        "tmux_kill_session":   { "operations": ["write"] },
+        "tmux_kill_server":    { "operations": ["write"] },
+        "tmux_history_limit":  { "operations": ["write"] },
+        "tmux_call_limit":     { "operations": ["read", "write"] }
+      }
     }
   },
   "metadata": {
     "schema_version": "1.0",
-    "last_updated": "2026-02-18",
+    "last_updated": "2026-02-20",
     "notes": "Plugin manifest for MCP agent system. Renamed plugins to type-prefixed scheme. Added plugin_search_ddgs, plugin_search_tavily, plugin_search_xai, plugin_urlextract_tavily. Added plugin_client_api for programmatic/swarm access."
   }
 }

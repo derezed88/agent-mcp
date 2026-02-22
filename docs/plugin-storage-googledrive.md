@@ -47,5 +47,5 @@ FOLDER_ID=<Google Drive folder ID>
 ## Enable
 
 ```bash
-python plugin-manager.py enable plugin_storage_googledrive
+python agentctl.py enable plugin_storage_googledrive
 ```

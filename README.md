@@ -4,6 +4,286 @@ A multi-client AI agent server with a plugin architecture. Maintains persistent 
 
 ---
 
+## Why Start Here Instead of From Scratch
+
+Building a multi-LLM agent from scratch means solving: async session management, streaming SSE, multi-interface adapters (OpenAI vs. Ollama wire format alone is a week of work), per-tool gate/permission systems, rate limiting with auto-disable, tiered system prompt assembly, swarm coordination with depth guards, and a plugin discovery mechanism. This codebase has all of that working and tested across production use.
+
+You inherit ~16,000 lines solving infrastructure so you can write the 100 lines that make your agent unique.
+
+This system serves two distinct developer profiles. Both get a foundation rather than a blank page.
+
+---
+
+### Audience 1: Agent System Designers
+
+You want to deploy a capable multi-LLM agent and shape its behavior — without writing Python.
+
+**You don't write code. You design behavior.**
+
+#### 5-Minute Start
+
+```bash
+git clone https://github.com/derezed88/agent-mcp.git
+cd agent-mcp
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # add at least one API key (e.g. GEMINI_API_KEY)
+python agent-mcp.py           # server is running
+python shell.py               # connect and start chatting
+```
+
+That's a working multi-tool LLM agent with MySQL, Google Drive, web search, and Slack support available as plugins.
+
+#### Pick Your LLM — Or Use Several
+
+`llm-models.json` is the model registry. Add an entry, drop the API key in `.env`, restart. No code. Out of the box:
+
+- **Local**: Qwen2.5-7B via llama.cpp (no API cost, 32k context)
+- **OpenAI**: gpt-4o-mini, gpt-5-mini, gpt-5-nano
+- **Google**: Gemini 2.5 Flash / Flash-Lite
+- **xAI**: Grok 4 Fast (reasoning and non-reasoning)
+
+Switch the active model at runtime: `!model gemini25f` — persisted to disk immediately, no restart.
+
+#### Control What the LLM Can Touch
+
+Gates are per-tool, per-table read/write permissions. The pattern is `!<toolname>_gate_read` / `!<toolname>_gate_write`. Set defaults in `gate-defaults.json` or change live in chat:
+
+```
+!google_drive_gate_read false      # auto-allow Drive reads (gate off)
+!db_query_gate_write * false       # auto-allow DB writes for all tables
+!sysprompt_gate_write false        # auto-allow system prompt updates
+!search_ddgs_gate_read false       # auto-allow DuckDuckGo searches
+```
+
+`true` = gated (human must approve each call), `false` = auto-allow. Non-interactive clients (open-webui, Slack) auto-reject gated calls rather than hanging — the LLM is told why and asks for alternatives. Use `!gate_list` to see live status of every gate.
+
+#### Tune Agent Behavior via Text Files
+
+The system prompt is 22 modular section files — not a monolithic blob. Edit any section, add new ones, or assign a different folder to each model:
+
+```
+system_prompt/
+├── 000_default/         ← 22 section files (behavior, memory chain, tool rules...)
+└── 001_blank/           ← minimal alternative for specialized deployments
+```
+
+Give a local low-power model a stripped prompt; give frontier models the full PDDS memory chain. Each model's folder is set in `llm-models.json` — one field, no code.
+
+#### A Self-Learning, Self-Evolving System
+
+The combination of persistent memory, writable system prompt, and LLM access to the admin command surface enables something beyond simple configuration: **a system that can learn from interactions and evolve its own behavior over time.**
+
+The pieces that make this possible:
+
+- **Persistent memory via MySQL and Google Drive** — the LLM stores facts, preferences, and outcomes across sessions. It can query what it learned yesterday and act on it today.
+- **Writable, modular system prompt** — the LLM can append, replace, or delete sections of its own operating rules. A rule learned in one conversation becomes part of how it behaves in all future conversations.
+- **Full admin command access** — gate permissions, model selection, context limits, and rate limits are all tools the LLM can invoke. Tell it "use the local model for searches from now on" and it switches and remembers.
+- **PDDS memory hierarchy** — the agent follows a defined lookup chain (pretrain → DB → Drive → search) so it automatically draws on accumulated knowledge before reaching out to external sources.
+
+The result: an agent that gets better at your specific workflows the more you use it. It learns your terminology, stores your preferences, tightens its own behavior rules, and adapts its tool usage — without you writing code or editing config files. The operator retains control through gates and the system prompt's keyword guards, but within those bounds the agent is free to evolve.
+
+This is the foundation for building an agent that isn't just a stateless tool — it's an accumulating, adapting system.
+
+#### Runtime Admin Without Code
+
+All configuration is JSON + commands. Nothing requires a restart:
+
+```
+!model gemini25f                       # switch LLM
+!search_ddgs_gate_read false           # auto-allow DuckDuckGo searches
+!maxctx 50                             # set history window
+!session                               # list active sessions with shorthand IDs
+!session 102 delete                    # drop a session
+!limit_set max_agent_call_depth 2      # raise swarm recursion limit
+```
+
+Rate limits, session timeouts, tool permissions, model timeouts — all configurable live via `!commands` or `plugin-manager.py` CLI.
+
+**The LLM has access to the same command surface you do.** Gate commands, model switching, session inspection, system prompt edits, and limit adjustments are all available as tools the LLM can call. You can instruct the agent in natural language ("switch to gemini", "allow drive reads from now on") and it executes the corresponding command itself, without you typing it.
+
+#### agentctl.py — Offline System Configuration
+
+`agentctl.py` is the operator's configuration tool, run while the server is stopped (or to set persistent defaults before first start). It edits `plugins-enabled.json`, `llm-models.json`, and `gate-defaults.json` directly. It also has an interactive menu mode (`python agentctl.py` with no arguments).
+
+**Plugins:**
+```bash
+python agentctl.py list                          # show all plugins and enabled status
+python agentctl.py enable plugin_tmux            # enable a plugin
+python agentctl.py disable plugin_client_slack   # disable a plugin
+python agentctl.py info plugin_database_mysql    # show deps, env vars, tools
+```
+
+**Models:**
+```bash
+python agentctl.py models                        # list all models
+python agentctl.py model gemini25f               # set default model
+python agentctl.py model-add                     # interactive: add a new model
+python agentctl.py model-enable gpt4om           # enable a disabled model
+python agentctl.py model-disable gpt4om          # disable without removing
+python agentctl.py model-context gemini25f 200   # set context window
+python agentctl.py model-llmcall gemini25f true  # allow model to call other LLMs
+python agentctl.py model-timeout gemini25f 120   # set LLM delegation timeout (s)
+```
+
+**Gate defaults** (persisted to `gate-defaults.json`, loaded at every startup):
+```bash
+python agentctl.py gate-list                          # show all gate defaults
+python agentctl.py llm-allow google_drive read false   # auto-allow Drive reads by default
+python agentctl.py llm-allow db * write false          # auto-allow all DB writes by default
+python agentctl.py gate-reset                         # restore factory defaults
+```
+
+**Rate limits:**
+```bash
+python agentctl.py ratelimit-list                     # show current limits
+python agentctl.py ratelimit-set search 10 30         # 10 calls per 30s for search tools
+python agentctl.py ratelimit-autodisable llm_call true  # auto-disable on breach
+```
+
+**Ports, limits, session defaults:**
+```bash
+python agentctl.py port-list                          # show configured ports
+python agentctl.py port-set llama_port 11435          # change llama proxy port
+python agentctl.py limit-set max_agent_call_depth 2   # raise swarm recursion limit
+python agentctl.py history-maxctx 100                 # set global history window
+python agentctl.py max-users 20                       # max simultaneous sessions
+python agentctl.py session-timeout 120                # idle session timeout (minutes)
+```
+
+**History chain** (for custom history backends):
+```bash
+python agentctl.py history-list                          # show chain and plugins
+python agentctl.py history-chain-add plugin_history_vec  # append custom plugin
+python agentctl.py history-chain-remove plugin_history_vec
+```
+
+---
+
+### Audience 2: Code-Level Developers
+
+You're building custom integrations, new tools, or specialized agent behaviors on top of a working foundation.
+
+**You write the 100 lines that make your agent unique. The other 15,900 are already here.**
+
+#### 5-Minute Start for a New Plugin
+
+The smallest working example in the codebase is [`plugin_search_ddgs.py`](plugin_search_ddgs.py) — 111 lines, fully functional:
+
+```python
+class SearchDdgsPlugin(BasePlugin):
+    PLUGIN_NAME    = "plugin_search_ddgs"
+    PLUGIN_VERSION = "1.0.0"
+    PLUGIN_TYPE    = "data_tool"
+    DESCRIPTION    = "Web search via DuckDuckGo (no API key required)"
+    DEPENDENCIES   = ["ddgs"]
+
+    def get_tools(self) -> dict:
+        return {"lc": [StructuredTool.from_function(
+            coroutine=search_ddgs_executor,
+            name="search_ddgs",
+            args_schema=_DdgsSearchArgs,
+        )]}
+```
+
+That's it. [`plugin_loader.py`](plugin_loader.py) discovers it, wires it into the gate system, rate limiter, and LLM tool dispatch automatically. Declare the schema with Pydantic, return the tool, done.
+
+#### The Tool Ecosystem Is Already Populated
+
+[`tools.py`](tools.py) (1,249 lines) defines the core tool layer. Plugins extend it. What's already working:
+
+| Category | Tools |
+|---|---|
+| Memory / storage | `db_query` (MySQL), `google_drive` (list/read/write/search) |
+| Search | `search_ddgs` (no API key), `search_google`, `search_tavily`, `search_xai` |
+| Web | `url_extract` (Tavily content extraction) |
+| System | `get_system_info`, `read_system_prompt`, `update_system_prompt` |
+| LLM delegation | `llm_clean_text`, `llm_clean_tool`, `at_llm` (full context), `agent_call` (swarm) |
+| Inspection | `limit_list`, `gate_list`, `session`, `llm_list` |
+| Terminal | `tmux_new`, `tmux_exec`, `tmux_history` (7 sub-tools via [`plugin_tmux.py`](plugin_tmux.py)) |
+
+New tools you add are immediately available to all connected LLMs — no restart, because registration happens at load time.
+
+#### History Is a Swappable Chain
+
+[`plugin_history_default.py`](plugin_history_default.py) provides a sliding-window implementation. The contract is two methods:
+
+```python
+def process(history, session, model_cfg) -> list[dict]:
+    """Called per-request. Returns trimmed history."""
+
+def on_model_switch(session, old_model, new_model, ...) -> list[dict]:
+    """Called immediately on !model switch."""
+```
+
+Swap it for Redis, SQLite, or a vector store by implementing a new `plugin_history_*.py`. The chain is configured in `plugins-enabled.json`:
+
+```json
+"chain": ["plugin_history_default", "plugin_history_custom"]
+```
+
+Each plugin in the chain receives the output of the previous one — composable history processing.
+
+#### Swarm Architecture Is Already Wired
+
+[`plugin_client_api.py`](plugin_client_api.py) exposes:
+
+```
+POST /api/v1/submit              ← submit message or command
+GET  /api/v1/stream/{id}         ← SSE stream (tok, gate, done, error events)
+POST /api/v1/gate/{gate_id}      ← respond to a gate programmatically
+GET  /api/v1/sessions            ← list active sessions
+```
+
+`agent_call(agent_url, message)` lets any LLM call any other agent-mcp instance. Depth guards (`max_at_llm_depth`, `max_agent_call_depth`) prevent recursive runaway. Swarm session IDs are deterministic — repeated calls from the same session to the same remote agent reuse the same remote session, preserving history across calls.
+
+Drive a session programmatically in ~10 lines via [`api_client.py`](api_client.py):
+
+```python
+from api_client import AgentClient
+client = AgentClient("http://localhost:8767")
+response = await client.send("!model")
+async for token in client.stream("summarise my drive files"):
+    print(token, end="", flush=True)
+```
+
+#### What You'd Have to Build Without This
+
+The infrastructure already solved here, that you would otherwise spend weeks on:
+
+- Async session management with per-client queues (`state.py`)
+- SSE streaming with keepalives across all four client types
+- OpenAI vs. Ollama wire format detection and translation (`plugin_proxy_llama.py`)
+- Per-tool gate UI with interactive shell approval and auto-reject for non-interactive clients
+- Rate limiting by tool type with auto-disable on breach (`agents.py:check_rate_limit`)
+- Bare-JSON tool call extraction for local models that don't use the native function-calling API
+- Deterministic swarm session ID derivation and one-hop depth guards
+- Modular system prompt assembly with per-model folder assignment
+- Plugin dependency validation, env-var checking, and priority-ordered load
+
+#### The Plugin Contract Reference
+
+```python
+class BasePlugin(ABC):
+    PLUGIN_NAME: str       # unique, matches filename
+    PLUGIN_VERSION: str
+    PLUGIN_TYPE: str       # "data_tool" or "client_interface"
+    DESCRIPTION: str
+    DEPENDENCIES: List[str]  # pip package names — validated at load time
+
+    def init(self, config: dict) -> bool: ...      # connect, validate env
+    def shutdown(self) -> None: ...
+    def get_tools(self) -> dict: ...               # {"lc": [StructuredTool, ...]}
+    def get_gate_tools(self) -> dict: ...          # declares gate types per tool
+    def get_routes(self) -> List[Route]: ...       # client_interface only
+    def get_commands(self) -> dict: ...            # optional !command handlers
+    def get_help(self) -> str: ...                 # optional help text
+```
+
+See [`plugin_search_ddgs.py`](plugin_search_ddgs.py) (111 lines) for the minimal working pattern. See [`plugin_client_api.py`](plugin_client_api.py) (~300 lines) for a full client interface with SSE, gates, and session management.
+
+---
+
 ## Technical Overview
 
 ### LangChain LLM Abstraction
@@ -81,7 +361,7 @@ Every tool call passes through `check_human_gate()` before execution. Gates are 
 | `sysprompt_write` | `!sysprompt_gate_write true/false` | System prompt writes |
 | `session` / `model` / `reset` | `!session_gate_read/write true/false` etc. | Per operation |
 
-Gate defaults persist across restarts via `gate-defaults.json` (managed with `plugin-manager.py gate-set`).
+Gate defaults persist across restarts via `gate-defaults.json` (managed with `agentctl.py llm-allow`).
 
 Non-interactive clients (llama proxy, Slack) auto-reject gated calls immediately with an instructive message to the LLM. API clients get a 2-second window for programmatic approval.
 
@@ -208,19 +488,33 @@ Agent B ────HTTP──►    │   ChatOpenAI              │──► 
 
 ## Plugins
 
-| Plugin | Type | What it adds |
+**Client interfaces** — how users and other agents connect:
+
+| Plugin | Port | What it adds |
 |---|---|---|
-| `plugin_client_shellpy` | client_interface | shell.py terminal client (SSE, port 8765) |
-| `plugin_proxy_llama` | client_interface | OpenAI/Ollama API (configurable port, default 11434) |
-| `plugin_client_slack` | client_interface | Slack bidirectional interface |
-| `plugin_client_api` | client_interface | JSON/SSE HTTP API for programmatic access and swarm (port 8767) |
-| `plugin_database_mysql` | data_tool | `db_query` — SQL against MySQL |
-| `plugin_storage_googledrive` | data_tool | `google_drive` — CRUD within authorised folder |
-| `plugin_search_ddgs` | data_tool | `search_ddgs` — DuckDuckGo (no API key) |
-| `plugin_search_tavily` | data_tool | `search_tavily` — AI-curated results |
-| `plugin_search_xai` | data_tool | `search_xai` — Grok x_search (web + X/Twitter) |
-| `plugin_search_google` | data_tool | `search_google` — Gemini grounding |
-| `plugin_urlextract_tavily` | data_tool | `url_extract` — web page content extraction |
+| `plugin_client_shellpy` | 8765 | Interactive terminal (`shell.py`) with streaming and gate approval UI |
+| `plugin_proxy_llama` | 11434 | OpenAI/Ollama-compatible proxy for open-webui, LM Studio, Enchanted, etc. |
+| `plugin_client_slack` | — | Slack bidirectional bot via Socket Mode; per-thread sessions |
+| `plugin_client_api` | 8767 | JSON/SSE HTTP API for programmatic access and agent-to-agent (swarm) calls |
+
+**Data tools** — what the LLM can read and write:
+
+| Plugin | Tool(s) | What it adds |
+|---|---|---|
+| `plugin_database_mysql` | `db_query` | SQL against MySQL; per-table read/write gates |
+| `plugin_storage_googledrive` | `google_drive` | List, read, write, search files within an authorised Drive folder |
+| `plugin_search_ddgs` | `search_ddgs` | DuckDuckGo web search — no API key required |
+| `plugin_search_tavily` | `search_tavily` | Tavily AI-curated search results |
+| `plugin_search_xai` | `search_xai` | xAI Grok search (web + X/Twitter) |
+| `plugin_search_google` | `search_google` | Google search via Gemini grounding |
+| `plugin_urlextract_tavily` | `url_extract` | Extract full text content from any URL via Tavily |
+| `plugin_tmux` | `tmux_new`, `tmux_exec`, `tmux_ls`, `tmux_kill_session`, `tmux_kill_server`, `tmux_history`, `tmux_history_limit` | Persistent PTY shell sessions — LLM can run shell commands and read output; whitelist/blacklist configurable |
+
+**History** — how conversation context is managed:
+
+| Plugin | What it adds |
+|---|---|
+| `plugin_history_default` | Sliding-window history trimming: keeps last N messages where N = min(agent_max_ctx, model.max_context). Always first in the chain. Additional `plugin_history_*.py` plugins can be appended to the chain for compression, vector retrieval, or custom strategies. |
 
 Manage plugins:
 
@@ -254,5 +548,5 @@ python plugin-manager.py disable <plugin_name>
 | `.env` | API keys and credentials (never commit) |
 | `llm-models.json` | Model registry — `type`, `host`, `env_key`, `enabled`, `tool_call_available`, `system_prompt_folder` |
 | `plugins-enabled.json` | Active plugins, rate limits, per-plugin config |
-| `gate-defaults.json` | Gate auto-allow defaults loaded at startup (managed via `plugin-manager.py gate-set`) |
+| `gate-defaults.json` | Gate auto-allow defaults loaded at startup (managed via `agentctl.py llm-allow`) |
 | `system_prompt/<folder>/` | Modular system prompt sections; `000_default/` ships with the repo |

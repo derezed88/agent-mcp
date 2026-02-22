@@ -1,0 +1,12 @@
+## tool-limits: limit_list and limit_set tool definitions
+
+### limit_list() → str
+List all configurable depth and iteration limits with their current values and descriptions.
+Valid keys include: max_at_llm_depth, max_agent_call_depth.
+Read-only. Requires read gate approval (controlled by !limit_list_gate_read, default: gated).
+
+### limit_set(key: str, value: int) → str
+Update a configurable depth or iteration limit and persist it to llm-models.json.
+Changes take effect after agent restart.
+Valid keys: max_at_llm_depth, max_agent_call_depth.
+Requires write gate approval (controlled by !limit_set_gate_write, default: gated).

@@ -1,0 +1,15 @@
+## tool-session-model-reset: session, model, and reset tool definitions
+
+### session(action: str, session_id: str = "") → str
+Manage agent sessions.
+- action="list"   — list all active sessions with their IDs, model, and history size. Requires read gate approval.
+- action="delete" — delete a session by ID (shorthand integer or full session ID). Requires write gate approval.
+
+### model(action: str, model_key: str = "") → str
+Manage the active LLM model for this session.
+- action="list" — show all available models (current model marked). Always allowed.
+- action="set"  — switch to the named model (model_key required). Requires write gate approval.
+
+### reset() → str
+Clear conversation history for the current session.
+Requires write gate approval (controlled by !reset_gate_write, default: gated).
