@@ -7,12 +7,12 @@
 #
 # Usage (local, same machine):
 #   cd /some/target/dir
-#   ./setup-agent-mcp.sh --source-dir /home/markj/projects/kaliLinuxNWScripts/mymcp
+#   ./setup-agent-mcp.sh --source-dir /path/to/your/agent-mcp/install
 #
 # Usage (remote machine — SSH back to the dev host to pull secrets/config):
-#   ./setup-agent-mcp.sh --source-host 192.168.10.111 \
-#                        --source-dir /home/markj/projects/kaliLinuxNWScripts/mymcp \
-#                        [--source-user markj] [--branch <branch>] [--name <dirname>]
+#   ./setup-agent-mcp.sh --source-host 192.168.1.10 \
+#                        --source-dir /path/to/your/agent-mcp/install \
+#                        [--source-user <user>] [--branch <branch>] [--name <dirname>]
 #
 # Options:
 #   --branch <branch>       Git branch to check out after clone (default: main)

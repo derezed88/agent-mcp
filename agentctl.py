@@ -1066,9 +1066,13 @@ class PluginManager:
     # db_query is handled separately (per-table keys in the "db" section).
     _CORE_GATE_TOOLS: dict[str, list[str]] = {
         "at_llm":          ["write"],
-        "gate_list":       ["read"],
-        "limit_list":      ["read"],
-        "limit_set":       ["write"],
+        "gate_list":            ["read"],
+        "limit_depth_list":     ["read"],
+        "limit_depth_set":      ["write"],
+        "limit_rate_list":          ["read"],
+        "limit_rate_set":           ["write"],
+        "limit_max_iteration_list": ["read"],
+        "limit_max_iteration_set":  ["write"],
         "search_ddgs":     ["read"],
         "search_google":   ["read"],
         "search_tavily":   ["read"],
@@ -1079,6 +1083,7 @@ class PluginManager:
         "session":         ["read", "write"],
         "model":           ["write"],
         "reset":           ["write"],
+        "sleep":           ["read"],
     }
 
     def _load_plugin_gate_tools(self) -> dict[str, list[str]]:
@@ -1259,9 +1264,13 @@ class PluginManager:
     # ------------------------------------------------------------------
 
     _LIMIT_KEYS: dict[str, str] = {
-        "max_at_llm_depth":    "Max nested at_llm hops before rejection (1 = no recursion)",
+        "max_at_llm_depth":     "Max nested at_llm hops before rejection (1 = no recursion)",
         "max_agent_call_depth": "Max nested agent_call hops before rejection (1 = no recursion)",
     }
+
+    _ITER_KEY = "max_tool_iterations"
+    _ITER_DEFAULT = 10
+    _ITER_DESC = "Max LLM<->tool round-trips per request before [Max iterations] is emitted"
 
     def _load_limits(self) -> dict:
         """Load limits section from llm-models.json."""
@@ -1285,7 +1294,7 @@ class PluginManager:
             print(f"{Colors.RED}Error saving limit: {e}{Colors.RESET}")
             return False
 
-    def limit_list(self):
+    def limit_depth_list(self):
         """List all depth/iteration limits from llm-models.json."""
         limits = self._load_limits()
 
@@ -1299,12 +1308,12 @@ class PluginManager:
             print(f"  {key:<26} {str(val):>6}  {Colors.GRAY}{desc}{Colors.RESET}")
 
         print()
-        print(f"  Set: {Colors.BOLD}limit-set <key> <value>{Colors.RESET}")
-        print(f"  {Colors.CYAN}Changes take effect after restarting agent-mcp.py{Colors.RESET}")
+        print(f"  Set: {Colors.BOLD}limit-depth-set <key> <value>{Colors.RESET}")
+        print(f"  {Colors.CYAN}Persists to llm-models.json; runtime !limit_depth_set takes effect immediately{Colors.RESET}")
         print()
 
-    def limit_set(self, key: str, value: int) -> bool:
-        """Set a depth limit in llm-models.json."""
+    def limit_depth_set(self, key: str, value: int) -> bool:
+        """Set a depth limit in llm-models.json (persists across restarts)."""
         if key not in self._LIMIT_KEYS:
             print(f"{Colors.RED}Unknown limit key '{key}'{Colors.RESET}")
             print(f"  Valid keys: {', '.join(sorted(self._LIMIT_KEYS.keys()))}")
@@ -1319,7 +1328,37 @@ class PluginManager:
 
         if self._save_limit(key, value):
             print(f"{Colors.GREEN}✓ {key}: {old} → {value}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Persisted to llm-models.json (restart agent-mcp.py or use !limit_depth_set for runtime effect){Colors.RESET}")
+            return True
+        return False
+
+    def limit_max_iteration_list(self):
+        """Show the current max_tool_iterations limit from llm-models.json."""
+        limits = self._load_limits()
+        val = limits.get(self._ITER_KEY, f"(not set — using default: {self._ITER_DEFAULT})")
+
+        print(f"\n{Colors.BOLD}Max Tool Iterations{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
+        print(f"  {'Key':<26} {'Value':>6}  Description")
+        print(f"  {'-'*26} {'-'*6}  {'-'*50}")
+        print(f"  {self._ITER_KEY:<26} {str(val):>6}  {Colors.GRAY}{self._ITER_DESC}{Colors.RESET}")
+        print()
+        print(f"  Set: {Colors.BOLD}limit-max-iteration-set <value>{Colors.RESET}")
+        print(f"  {Colors.CYAN}Persists to llm-models.json; runtime !limit_max_iteration_set takes effect immediately{Colors.RESET}")
+        print()
+
+    def limit_max_iteration_set(self, value: int) -> bool:
+        """Set max_tool_iterations in llm-models.json (persists across restarts)."""
+        if value < 1:
+            print(f"{Colors.RED}Value must be >= 1{Colors.RESET}")
+            return False
+
+        limits = self._load_limits()
+        old = limits.get(self._ITER_KEY, self._ITER_DEFAULT)
+
+        if self._save_limit(self._ITER_KEY, value):
+            print(f"{Colors.GREEN}\u2713 {self._ITER_KEY}: {old} \u2192 {value}{Colors.RESET}")
+            print(f"{Colors.CYAN}Persisted to llm-models.json (restart agent-mcp.py or use !limit_max_iteration_set for runtime effect){Colors.RESET}")
             return True
         return False
 
@@ -1327,6 +1366,17 @@ class PluginManager:
         """Reset all gate defaults to gated (false) — delete gate-defaults.json."""
         if self._save_gate_defaults({"db": {}, "tools": {}}):
             print(f"{Colors.GREEN}✓ All gate defaults reset — everything will be gated on next restart{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            return True
+        return False
+
+    def sleep_gate_allow(self, value: bool) -> bool:
+        """Set the sleep gate default. true=auto-allow (gate OFF), false=gated (gate ON)."""
+        data = self._load_gate_defaults()
+        data.setdefault("tools", {}).setdefault("sleep", {})["read"] = value
+        if self._save_gate_defaults(data):
+            gate_str = f"{Colors.GREEN}gate=OFF (auto-allow){Colors.RESET}" if value else f"{Colors.YELLOW}gate=ON (gated){Colors.RESET}"
+            print(f"{Colors.GREEN}✓{Colors.RESET} sleep read: {gate_str}")
             print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
             return True
         return False
@@ -1357,22 +1407,29 @@ class PluginManager:
         print("  port-list                         - Show listening ports for all client plugins")
         print("  port-set <plugin> <port>          - Set listening port for a plugin")
         print(f"\n{Colors.BOLD}Rate Limit Commands:{Colors.RESET}")
-        print("  ratelimit-list                            - Show all rate limit settings")
-        print("  ratelimit-set <type> <calls> <window>     - Set rate limit (calls=0 = unlimited)")
+        print("  ratelimit-list                            - Show all rate limit settings (from plugins-enabled.json)")
+        print("  ratelimit-set <type> <calls> <window>     - Set rate limit and persist (calls=0 = unlimited)")
         print("  ratelimit-autodisable <type> <true|false> - Set auto_disable flag")
-        print(f"  Valid types: llm_call, search, extract, drive, db, system")
+        print(f"  Valid types: llm_call, search, extract, drive, db, system, agent_call, tmux")
+        print(f"  Note: !limit_rate_set in the running agent applies immediately (runtime only)")
         print(f"\n{Colors.BOLD}Tmux Plugin Commands:{Colors.RESET}")
         print("  tmux-exec-timeout <seconds>               - Set exec read timeout (default 10)")
         print(f"\n{Colors.BOLD}Depth Limit Commands:{Colors.RESET}")
-        print("  limit-list                        - Show depth/iteration limits")
-        print("  limit-set <key> <value>           - Set a depth limit")
+        print("  limit-depth-list                  - Show depth/iteration limits (from llm-models.json)")
+        print("  limit-depth-set <key> <value>     - Set a depth limit (persists to llm-models.json)")
         print(f"  Valid keys: {', '.join(sorted(PluginManager._LIMIT_KEYS.keys()))}")
+        print(f"\n{Colors.BOLD}Max Iterations Commands:{Colors.RESET}")
+        print("  limit-max-iteration-list          - Show max_tool_iterations (from llm-models.json)")
+        print("  limit-max-iteration-set <value>   - Set max_tool_iterations (persists to llm-models.json)")
+        print(f"  Default: {PluginManager._ITER_DEFAULT}  |  Runtime: !limit_max_iteration_set <value>")
         print(f"\n{Colors.BOLD}Gate Default Commands:{Colors.RESET}")
         print("  gate-list                                         - Show all gate defaults")
         print("  llm-allow db <table|*> <read|write> <true|false>  - Set DB gate default (true=auto-allow)")
         print("  llm-allow <tool> <read|write> <true|false>         - Set tool gate default (true=auto-allow)")
         print("  gate-reset                                        - Reset all gates to gated (false)")
         print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
+        print(f"\n{Colors.BOLD}Sleep Gate Command:{Colors.RESET}")
+        print("  sleep-gate-allow <true|false>             - Set sleep gate default (true=auto-allow, false=gated)")
         print(f"\n{Colors.BOLD}History Management Commands:{Colors.RESET}")
         print("  history-list                              - Show history config and chain")
         print("  history-chain-add <plugin_name>          - Add plugin_history_*.py to chain")
@@ -1558,16 +1615,26 @@ class PluginManager:
                         self.port_set(args[0], int(args[1]))
                     except ValueError:
                         print(f"{Colors.RED}Port must be an integer{Colors.RESET}")
-            elif action == "limit-list":
-                self.limit_list()
-            elif action == "limit-set":
+            elif action == "limit-depth-list":
+                self.limit_depth_list()
+            elif action == "limit-depth-set":
                 args = arg.split()
                 if len(args) != 2:
-                    print(f"{Colors.RED}Usage: limit-set <key> <value>{Colors.RESET}")
+                    print(f"{Colors.RED}Usage: limit-depth-set <key> <value>{Colors.RESET}")
                     print(f"  Valid keys: {', '.join(sorted(self._LIMIT_KEYS.keys()))}")
                 else:
                     try:
-                        self.limit_set(args[0], int(args[1]))
+                        self.limit_depth_set(args[0], int(args[1]))
+                    except ValueError:
+                        print(f"{Colors.RED}Value must be an integer{Colors.RESET}")
+            elif action == "limit-max-iteration-list":
+                self.limit_max_iteration_list()
+            elif action == "limit-max-iteration-set":
+                if not arg:
+                    print(f"{Colors.RED}Usage: limit-max-iteration-set <value>{Colors.RESET}")
+                else:
+                    try:
+                        self.limit_max_iteration_set(int(arg))
                     except ValueError:
                         print(f"{Colors.RED}Value must be an integer{Colors.RESET}")
             elif action == "history-list":
@@ -1621,6 +1688,11 @@ class PluginManager:
                 self.llm_allow(arg.split())
             elif action == "gate-reset":
                 self.gate_reset()
+            elif action == "sleep-gate-allow":
+                if not arg or arg.lower() not in ("true", "false", "1", "0", "yes", "no"):
+                    print(f"{Colors.RED}Usage: sleep-gate-allow <true|false>{Colors.RESET}")
+                else:
+                    self.sleep_gate_allow(arg.lower() in ("true", "1", "yes"))
             else:
                 print(f"{Colors.RED}Unknown command: {action}{Colors.RESET}")
 
@@ -1923,11 +1995,21 @@ def main():
                 return 1
 
         # Depth limit commands
-        elif cmd == "limit-list":
-            manager.limit_list()
-        elif cmd == "limit-set" and len(sys.argv) > 3:
+        elif cmd == "limit-depth-list":
+            manager.limit_depth_list()
+        elif cmd == "limit-depth-set" and len(sys.argv) > 3:
             try:
-                manager.limit_set(sys.argv[2], int(sys.argv[3]))
+                manager.limit_depth_set(sys.argv[2], int(sys.argv[3]))
+            except ValueError:
+                print(f"{Colors.RED}✗ Value must be an integer{Colors.RESET}")
+                return 1
+
+        # Max iterations commands
+        elif cmd == "limit-max-iteration-list":
+            manager.limit_max_iteration_list()
+        elif cmd == "limit-max-iteration-set" and len(sys.argv) > 2:
+            try:
+                manager.limit_max_iteration_set(int(sys.argv[2]))
             except ValueError:
                 print(f"{Colors.RED}✗ Value must be an integer{Colors.RESET}")
                 return 1
@@ -1942,6 +2024,12 @@ def main():
                 return 1
         elif cmd == "gate-reset":
             manager.gate_reset()
+        elif cmd == "sleep-gate-allow" and len(sys.argv) > 2:
+            val = sys.argv[2].lower()
+            if val not in ("true", "false", "1", "0", "yes", "no"):
+                print(f"{Colors.RED}✗ Value must be true or false{Colors.RESET}")
+                return 1
+            manager.sleep_gate_allow(val in ("true", "1", "yes"))
 
         # History management commands
         elif cmd == "history-list":

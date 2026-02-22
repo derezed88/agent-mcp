@@ -23,7 +23,7 @@ from langchain_core.messages import (
 
 import time
 
-from config import log, MAX_TOOL_ITERATIONS, MAX_AT_LLM_DEPTH, MAX_AGENT_CALL_DEPTH, LLM_REGISTRY, RATE_LIMITS, save_llm_model_field
+from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, LIVE_LIMITS, save_llm_model_field
 from state import push_tok, push_done, push_err, current_client_id, sessions
 from prompt import get_current_prompt, load_prompt_for_folder
 from gate import check_human_gate
@@ -509,11 +509,24 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         else:
             system_prompt = get_current_prompt()
 
+        # Per-model timeout for ainvoke (same setting used by llm_clean_text/tool).
+        # Prevents indefinite stalls when the LLM API hangs or thinks too long.
+        invoke_timeout = model_cfg.get("llm_call_timeout", 120)
+
         # Convert internal message format to LangChain message objects
         ctx: list[BaseMessage] = _to_lc_messages(system_prompt, messages)
 
-        for _ in range(MAX_TOOL_ITERATIONS):
-            ai_msg: AIMessage = await llm_with_tools.ainvoke(ctx)
+        for _ in range(LIVE_LIMITS.get("max_tool_iterations", MAX_TOOL_ITERATIONS)):
+            await push_tok(client_id, "\n[thinking…]\n")
+            try:
+                ai_msg: AIMessage = await asyncio.wait_for(
+                    llm_with_tools.ainvoke(ctx),
+                    timeout=invoke_timeout,
+                )
+            except asyncio.TimeoutError:
+                await push_tok(client_id, f"\n[LLM timeout after {invoke_timeout}s — aborting turn]\n")
+                await push_done(client_id)
+                return ""
             ctx.append(ai_msg)
 
             if not ai_msg.tool_calls:
@@ -781,9 +794,10 @@ async def agent_call(
     # Depth guard — track nesting depth in the calling session
     calling_session = sessions.get(calling_client, {})
     agent_call_depth = calling_session.get("_agent_call_depth", 0)
-    if agent_call_depth >= MAX_AGENT_CALL_DEPTH:
+    _max_agent_call_depth = LIVE_LIMITS.get("max_agent_call_depth", 1)
+    if agent_call_depth >= _max_agent_call_depth:
         msg = (
-            f"[agent_call] Depth limit reached (max={MAX_AGENT_CALL_DEPTH}). "
+            f"[agent_call] Depth limit reached (max={_max_agent_call_depth}). "
             f"Call rejected to prevent recursion. Do NOT retry."
         )
         log.warning(f"agent_call depth limit: client={calling_client} depth={agent_call_depth}")
@@ -877,13 +891,14 @@ async def at_llm(model: str, prompt: str) -> str:
 
     # Depth guard — prevent unbounded recursive at_llm chains
     depth = session.get("_at_llm_depth", 0)
-    if depth >= MAX_AT_LLM_DEPTH:
+    _max_at_llm_depth = LIVE_LIMITS.get("max_at_llm_depth", 1)
+    if depth >= _max_at_llm_depth:
         msg = (
-            f"at_llm DEPTH LIMIT REACHED (max={MAX_AT_LLM_DEPTH}): "
+            f"at_llm DEPTH LIMIT REACHED (max={_max_at_llm_depth}): "
             f"Cannot call at_llm from within an at_llm context. "
             f"Do NOT retry. Return your answer directly without calling at_llm again."
         )
-        await push_tok(client_id, f"\n[at_llm ✗] depth limit reached (max={MAX_AT_LLM_DEPTH})\n")
+        await push_tok(client_id, f"\n[at_llm ✗] depth limit reached (max={_max_at_llm_depth})\n")
         log.warning(f"at_llm depth limit: client={client_id} depth={depth} model={model}")
         return msg
 

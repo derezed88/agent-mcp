@@ -183,11 +183,19 @@ LLM_REGISTRY = load_llm_registry()
 
 # Load default model from plugins-enabled.json
 DEFAULT_MODEL = load_default_model()
-MAX_TOOL_ITERATIONS = 10
+MAX_TOOL_ITERATIONS = 10  # fallback only; runtime value lives in LIVE_LIMITS["max_tool_iterations"]
 
 _limits = load_limits()
 MAX_AT_LLM_DEPTH = int(_limits.get("max_at_llm_depth", 1))
 MAX_AGENT_CALL_DEPTH = int(_limits.get("max_agent_call_depth", 1))
+
+# Live mutable depth limits — agents.py reads from this dict so runtime changes take effect immediately.
+# Populated from llm-models.json at startup; mutated in-place by limit_depth_set / limit_max_iteration_set.
+LIVE_LIMITS: dict = {
+    "max_at_llm_depth":     MAX_AT_LLM_DEPTH,
+    "max_agent_call_depth":  MAX_AGENT_CALL_DEPTH,
+    "max_tool_iterations":   int(_limits.get("max_tool_iterations", MAX_TOOL_ITERATIONS)),
+}
 
 # Rate limits by tool type — loaded from plugins-enabled.json
 RATE_LIMITS = load_rate_limits()

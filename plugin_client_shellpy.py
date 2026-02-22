@@ -17,6 +17,7 @@ from routes import (
     endpoint_submit,
     endpoint_stream,
     endpoint_gate_response,
+    endpoint_stop,
     endpoint_health,
     endpoint_list_sessions,
     endpoint_delete_session
@@ -63,6 +64,7 @@ class ShellpyClientPlugin(BasePlugin):
             Route("/submit", endpoint_submit, methods=["POST"]),
             Route("/stream", endpoint_stream, methods=["GET"]),
             Route("/gate_response", endpoint_gate_response, methods=["POST"]),
+            Route("/stop", endpoint_stop, methods=["POST"]),
             Route("/health", endpoint_health, methods=["GET"]),
             Route("/sessions", endpoint_list_sessions, methods=["GET"]),
             Route("/session/{sid}", endpoint_delete_session, methods=["DELETE"]),

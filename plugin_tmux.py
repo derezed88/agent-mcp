@@ -6,6 +6,7 @@ LLMs interact via tool calls; humans manage sessions via !tmux commands.
 
 Config keys in plugins-enabled.json → plugin_config.plugin_tmux:
     TMUX_HISTORY_LIMIT        int   Rolling history lines per session (default 200)
+    TMUX_EXEC_TIMEOUT         float Seconds to wait for command output in tmux_exec (default 10.0)
     TMUX_ALLOWED_COMMANDS     list  Whitelist of allowed command prefixes (empty = all allowed)
     TMUX_BLOCKED_COMMANDS     list  Blacklist of blocked command prefixes (checked after allow)
 
@@ -27,6 +28,7 @@ User commands (dispatched from routes.py cmd_tmux):
     !tmux kill-server
     !tmux buf <name>
     !tmux history-limit [n]
+    !tmux send-keys <name> <key>  — send raw keypress (C-c, C-d, C-z, enter)
     !tmux_call_limit              - show current limit
     !tmux_call_limit <calls> <window_seconds>  - set limit
 
@@ -42,8 +44,10 @@ import fcntl
 import os
 import pty
 import re
+import select
 import struct
 import termios
+import threading
 import time
 from collections import deque
 from typing import Any, Dict, List, Optional
@@ -57,8 +61,12 @@ from pydantic import BaseModel, Field
 # Module-level state — shared by plugin instance and routes.py cmd_tmux()
 # ---------------------------------------------------------------------------
 
-# name -> {proc, master, history, name, started}
+# name -> {proc, master, history, name, started, exec_active, reader_thread, reader_stop, ...}
 _sessions: Dict[str, Dict[str, Any]] = {}
+
+# name -> asyncio.Event — registered synchronously at start of _do_create,
+# set when session is fully ready. Allows exec to wait for in-flight creates.
+_pending_creates: Dict[str, asyncio.Event] = {}
 
 # Rolling history limit (lines). Updated by !tmux history-limit / tmux_history_limit.
 _history_limit: int = 200
@@ -241,43 +249,240 @@ def _append_history(name: str, text: str) -> None:
         sess["history"].append(line)
 
 
+def _ensure_reader_alive(name: str) -> None:
+    """Auto-restart the bg reader thread if it has died or was never started."""
+    sess = _sessions.get(name)
+    if not sess:
+        return
+    # Only restart if the process is still running
+    if sess["proc"].returncode is not None:
+        return
+    t = sess.get("reader_thread")
+    if t is not None and t.is_alive():
+        return
+    # Thread is dead or missing — restart
+    import logging
+    log = logging.getLogger(__name__)
+    log.warning("Auto-restarting dead reader thread for session '%s'", name)
+    old_stop = sess.get("reader_stop")
+    if old_stop:
+        old_stop.set()
+    stop_event = threading.Event()
+    sess["reader_stop"] = stop_event
+    sess["exec_active"] = False
+    new_t = threading.Thread(
+        target=_bg_reader_thread,
+        args=(name, stop_event),
+        name=f"tmux-reader-{name}",
+        daemon=True,
+    )
+    sess["reader_thread"] = new_t
+    new_t.start()
+    log.warning("Reader thread restarted for '%s' (tid=%s)", name, new_t.ident)
+
+
+def _bg_reader_thread(name: str, stop_event: threading.Event) -> None:
+    """
+    Background thread: continuously drain PTY master fd into session history.
+
+    Runs in a dedicated OS thread so it is never starved by asyncio event loop
+    scheduling. Uses select() to block until data is available — PTY buffer
+    never fills regardless of event loop load.
+
+    Coordinates with tmux_exec via exec_active flag: backs off for one select
+    cycle while exec is reading so _read_output gets clean output.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    log.debug("bg_reader_thread START name=%s", name)
+
+    while not stop_event.is_set():
+        sess = _sessions.get(name)
+        if not sess:
+            log.debug("bg_reader_thread EXIT name=%s: session gone", name)
+            break
+
+        # Check process exit — but keep draining until no more data
+        proc_done = sess["proc"].returncode is not None
+
+        # Back off while exec is reading
+        if sess.get("exec_active"):
+            time.sleep(0.01)
+            continue
+
+        master_fd = sess["master"]
+        try:
+            ready, _, _ = select.select([master_fd], [], [], 0.5)
+        except (ValueError, OSError) as e:
+            log.debug("bg_reader_thread EXIT name=%s: select error %s", name, e)
+            break
+
+        if not ready:
+            if proc_done:
+                # Process exited and no more data — we're done
+                log.debug("bg_reader_thread EXIT name=%s: proc done, no data", name)
+                break
+            continue
+
+        if sess.get("exec_active"):
+            continue
+
+        buf = b""
+        while True:
+            try:
+                chunk = os.read(master_fd, _CHUNK)
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError as e:
+                log.debug("bg_reader_thread EXIT name=%s: read OSError %s", name, e)
+                return
+            if not chunk:
+                break
+            buf += chunk
+        if buf:
+            _append_history(name, _decode_pty(buf))
+
+    log.debug("bg_reader_thread DONE name=%s", name)
+
+
 def _is_alive(name: str) -> bool:
     sess = _sessions.get(name)
     return bool(sess and sess["proc"].returncode is None)
 
 
+async def _await_session(name: str, timeout: float = 10.0) -> Optional[str]:
+    """
+    Wait for a session to be fully initialized.
+    Handles the case where !tmux new and !tmux exec are pasted simultaneously.
+    Returns None on success, or an error string on timeout/not-found.
+    """
+    # Fast path: session exists and ready
+    sess = _sessions.get(name)
+    if sess:
+        ready = sess.get("ready")
+        if not ready or ready.is_set():
+            return None
+        # Session exists but still initializing — wait on its ready event
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return f"ERROR: Session '{name}' creation timed out."
+        return None
+
+    # Session doesn't exist yet — check if a create is in flight
+    pending = _pending_creates.get(name)
+    if pending:
+        try:
+            await asyncio.wait_for(pending.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return f"ERROR: Session '{name}' creation timed out."
+        return None
+
+    # No session and no pending create
+    names = ", ".join(_sessions.keys()) if _sessions else "(none)"
+    return (
+        f"ERROR: No tmux session named '{name}'.\n"
+        f"Active sessions: {names}"
+    )
+
+
 async def _do_create(name: str) -> str:
     if name in _sessions:
         return f"Session '{name}' already exists."
+    if name in _pending_creates:
+        return f"Session '{name}' is already being created."
 
-    master_fd, slave_fd = pty.openpty()
-    _resize_pty(master_fd)
-    _make_nonblocking(master_fd)
+    # Register pending create SYNCHRONOUSLY (before any await) so that
+    # exec calls pasted simultaneously can find and wait on it.
+    ready_event = asyncio.Event()
+    _pending_creates[name] = ready_event
 
-    proc = await asyncio.create_subprocess_exec(
-        "/bin/bash", "--login", "-i",
-        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-        start_new_session=True,
-    )
-    os.close(slave_fd)
+    # Spawn the actual setup as a shielded task so it survives cancellation
+    # of the parent request task (cancel_active_task in routes.py cancels the
+    # previous task when a new !command arrives from the same client).
+    async def _setup():
+        try:
+            master_fd, slave_fd = pty.openpty()
+            _resize_pty(master_fd)
+            _make_nonblocking(master_fd)
 
-    _sessions[name] = {
-        "proc":    proc,
-        "master":  master_fd,
-        "history": deque(maxlen=_history_limit),
-        "name":    name,
-        "started": time.time(),
-    }
+            env = os.environ.copy()
+            _SESSION_VARS = [
+                "DISPLAY", "WAYLAND_DISPLAY",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_RUNTIME_DIR", "XDG_SESSION_ID", "XDG_SESSION_TYPE",
+                "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+                "GNOME_KEYRING_CONTROL", "GNOME_KEYRING_PID",
+            ]
+            for var in _SESSION_VARS:
+                val = os.environ.get(var)
+                if val:
+                    env[var] = val
 
-    await asyncio.sleep(_STARTUP_DRAIN)
-    _drain_sync(master_fd)
-    return f"Session '{name}' created (pid {proc.pid})."
+            proc = await asyncio.create_subprocess_exec(
+                "/bin/bash", "--login", "-i",
+                stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                start_new_session=True,
+                env=env,
+            )
+            os.close(slave_fd)
+
+            stop_event = threading.Event()
+            _sessions[name] = {
+                "proc":          proc,
+                "master":        master_fd,
+                "history":       deque(maxlen=_history_limit),
+                "name":          name,
+                "started":       time.time(),
+                "exec_active":   False,
+                "reader_stop":   stop_event,
+                "reader_thread": None,
+                "exec_lock":     asyncio.Lock(),
+                "ready":         ready_event,
+            }
+
+            await asyncio.sleep(_STARTUP_DRAIN)
+            _drain_sync(master_fd)
+
+            t = threading.Thread(
+                target=_bg_reader_thread,
+                args=(name, stop_event),
+                name=f"tmux-reader-{name}",
+                daemon=True,
+            )
+            _sessions[name]["reader_thread"] = t
+            t.start()
+
+            ready_event.set()
+        except Exception:
+            # If setup fails, clean up and signal ready (with no session)
+            _sessions.pop(name, None)
+            ready_event.set()
+            raise
+        finally:
+            _pending_creates.pop(name, None)
+
+    # Shield the setup from cancellation — even if this task is cancelled,
+    # the inner coroutine runs to completion
+    await asyncio.shield(_setup())
+
+    sess = _sessions.get(name)
+    if sess:
+        return f"Session '{name}' created (pid {sess['proc'].pid}, reader tid {sess['reader_thread'].ident})."
+    return f"ERROR: Session '{name}' setup failed."
 
 
 async def _do_kill(name: str) -> str:
     sess = _sessions.pop(name, None)
     if not sess:
         return f"No session named '{name}'."
+
+    # Stop background reader thread
+    stop_event = sess.get("reader_stop")
+    if stop_event:
+        stop_event.set()
+    # Thread will exit on next select() timeout (≤0.5s); no need to join
+
     proc = sess["proc"]
     try:
         proc.terminate()
@@ -309,9 +514,11 @@ def _do_ls() -> str:
         status = "running" if _is_alive(name) else "exited"
         age = int(time.time() - sess["started"])
         hist = len(sess["history"])
+        t = sess.get("reader_thread")
+        reader = "reader=ok" if (t and t.is_alive()) else "reader=DEAD"
         lines.append(
             f"  {name:<20}  pid={sess['proc'].pid}  {status}"
-            f"  age={age}s  history={hist}/{sess['history'].maxlen} lines"
+            f"  age={age}s  history={hist}/{sess['history'].maxlen} lines  {reader}"
         )
     return "\n".join(lines)
 
@@ -320,6 +527,7 @@ def _do_history(name: str, lines: int = 50) -> str:
     sess = _sessions.get(name)
     if not sess:
         return f"No session named '{name}'."
+    _ensure_reader_alive(name)
     hist = list(sess["history"])
     tail = hist[-lines:] if len(hist) > lines else hist
     header = f"=== {name} (last {len(tail)} of {len(hist)} lines) ==="
@@ -354,48 +562,69 @@ class _TmuxExecArgs(BaseModel):
     )
 
 async def tmux_exec_executor(session: str, command: str, timeout: float = 10.0) -> str:
-    if session not in _sessions:
-        names = ", ".join(_sessions.keys()) if _sessions else "(none)"
-        return (
-            f"ERROR: No tmux session named '{session}'.\n"
-            f"Active sessions: {names}\n"
-            f"Create one with: tmux_new(name='{session}')"
-        )
-    if not _is_alive(session):
-        return (
-            f"ERROR: Session '{session}' process has exited. "
-            f"Kill and recreate: tmux_kill_session(name='{session}') then tmux_new(name='{session}')"
-        )
+    # Shield the ENTIRE exec flow (await_session + checks + lock + write + read)
+    # from task cancellation. cancel_active_task() in routes.py cancels the
+    # previous request task when a new command arrives from the same client.
+    # Without shield, a rapid-fire paste (new + exec cd + exec bash) would
+    # cancel the cd exec before it runs, leaving the shell in the wrong dir.
+    async def _full_exec():
+        # Wait for session to appear and be ready (handles rapid new+exec paste)
+        err = await _await_session(session)
+        if err:
+            return err + f"\nCreate one with: tmux_new(name='{session}')"
 
-    # Command filter check (TMUX_ALLOWED/BLOCKED_COMMANDS)
-    block_reason = _check_command(command)
-    if block_reason:
-        return f"ERROR: {block_reason}\nCommand was NOT sent to the session."
+        if not _is_alive(session):
+            return (
+                f"ERROR: Session '{session}' process has exited. "
+                f"Kill and recreate: tmux_kill_session(name='{session}') "
+                f"then tmux_new(name='{session}')"
+            )
 
-    # Outbound agent blocked command check (OUTBOUND_AGENT_BLOCKED_COMMANDS)
-    if _outbound_blocked_commands:
-        cmd_lower = command.strip().lower()
-        for pattern in _outbound_blocked_commands:
-            if cmd_lower.startswith(pattern):
-                return (
-                    f"ERROR: BLOCKED by OUTBOUND_AGENT_BLOCKED_COMMANDS: "
-                    f"command matches blocked pattern '{pattern}'.\n"
-                    f"Command was NOT sent to the session."
-                )
+        # Command filter check
+        block_reason = _check_command(command)
+        if block_reason:
+            return f"ERROR: {block_reason}\nCommand was NOT sent to the session."
 
-    timeout = max(1.0, min(float(timeout or 10.0), 120.0))
-    sess = _sessions[session]
-    master_fd = sess["master"]
+        # Outbound agent blocked command check
+        if _outbound_blocked_commands:
+            cmd_lower = command.strip().lower()
+            for pattern in _outbound_blocked_commands:
+                if cmd_lower.startswith(pattern):
+                    return (
+                        f"ERROR: BLOCKED by OUTBOUND_AGENT_BLOCKED_COMMANDS: "
+                        f"command matches blocked pattern '{pattern}'.\n"
+                        f"Command was NOT sent to the session."
+                    )
 
-    cmd_bytes = (command.rstrip("\n") + "\n").encode("utf-8")
-    try:
-        os.write(master_fd, cmd_bytes)
-    except OSError as e:
-        return f"ERROR: Write to session '{session}' failed: {e}"
+        t_out = max(1.0, min(float(timeout or 10.0), 120.0))
+        sess = _sessions[session]
+        master_fd = sess["master"]
+        cmd_bytes = (command.rstrip("\n") + "\n").encode("utf-8")
 
-    output = await _read_output(master_fd, timeout=timeout)
-    _append_history(session, f"$ {command}\n" + output)
-    return output if output.strip() else "(no output)"
+        exec_lock = sess.get("exec_lock")
+        if exec_lock is None:
+            exec_lock = asyncio.Lock()
+            sess["exec_lock"] = exec_lock
+
+        async with exec_lock:
+            _ensure_reader_alive(session)
+
+            sess["exec_active"] = True
+            await asyncio.sleep(0.05)
+            try:
+                try:
+                    os.write(master_fd, cmd_bytes)
+                except OSError as e:
+                    return f"ERROR: Write to session '{session}' failed: {e}"
+
+                output = await _read_output(master_fd, timeout=t_out)
+            finally:
+                sess["exec_active"] = False
+
+            _append_history(session, f"$ {command}\n" + output)
+            return output if output.strip() else "(no output)"
+
+    return await asyncio.shield(_full_exec())
 
 
 class _TmuxLsArgs(BaseModel):
@@ -518,12 +747,19 @@ class TmuxPlugin(BasePlugin):
         global _history_limit, _allowed_commands, _blocked_commands
         global _rate_limit_calls, _rate_limit_window
         global _outbound_blocked_commands
+        global _READ_TIMEOUT_DEFAULT
 
         # History limit
         try:
             _history_limit = int(config.get("TMUX_HISTORY_LIMIT", 200))
         except (TypeError, ValueError):
             _history_limit = 200
+
+        # Exec timeout
+        try:
+            _READ_TIMEOUT_DEFAULT = float(config.get("TMUX_EXEC_TIMEOUT", 10.0))
+        except (TypeError, ValueError):
+            _READ_TIMEOUT_DEFAULT = 10.0
 
         # Command filter lists — store as lowercase prefixes for fast matching
         raw_allowed = config.get("TMUX_ALLOWED_COMMANDS", [])
@@ -568,6 +804,9 @@ class TmuxPlugin(BasePlugin):
             sess = _sessions.pop(name, None)
             if not sess:
                 continue
+            stop_event = sess.get("reader_stop")
+            if stop_event:
+                stop_event.set()
             try:
                 sess["proc"].kill()
             except Exception:
@@ -595,11 +834,14 @@ class TmuxPlugin(BasePlugin):
         return (
             "Shell Sessions (tmux):\n"
             "  !tmux new <name>                          - create a new PTY shell session\n"
-            "  !tmux exec <session> <command>            - run a command in a session\n"
+            "  !tmux exec <session> <command>            - run a command, wait up to TMUX_EXEC_TIMEOUT seconds\n"
+            "  !tmux exec <session> <cmd> &              - background (for long-running scripts/installs)\n"
+            "  Note: for scripts that take >TMUX_EXEC_TIMEOUT, use '&' and poll with !tmux buf\n"
             "  !tmux ls                                  - list active sessions\n"
             "  !tmux kill-session <name>                 - terminate a session\n"
             "  !tmux kill-server                         - terminate all sessions\n"
             "  !tmux buf <name>                          - show output buffer (recent history) for a session\n"
+            "  !tmux send-keys <name> <key>              - send raw keypress: C-c, C-d, C-z, enter\n"
             "  !tmux history-limit [n]                   - get/set rolling history line limit\n"
             "  !tmux filters                             - show ALLOWED/BLOCKED command filter lists\n"
             "  !tmux_call_limit                          - show current tmux rate limit\n"
@@ -608,6 +850,8 @@ class TmuxPlugin(BasePlugin):
             "  !tmux_<toolname>_gate_write <t|f>         - per-tool override (e.g. !tmux_exec_gate_write)\n"
             "  !tmux_call_limit_gate_read <t|f>          - gate tmux_call_limit reads\n"
             "  !tmux_call_limit_gate_write <t|f>         - gate tmux_call_limit writes\n"
+            "  !tmux threads                             - show bg reader thread status (diagnostic)\n"
+            "  !tmux restart-reader <name>               - force-restart bg reader thread for a session\n"
         )
 
     def get_gate_tools(self) -> Dict[str, Any]:
@@ -710,7 +954,8 @@ async def tmux_command(args: str) -> str:
     if not parts:
         return (
             "Usage: !tmux <subcommand> [args]\n"
-            "Available: new, exec, ls, kill-session, kill-server, buf, history-limit, filters"
+            "Available: new, exec, ls, kill-session, kill-server, buf, send-keys,\n"
+            "           history-limit, filters, threads, restart-reader"
         )
     sub = parts[0].lower().strip()
     args = parts[1].strip() if len(parts) > 1 else ""
@@ -750,6 +995,9 @@ async def tmux_command(args: str) -> str:
         name = args.strip()
         if not name:
             return "Usage: !tmux buf <name>"
+        err = await _await_session(name)
+        if err:
+            return err
         return _do_history(name)
 
     elif sub == "history-limit":
@@ -764,13 +1012,88 @@ async def tmux_command(args: str) -> str:
             return f"ERROR: Invalid value '{val}'. Must be a positive integer."
         return await tmux_history_limit_executor(n)
 
+    elif sub == "send-keys":
+        # !tmux send-keys <session> <key>
+        # Supported keys: C-c  C-d  C-z  C-\  enter  <any single char>
+        parts = args.split(None, 1)
+        if len(parts) < 2:
+            return "Usage: !tmux send-keys <session> <key>  (e.g. C-c, C-d, enter)"
+        session_name, key = parts[0], parts[1].strip()
+        err = await _await_session(session_name)
+        if err:
+            return err
+        _KEY_MAP = {
+            "c-c": b"\x03", "c-d": b"\x04", "c-z": b"\x1a",
+            "c-\\": b"\x1c", "enter": b"\n", "return": b"\n",
+        }
+        raw = _KEY_MAP.get(key.lower())
+        if raw is None:
+            raw = key.encode("utf-8", errors="replace")
+        master_fd = _sessions[session_name]["master"]
+        try:
+            os.write(master_fd, raw)
+        except OSError as e:
+            return f"ERROR: write failed: {e}"
+        return f"Sent {key!r} to session '{session_name}'"
+
     elif sub == "filters":
         return _format_filter_status()
+
+    elif sub == "threads":
+        # Diagnostic: show bg reader thread status for all sessions
+        if not _sessions:
+            return "No active sessions."
+        lines = ["Session reader thread status:"]
+        for sname, sess in _sessions.items():
+            t = sess.get("reader_thread")
+            stop_ev = sess.get("reader_stop")
+            if t is None:
+                state = "NO THREAD"
+            elif t.is_alive():
+                state = f"alive (daemon={t.daemon})"
+            else:
+                state = "DEAD"
+            stop_state = "stop_set" if (stop_ev and stop_ev.is_set()) else "running"
+            proc_rc = sess["proc"].returncode
+            exec_active = sess.get("exec_active", False)
+            lines.append(
+                f"  {sname:<20}  thread={state}  stop={stop_state}"
+                f"  proc_rc={proc_rc}  exec_active={exec_active}"
+            )
+        return "\n".join(lines)
+
+    elif sub == "restart-reader":
+        # Force-restart the bg reader thread for a session (diagnostic/recovery)
+        name = args.strip()
+        if not name:
+            return "Usage: !tmux restart-reader <session>"
+        if name not in _sessions:
+            return f"ERROR: No session '{name}'"
+        sess = _sessions[name]
+        old_stop = sess.get("reader_stop")
+        if old_stop:
+            old_stop.set()
+        old_t = sess.get("reader_thread")
+        if old_t and old_t.is_alive():
+            old_t.join(timeout=1.0)
+        stop_event = threading.Event()
+        sess["reader_stop"] = stop_event
+        sess["exec_active"] = False
+        t = threading.Thread(
+            target=_bg_reader_thread,
+            args=(name, stop_event),
+            name=f"tmux-reader-{name}",
+            daemon=True,
+        )
+        t.start()
+        sess["reader_thread"] = t
+        return f"Reader thread restarted for session '{name}' (tid={t.ident})"
 
     else:
         return (
             f"Unknown tmux subcommand: '{sub}'\n"
-            "Available: new, exec, ls, kill-session, kill-server, buf, history-limit, filters"
+            "Available: new, exec, ls, kill-session, kill-server, buf, send-keys,\n"
+            "           history-limit, filters, threads, restart-reader"
         )
 
 
