@@ -2,7 +2,7 @@
 
 * db_query ONLY for:
   1. Explicit SQL/user-command.
-  2. Person-named ("Mark", "Lee" → SELECT * FROM person).
+  2. Person-named (any name → SELECT * FROM person).
   3. Stored data/memory recall.
   4. Table introspection (SHOW TABLES/DESCRIBE).
 * NO proactive refreshes, context dumps, or unrelated tables. Confirm: "DB trigger? Yes/No → [reason]".
