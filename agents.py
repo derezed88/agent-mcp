@@ -608,8 +608,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
             if has_non_agent_call_output:
                 await push_done(client_id)
 
-        if not _suppress:
-            await push_tok(client_id, "\n[Max iterations]\n")
+        await push_tok(client_id, "\n[Max iterations]\n")
         await push_done(client_id)
         return ""
 
