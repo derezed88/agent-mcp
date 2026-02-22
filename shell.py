@@ -47,6 +47,7 @@ import curses
 import json
 import locale
 import os
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -124,6 +125,10 @@ class AppState:
         # Session switching
         self.session_switch_requested: bool = False
         self.new_session_id: str | None = None
+        # Input history (bash-style Up/Down traversal)
+        self.input_history: list[str] = []   # oldest first
+        self.history_idx: int = -1           # -1 = not browsing; 0..n-1 = index into history
+        self.history_draft: str = ""         # saved draft while browsing
 
     async def append_output(self, text: str):
         async with self.lock:
@@ -794,12 +799,27 @@ async def input_loop(stdscr):
                 state.input_text       = ""
                 state.input_cursor_pos = 0
 
-            # Handle multi-line paste: split by newlines and submit each line
-            lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
-            for line in lines:
-                line = line.strip()
-                if line:  # Skip empty lines
-                    await user_input_handler(line)
+            # Normalize line endings, then join soft-wrapped lines.
+            # A soft wrap is a newline where the preceding char is not a space
+            # (terminal wrapped mid-word). A hard paragraph break has a blank
+            # line (two consecutive newlines) or the preceding char is a space.
+            normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+
+            # Join soft-wrapped lines: \n preceded by non-space → replace with space
+            joined = re.sub(r'(?<=[^\s])\n(?=[^\n])', ' ', normalized)
+
+            # Now split on blank lines (paragraph breaks) for multi-paragraph input
+            paragraphs = re.split(r'\n{2,}', joined)
+            for para in paragraphs:
+                para = para.strip()
+                if para:
+                    # Add to history (avoid duplicate of last entry)
+                    async with state.lock:
+                        if not state.input_history or state.input_history[-1] != para:
+                            state.input_history.append(para)
+                        state.history_idx = -1
+                        state.history_draft = ""
+                    await user_input_handler(para)
 
         loop.create_task(_task())
 
@@ -968,17 +988,34 @@ async def input_loop(stdscr):
                 async with state.lock:
                     state.input_cursor_pos = pos + 1
 
-        # Up — move cursor one visual row up
+        # Up — history: previous entry
         elif ch == curses.KEY_UP:
-            new_pos = max(0, pos - usable)
             async with state.lock:
-                state.input_cursor_pos = new_pos
+                hist = state.input_history
+                if hist:
+                    if state.history_idx == -1:
+                        # Save current draft before entering history
+                        state.history_draft = state.input_text
+                        state.history_idx = len(hist) - 1
+                    elif state.history_idx > 0:
+                        state.history_idx -= 1
+                    state.input_text = hist[state.history_idx]
+                    state.input_cursor_pos = len(state.input_text)
 
-        # Down — move cursor one visual row down
+        # Down — history: next entry (or restore draft)
         elif ch == curses.KEY_DOWN:
-            new_pos = min(len(text), pos + usable)
             async with state.lock:
-                state.input_cursor_pos = new_pos
+                if state.history_idx != -1:
+                    hist = state.input_history
+                    if state.history_idx < len(hist) - 1:
+                        state.history_idx += 1
+                        state.input_text = hist[state.history_idx]
+                    else:
+                        # Past the end — restore draft
+                        state.history_idx = -1
+                        state.input_text = state.history_draft
+                        state.history_draft = ""
+                    state.input_cursor_pos = len(state.input_text)
 
         # Home / Ctrl+A
         elif ch in (curses.KEY_HOME, 1):
@@ -990,9 +1027,11 @@ async def input_loop(stdscr):
             async with state.lock:
                 state.input_cursor_pos = len(state.input_text)
 
-        # Printable ASCII
+        # Printable ASCII — typing cancels history browsing
         elif 32 <= ch <= 126:
             async with state.lock:
+                state.history_idx   = -1
+                state.history_draft = ""
                 state.input_text       = text[:pos] + chr(ch) + text[pos:]
                 state.input_cursor_pos = pos + 1
 
