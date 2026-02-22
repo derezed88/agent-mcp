@@ -320,6 +320,11 @@ async def cmd_sysprompt_set_dir(client_id: str, args: str, session: dict):
     await push_tok(client_id, result)
     await conditional_push_done(client_id)
 
+_WRITE_ONLY_GATES = {"agent_call", "at_llm", "sysprompt_write", "model", "reset",
+                     "limit_depth_set", "limit_rate_set", "limit_max_iteration_set"}
+_READ_ONLY_GATES  = {"gate_list", "session",  # session has both but _gate_read makes sense
+                     "limit_depth_list", "limit_rate_list", "limit_max_iteration_list", "sleep"}
+
 async def cmd_gate(client_id: str, tool_name: str, perm_type: str, flag_arg: str):
     """
     Generic gate toggle command.
@@ -327,6 +332,14 @@ async def cmd_gate(client_id: str, tool_name: str, perm_type: str, flag_arg: str
     perm_type: "read" or "write"
     flag_arg: <table|*> <true|false>  (for db_query) or just <true|false>
     """
+    # Reject mismatched perm_type early so users get a clear error
+    if perm_type == "read" and tool_name in _WRITE_ONLY_GATES:
+        await push_tok(client_id,
+            f"ERROR: '{tool_name}' has no read gate — it is write-only.\n"
+            f"Use: !{tool_name}_gate_write <true|false>")
+        await conditional_push_done(client_id)
+        return
+
     def is_valid_bool(s: str) -> bool:
         return s in ("true", "1", "yes", "false", "0", "no")
 
