@@ -1439,6 +1439,8 @@ class PluginManager:
         print(f"\n{Colors.BOLD}Session Configuration:{Colors.RESET}")
         print("  max-users <n>                            - Set max simultaneous sessions")
         print("  session-timeout <minutes>                - Set session idle timeout (0=disabled)")
+        print("  tool-preview-length <n>                  - Set default tool preview length (-1=unlimited, 0=tags only, >0=chars)")
+        print("  tool-suppress <true|false>               - Set default tool suppress (no tags/previews when true)")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
         print("  quit                              - Exit plugin manager")
@@ -1682,6 +1684,19 @@ class PluginManager:
                         self.set_session_timeout(int(arg))
                     except ValueError:
                         print(f"{Colors.RED}Must be an integer (minutes){Colors.RESET}")
+            elif action == "tool-preview-length":
+                if not arg:
+                    print(f"{Colors.RED}Usage: tool-preview-length <n>  (-1=unlimited, 0=tags only, >0=truncate){Colors.RESET}")
+                else:
+                    try:
+                        self.set_tool_preview_length(int(arg))
+                    except ValueError:
+                        print(f"{Colors.RED}Must be an integer{Colors.RESET}")
+            elif action == "tool-suppress":
+                if not arg or arg.lower() not in ("true", "false", "1", "0", "yes", "no"):
+                    print(f"{Colors.RED}Usage: tool-suppress <true|false>{Colors.RESET}")
+                else:
+                    self.set_tool_suppress(arg.lower() in ("true", "1", "yes"))
             elif action == "gate-list":
                 self.gate_list()
             elif action == "llm-allow":
@@ -1776,11 +1791,22 @@ class PluginManager:
         max_users = self.config.get("max_users", 50)
         timeout = self.config.get("session_idle_timeout_minutes", 60)
 
+        tool_preview_length = self.config.get("tool_preview_length", 500)
+        if tool_preview_length == -1:
+            tpl_str = "unlimited (-1)"
+        elif tool_preview_length == 0:
+            tpl_str = "tags only, no content (0)"
+        else:
+            tpl_str = f"{tool_preview_length} chars"
+        tool_suppress = self.config.get("tool_suppress", False)
+
         print(f"\n{Colors.BOLD}History Configuration:{Colors.RESET}")
         print(f"  agent_max_ctx            : {agent_max_ctx} messages")
         print(f"  max_users                : {max_users} simultaneous sessions")
         timeout_str = f"{timeout} minutes" if timeout > 0 else "disabled"
         print(f"  session_idle_timeout     : {timeout_str}")
+        print(f"  tool_preview_length      : {tpl_str}")
+        print(f"  tool_suppress            : {'enabled' if tool_suppress else 'disabled'}")
         print(f"\n{Colors.BOLD}Active chain (in order):{Colors.RESET}")
         for i, name in enumerate(chain):
             marker = f"{Colors.GREEN}✓{Colors.RESET}" if name in available else f"{Colors.RED}✗ MISSING{Colors.RESET}"
@@ -1884,6 +1910,35 @@ class PluginManager:
         if self._save_plugins_enabled():
             status = f"{minutes} minutes" if minutes > 0 else "disabled"
             print(f"{Colors.GREEN}✓ session_idle_timeout: {old} → {status}{Colors.RESET}")
+            return True
+        return False
+
+    def set_tool_preview_length(self, value: int) -> bool:
+        """Set default tool_preview_length in plugins-enabled.json.
+        -1 = unlimited, 0 = tags only (no content), >0 = truncate to N chars."""
+        if value < -1:
+            print(f"{Colors.RED}✗ tool_preview_length must be -1 (unlimited), 0 (tags only), or >= 1.{Colors.RESET}")
+            return False
+        old = self.config.get("tool_preview_length", 500)
+        self.config["tool_preview_length"] = value
+        if self._save_plugins_enabled():
+            if value == -1:
+                label = "unlimited"
+            elif value == 0:
+                label = "tags only (no content)"
+            else:
+                label = f"{value} chars"
+            print(f"{Colors.GREEN}✓ tool_preview_length: {old} → {label}{Colors.RESET}")
+            return True
+        return False
+
+    def set_tool_suppress(self, value: bool) -> bool:
+        """Set default tool_suppress in plugins-enabled.json."""
+        old = self.config.get("tool_suppress", False)
+        self.config["tool_suppress"] = value
+        if self._save_plugins_enabled():
+            status = "enabled" if value else "disabled"
+            print(f"{Colors.GREEN}✓ tool_suppress: {old} → {status}{Colors.RESET}")
             return True
         return False
 
@@ -2066,6 +2121,24 @@ def main():
                     return 1
             except ValueError:
                 print(f"{Colors.RED}✗ Timeout must be an integer (minutes){Colors.RESET}")
+                return 1
+        elif cmd == "tool-preview-length" and len(sys.argv) > 2:
+            try:
+                if not manager.set_tool_preview_length(int(sys.argv[2])):
+                    return 1
+            except ValueError:
+                print(f"{Colors.RED}✗ tool_preview_length must be an integer{Colors.RESET}")
+                return 1
+        elif cmd == "tool-suppress" and len(sys.argv) > 2:
+            val_str = sys.argv[2].lower()
+            if val_str in ("true", "1", "yes", "on"):
+                if not manager.set_tool_suppress(True):
+                    return 1
+            elif val_str in ("false", "0", "no", "off"):
+                if not manager.set_tool_suppress(False):
+                    return 1
+            else:
+                print(f"{Colors.RED}✗ tool-suppress value must be true/false{Colors.RESET}")
                 return 1
 
         else:

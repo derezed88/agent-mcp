@@ -323,56 +323,85 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
 
     # Tool-specific logging and execution
     try:
-        # Display tool call info
-        if tool_name == "db_query":
-            sql = tool_args.get("sql", "")
-            await push_tok(client_id, f"\n[db ▶] {sql}\n")
-        elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
-            await push_tok(client_id, f"\n[sysprompt ▶] {tool_name}…\n")
-        elif tool_name in ("sysprompt_list", "sysprompt_read"):
-            await push_tok(client_id, "\n[sysprompt ▶] reading…\n")
-        elif tool_name == "get_system_info":
-            await push_tok(client_id, "\n[sysinfo ▶] fetching…\n")
-        elif tool_name == "google_search":
-            query = tool_args.get("query", "")
-            await push_tok(client_id, f"\n[search google ▶] {query}\n")
-        elif tool_name == "ddgs_search":
-            query = tool_args.get("query", "")
-            await push_tok(client_id, f"\n[search ddgs ▶] {query}\n")
-        elif tool_name == "tavily_search":
-            query = tool_args.get("query", "")
-            await push_tok(client_id, f"\n[search tavily ▶] {query}\n")
-        elif tool_name == "google_drive":
-            op = tool_args.get("operation", "?")
-            await push_tok(client_id, f"\n[drive ▶] {op}\n")
-        else:
-            await push_tok(client_id, f"\n[{tool_name} ▶] executing…\n")
+        # Display tool call info (suppressed if tool_suppress=True)
+        _tool_suppress = sessions.get(client_id, {}).get("tool_suppress", False)
+        if not _tool_suppress:
+            if tool_name == "db_query":
+                sql = tool_args.get("sql", "")
+                await push_tok(client_id, f"\n[db ▶] {sql}\n")
+            elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
+                await push_tok(client_id, f"\n[sysprompt ▶] {tool_name}…\n")
+            elif tool_name in ("sysprompt_list", "sysprompt_read"):
+                await push_tok(client_id, "\n[sysprompt ▶] reading…\n")
+            elif tool_name == "get_system_info":
+                await push_tok(client_id, "\n[sysinfo ▶] fetching…\n")
+            elif tool_name == "google_search":
+                query = tool_args.get("query", "")
+                await push_tok(client_id, f"\n[search google ▶] {query}\n")
+            elif tool_name == "ddgs_search":
+                query = tool_args.get("query", "")
+                await push_tok(client_id, f"\n[search ddgs ▶] {query}\n")
+            elif tool_name == "tavily_search":
+                query = tool_args.get("query", "")
+                await push_tok(client_id, f"\n[search tavily ▶] {query}\n")
+            elif tool_name == "google_drive":
+                op = tool_args.get("operation", "?")
+                await push_tok(client_id, f"\n[drive ▶] {op}\n")
+            else:
+                await push_tok(client_id, f"\n[{tool_name} ▶] executing…\n")
 
         # Execute the tool
         result = await executor(**tool_args)
 
         # Display result with preview (length controlled by per-session tool_preview_length)
-        # 0 = unlimited, default = 500
-        preview_len = sessions.get(client_id, {}).get("tool_preview_length", 500)
+        # -1 = unlimited (no truncation), 0 = tags printed but no content, >0 = truncate to N chars
+        sess = sessions.get(client_id, {})
+        tool_suppress = sess.get("tool_suppress", False)
+        preview_len = sess.get("tool_preview_length", 500)
         result_str = str(result)
-        preview = result_str if (preview_len == 0 or len(result_str) <= preview_len) else result_str[:preview_len] + "\n…(truncated)"
 
-        if tool_name == "db_query":
-            await push_tok(client_id, f"[db ◀]\n{preview}\n")
-        elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
-            await push_tok(client_id, f"[sysprompt ◀] {result}\n")
-        elif tool_name in ("sysprompt_list", "sysprompt_read"):
-            await push_tok(client_id, f"[sysprompt ◀]\n{preview}\n")
+        if not tool_suppress:
+            if preview_len == 0:
+                preview = ""
+            elif preview_len == -1 or len(result_str) <= preview_len:
+                preview = result_str
+            else:
+                preview = result_str[:preview_len] + "\n…(truncated)"
+
+            if tool_name == "db_query":
+                if preview:
+                    await push_tok(client_id, f"[db ◀]\n{preview}\n")
+                else:
+                    await push_tok(client_id, "[db ◀]\n")
+            elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
+                await push_tok(client_id, f"[sysprompt ◀] {result}\n")
+            elif tool_name in ("sysprompt_list", "sysprompt_read"):
+                if preview:
+                    await push_tok(client_id, f"[sysprompt ◀]\n{preview}\n")
+                else:
+                    await push_tok(client_id, "[sysprompt ◀]\n")
+            elif tool_name == "get_system_info":
+                await push_tok(client_id, f"[sysinfo ◀] {result}\n")
+                return json.dumps(result) if isinstance(result, dict) else str(result)
+            elif tool_name in ("google_search", "ddgs_search", "tavily_search"):
+                label = {"google_search": "google", "ddgs_search": "ddgs", "tavily_search": "tavily"}[tool_name]
+                if preview:
+                    await push_tok(client_id, f"[search {label} ◀]\n{preview}\n")
+                else:
+                    await push_tok(client_id, f"[search {label} ◀]\n")
+            elif tool_name == "google_drive":
+                if preview:
+                    await push_tok(client_id, f"[drive ◀]\n{preview}\n")
+                else:
+                    await push_tok(client_id, "[drive ◀]\n")
+            else:
+                if preview:
+                    await push_tok(client_id, f"[{tool_name} ◀]\n{preview}\n")
+                else:
+                    await push_tok(client_id, f"[{tool_name} ◀]\n")
         elif tool_name == "get_system_info":
-            await push_tok(client_id, f"[sysinfo ◀] {result}\n")
+            # get_system_info needs the return even when suppressed
             return json.dumps(result) if isinstance(result, dict) else str(result)
-        elif tool_name in ("google_search", "ddgs_search", "tavily_search"):
-            label = {"google_search": "google", "ddgs_search": "ddgs", "tavily_search": "tavily"}[tool_name]
-            await push_tok(client_id, f"[search {label} ◀]\n{preview}\n")
-        elif tool_name == "google_drive":
-            await push_tok(client_id, f"[drive ◀]\n{preview}\n")
-        else:
-            await push_tok(client_id, f"[{tool_name} ◀]\n{preview}\n")
 
         return str(result)
 
@@ -607,7 +636,8 @@ async def llm_clean_text(model: str, prompt: str) -> str:
 
     timeout = cfg.get("llm_call_timeout", 60)
 
-    await push_tok(client_id, f"\n[llm_clean_text ▶] {model}: {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n")
+    if not sessions.get(client_id, {}).get("tool_suppress", False):
+        await push_tok(client_id, f"\n[llm_clean_text ▶] {model}: {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n")
 
     try:
         llm = _build_lc_llm(model)
@@ -617,9 +647,16 @@ async def llm_clean_text(model: str, prompt: str) -> str:
         )
         result = _content_to_str(response.content)
 
-        preview_len = sessions.get(client_id, {}).get("tool_preview_length", 500)
-        preview = result if (preview_len == 0 or len(result) <= preview_len) else result[:preview_len] + "\n…(truncated)"
-        await push_tok(client_id, f"[llm_clean_text ◀] {model}:\n{preview}\n")
+        _sess = sessions.get(client_id, {})
+        _suppress = _sess.get("tool_suppress", False)
+        if not _suppress:
+            preview_len = _sess.get("tool_preview_length", 500)
+            if preview_len == 0:
+                await push_tok(client_id, f"[llm_clean_text ◀] {model}:\n")
+            elif preview_len == -1 or len(result) <= preview_len:
+                await push_tok(client_id, f"[llm_clean_text ◀] {model}:\n{result}\n")
+            else:
+                await push_tok(client_id, f"[llm_clean_text ◀] {model}:\n{result[:preview_len]}\n…(truncated)\n")
         return result
 
     except asyncio.TimeoutError:

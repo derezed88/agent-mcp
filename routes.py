@@ -75,6 +75,8 @@ def _load_system_int(key: str, default: int) -> int:
 # Runtime overrides (survive until restart)
 _runtime_max_users: int | None = None
 _runtime_session_idle_timeout: int | None = None
+_runtime_tool_preview_length: int | None = None
+_runtime_tool_suppress: bool | None = None
 
 def get_max_users() -> int:
     if _runtime_max_users is not None:
@@ -85,6 +87,20 @@ def get_session_idle_timeout() -> int:
     if _runtime_session_idle_timeout is not None:
         return _runtime_session_idle_timeout
     return _load_system_int("session_idle_timeout_minutes", 60)
+
+def get_default_tool_preview_length() -> int:
+    if _runtime_tool_preview_length is not None:
+        return _runtime_tool_preview_length
+    return _load_system_int("tool_preview_length", 500)
+
+def get_default_tool_suppress() -> bool:
+    if _runtime_tool_suppress is not None:
+        return _runtime_tool_suppress
+    try:
+        with open(_PLUGINS_ENABLED_PATH) as f:
+            return bool(json.load(f).get("tool_suppress", False))
+    except Exception:
+        return False
 
 # Context flag for batch command processing
 _batch_mode = {}  # client_id -> bool
@@ -157,7 +173,8 @@ async def cmd_help(client_id: str):
         "Session & History:\n"
         "  !session                                  - list all active sessions\n"
         "  !session <ID> delete                      - delete a session from server\n"
-        "  !tool_preview_length [n]                  - get/set tool result display limit (0=unlimited, default=500)\n"
+        "  !tool_preview_length [n]                  - get/set tool result display limit (-1=unlimited, 0=tags only, default=500)\n"
+        "  !tool_suppress [true|false]               - suppress all tool tags and previews (only LLM response shown)\n"
         "  !maxctx [n]                               - get/set agent-wide max history messages\n"
         "  !maxusers [n]                             - get/set max simultaneous sessions\n"
         "  !sessiontimeout [minutes]                 - get/set session idle timeout\n"
@@ -1024,34 +1041,73 @@ async def cmd_tool_preview_length(client_id: str, arg: str, session: dict):
     The full result is always sent to the LLM regardless of this setting.
 
     !tool_preview_length       - show current setting
-    !tool_preview_length <n>   - set to n characters (0 = unlimited)
+    !tool_preview_length <n>   - set to n characters
+                                 0  = tags printed but no preview content
+                                 -1 = no limit (show full output)
+                                 >0 = truncate to n chars (default 500)
     """
     arg = arg.strip()
     if not arg:
         current = session.get("tool_preview_length", 500)
-        limit_str = f"{current} chars" if current > 0 else "unlimited"
+        if current == -1:
+            limit_str = "unlimited (-1)"
+        elif current == 0:
+            limit_str = "tags only, no content (0)"
+        else:
+            limit_str = f"{current} chars"
         await push_tok(client_id, f"Tool preview length: {limit_str}")
         await conditional_push_done(client_id)
         return
 
-    if arg == "0" or arg.lower() in ("off", "unlimited"):
-        session["tool_preview_length"] = 0
-        await push_tok(client_id, "Tool preview length: unlimited (no truncation)")
-    else:
-        try:
-            n = int(arg)
-            if n < 1:
-                await push_tok(client_id,
-                    "ERROR: Value must be >= 1, or 0 for unlimited\n"
-                    "Usage: !tool_preview_length <n>")
-                await conditional_push_done(client_id)
-                return
-            session["tool_preview_length"] = n
-            await push_tok(client_id, f"Tool preview length set to {n} chars.")
-        except ValueError:
+    try:
+        n = int(arg)
+        if n < -1:
             await push_tok(client_id,
-                f"ERROR: Invalid value '{arg}'\n"
-                "Usage: !tool_preview_length [n]  (0 = unlimited)")
+                "ERROR: Value must be -1 (unlimited), 0 (tags only), or >= 1 (truncate to n chars)\n"
+                "Usage: !tool_preview_length <n>")
+            await conditional_push_done(client_id)
+            return
+        session["tool_preview_length"] = n
+        if n == -1:
+            await push_tok(client_id, "Tool preview length: unlimited (full output shown).\n(Persist: agentctl tool-preview-length -1)")
+        elif n == 0:
+            await push_tok(client_id, "Tool preview length: tags only (no content shown).\n(Persist: agentctl tool-preview-length 0)")
+        else:
+            await push_tok(client_id, f"Tool preview length set to {n} chars.\n(Persist: agentctl tool-preview-length {n})")
+    except ValueError:
+        await push_tok(client_id,
+            f"ERROR: Invalid value '{arg}'\n"
+            "Usage: !tool_preview_length [n]  (-1=unlimited, 0=tags only, >0=truncate)")
+    await conditional_push_done(client_id)
+
+
+async def cmd_tool_suppress(client_id: str, arg: str, session: dict):
+    """
+    Get or set tool suppression mode for this session.
+    When enabled, no tool tags or preview content are shown during LLM tool calls.
+    Only the final LLM response is displayed.
+
+    !tool_suppress             - show current setting
+    !tool_suppress <true|false> - enable or disable suppression
+    """
+    arg = arg.strip().lower()
+    if not arg:
+        current = session.get("tool_suppress", False)
+        status = "enabled" if current else "disabled"
+        await push_tok(client_id, f"Tool suppress: {status}")
+        await conditional_push_done(client_id)
+        return
+
+    if arg in ("true", "1", "yes", "on"):
+        session["tool_suppress"] = True
+        await push_tok(client_id, "Tool suppress enabled — no tags or previews during tool calls.\n(Persist: agentctl tool-suppress true)")
+    elif arg in ("false", "0", "no", "off"):
+        session["tool_suppress"] = False
+        await push_tok(client_id, "Tool suppress disabled — normal tool preview behavior.\n(Persist: agentctl tool-suppress false)")
+    else:
+        await push_tok(client_id,
+            f"ERROR: Invalid value '{arg}'\n"
+            "Usage: !tool_suppress <true|false>")
     await conditional_push_done(client_id)
 
 
@@ -1233,6 +1289,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             "model": model_key,
             "history": [],
             "history_max_ctx": effective_ctx,
+            "tool_preview_length": get_default_tool_preview_length(),
+            "tool_suppress": get_default_tool_suppress(),
         }
         # Assign shorthand ID when session is created
         get_or_create_shorthand_id(client_id)
@@ -1309,6 +1367,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_llm_timeout(client_id, arg)
                 elif cmd == "tool_preview_length":
                     await cmd_tool_preview_length(client_id, arg, session)
+                elif cmd == "tool_suppress":
+                    await cmd_tool_suppress(client_id, arg, session)
                 elif cmd == "stream":
                     await cmd_stream(client_id, arg, session)
                 elif cmd == "limit_depth_list":
@@ -1445,6 +1505,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "tool_preview_length":
             await cmd_tool_preview_length(client_id, arg, session)
+            return
+        if cmd == "tool_suppress":
+            await cmd_tool_suppress(client_id, arg, session)
             return
         if cmd == "stream":
             await cmd_stream(client_id, arg, session)
