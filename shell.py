@@ -805,31 +805,29 @@ async def input_loop(stdscr):
             # line (two consecutive newlines) or the preceding char is a space.
             normalized = text.replace('\r\n', '\n').replace('\r', '\n')
 
-            # Join soft-wrapped lines: line ends mid-word (non-space) AND next
-            # line starts with a lowercase letter — classic terminal soft-wrap.
-            # Exclude: any line in the block that starts with '!' (commands),
-            # because a command like "!sleep_gate_read\nfalse" must stay split.
+            # Join only true mid-word terminal soft-wraps.
+            # Conditions for joining line N with line N+1:
+            #   1. Line N ends with an alphanumeric char (cut mid-word)
+            #   2. Line N+1 starts with a lowercase letter (word continues)
+            #   3. Line N does NOT start with '!' (never glue command lines)
+            # This handles "servic\ne" → "service" while keeping Keep-pasted
+            # command blocks (which start new words on each line) separate.
             def _join_soft_wraps(text: str) -> str:
                 lines = text.split('\n')
                 out = []
                 i = 0
                 while i < len(lines):
                     line = lines[i]
-                    # While next line looks like a soft-wrap continuation:
-                    # - current line ends with non-space
-                    # - next line starts with a lowercase letter
-                    # - neither line starts with '!' (command boundary)
                     while (
                         i + 1 < len(lines)
                         and line
-                        and not line[-1].isspace()
+                        and line[-1].isalnum()
                         and lines[i + 1]
                         and lines[i + 1][0].islower()
                         and not line.lstrip().startswith('!')
-                        and not lines[i + 1].lstrip().startswith('!')
                     ):
                         i += 1
-                        line = line + ' ' + lines[i]
+                        line = line + lines[i]   # no space: glue mid-word
                     out.append(line)
                     i += 1
                 return '\n'.join(out)
