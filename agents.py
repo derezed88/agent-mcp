@@ -126,24 +126,44 @@ def _build_lc_llm(model_key: str):
     """
     Build a LangChain chat model from LLM_REGISTRY config.
 
+    When token_selection_setting == "custom", passes temperature/top_p/top_k
+    to the constructor.  When "default", no sampling parameters are passed so
+    the API backend uses its own defaults.
+
     Returns a ChatOpenAI or ChatGoogleGenerativeAI instance.
     Both expose the same .ainvoke() / .astream() interface.
     """
     cfg = LLM_REGISTRY[model_key]
+    use_custom = cfg.get("token_selection_setting", "default") == "custom"
+
     if cfg["type"] == "OPENAI":
-        return ChatOpenAI(
+        kwargs = dict(
             model=cfg["model_id"],
             base_url=cfg.get("host"),
             api_key=cfg.get("key") or "no-key-required",
             streaming=True,
             timeout=cfg.get("llm_call_timeout", 60),
         )
+        if use_custom:
+            kwargs["temperature"] = cfg.get("temperature", 1.0)
+            kwargs["top_p"]       = cfg.get("top_p", 1.0)
+            # top_k is not passed for OPENAI (not supported by standard OpenAI API)
+        return ChatOpenAI(**kwargs)
+
     if cfg["type"] == "GEMINI":
-        return ChatGoogleGenerativeAI(
+        kwargs = dict(
             model=cfg["model_id"],
             google_api_key=cfg.get("key"),
             request_timeout=cfg.get("llm_call_timeout", 60),
         )
+        if use_custom:
+            kwargs["temperature"] = cfg.get("temperature", 1.0)
+            kwargs["top_p"]       = cfg.get("top_p", 0.95)
+            top_k = cfg.get("top_k")
+            if top_k is not None:
+                kwargs["top_k"] = int(top_k)
+        return ChatGoogleGenerativeAI(**kwargs)
+
     raise ValueError(f"Unsupported model type '{cfg['type']}' for model '{model_key}'")
 
 
@@ -155,16 +175,20 @@ def _content_to_str(content) -> str:
       - str  (OpenAI, most models)
       - list of dicts (Gemini multimodal, Anthropic content blocks)
         e.g. [{'type': 'text', 'text': '...'}, {'type': 'tool_use', ...}]
+      - list of str  (Gemini 2.5 Flash sometimes returns this)
 
     Extracts all 'text' blocks and joins them. Returns "" for non-text only.
     """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return " ".join(
-            block.get("text", "") for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return " ".join(parts).strip()
     return ""
 
 
@@ -580,6 +604,13 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 final = _content_to_str(ai_msg.content)
                 if final:
                     await push_tok(client_id, final)
+                else:
+                    log.warning(
+                        f"agentic_lc: empty response from model={model_key} "
+                        f"client={client_id} ctx_len={len(ctx)} "
+                        f"raw_content={repr(ai_msg.content)} "
+                        f"metadata={getattr(ai_msg, 'response_metadata', {})}"
+                    )
                 await push_done(client_id)
                 return final
 
