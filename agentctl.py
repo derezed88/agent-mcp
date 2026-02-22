@@ -895,6 +895,103 @@ class PluginManager:
             return True
         return False
 
+    def _require_model(self, model_name: str) -> dict | None:
+        """Return model entry from models dict, printing an error if not found."""
+        models = self.models.get('models', {})
+        if model_name not in models:
+            print(f"{Colors.RED}Model '{model_name}' not found{Colors.RESET}")
+            available = ", ".join(sorted(models.keys()))
+            print(f"  Available: {available}")
+            return None
+        return models[model_name]
+
+    def model_token_selection(self, model_name: str, value: str):
+        """Set token_selection_setting for a model ('default' or 'custom')."""
+        entry = self._require_model(model_name)
+        if entry is None:
+            return False
+        value = value.strip().lower()
+        if value not in ("default", "custom"):
+            print(f"{Colors.RED}✗ token_selection_setting must be 'default' or 'custom'{Colors.RESET}")
+            return False
+        old = entry.get('token_selection_setting', 'default')
+        entry['token_selection_setting'] = value
+        if self.save_models():
+            print(f"{Colors.GREEN}✓ token_selection_setting for '{model_name}': {old} → {value}{Colors.RESET}")
+            print(f"{Colors.CYAN}Takes effect on the next LLM call (no restart needed).{Colors.RESET}")
+            return True
+        return False
+
+    def model_temperature(self, model_name: str, value: float):
+        """Set temperature for a model (0.0–2.0)."""
+        entry = self._require_model(model_name)
+        if entry is None:
+            return False
+        if not (0.0 <= value <= 2.0):
+            print(f"{Colors.RED}✗ temperature must be in [0.0, 2.0], got {value}{Colors.RESET}")
+            return False
+        old = entry.get('temperature', 1.0)
+        entry['temperature'] = value
+        if self.save_models():
+            print(f"{Colors.GREEN}✓ temperature for '{model_name}': {old} → {value}{Colors.RESET}")
+            print(f"{Colors.CYAN}Takes effect on the next LLM call (no restart needed).{Colors.RESET}")
+            return True
+        return False
+
+    def model_top_p(self, model_name: str, value: float):
+        """Set top_p for a model (0.0–1.0)."""
+        entry = self._require_model(model_name)
+        if entry is None:
+            return False
+        if not (0.0 <= value <= 1.0):
+            print(f"{Colors.RED}✗ top_p must be in [0.0, 1.0], got {value}{Colors.RESET}")
+            return False
+        old = entry.get('top_p', 1.0)
+        entry['top_p'] = value
+        if self.save_models():
+            print(f"{Colors.GREEN}✓ top_p for '{model_name}': {old} → {value}{Colors.RESET}")
+            print(f"{Colors.CYAN}Takes effect on the next LLM call (no restart needed).{Colors.RESET}")
+            return True
+        return False
+
+    def model_top_k(self, model_name: str, value: int):
+        """Set top_k for a GEMINI model (int >= 1)."""
+        entry = self._require_model(model_name)
+        if entry is None:
+            return False
+        if entry.get('type') != 'GEMINI':
+            print(f"{Colors.RED}✗ top_k is only supported for GEMINI-type models. '{model_name}' is {entry.get('type')}.{Colors.RESET}")
+            return False
+        if value < 1:
+            print(f"{Colors.RED}✗ top_k must be >= 1, got {value}{Colors.RESET}")
+            return False
+        old = entry.get('top_k', 40)
+        entry['top_k'] = value
+        if self.save_models():
+            print(f"{Colors.GREEN}✓ top_k for '{model_name}': {old} → {value}{Colors.RESET}")
+            print(f"{Colors.CYAN}Takes effect on the next LLM call (no restart needed).{Colors.RESET}")
+            return True
+        return False
+
+    def model_token_selection_list(self):
+        """List token selection settings for all models."""
+        models = self.models.get('models', {})
+        if not models:
+            print(f"{Colors.YELLOW}No models configured.{Colors.RESET}")
+            return
+        print(f"{Colors.BOLD}Token selection settings:{Colors.RESET}")
+        print(f"  {'Model':<16} {'Type':<6} {'Mode':<8}  {'Temp':>5}  {'top_p':>6}  {'top_k':>6}")
+        print(f"  {'-'*16} {'-'*6} {'-'*8}  {'-'*5}  {'-'*6}  {'-'*6}")
+        for name in sorted(models.keys()):
+            m = models[name]
+            mtype = m.get('type', '?')
+            setting = m.get('token_selection_setting', 'default')
+            temp = m.get('temperature', 1.0)
+            top_p = m.get('top_p', 1.0)
+            top_k = m.get('top_k', 'N/A') if mtype == 'GEMINI' else 'N/A'
+            enabled = '' if m.get('enabled', True) else f" {Colors.YELLOW}[disabled]{Colors.RESET}"
+            print(f"  {name:<16} {mtype:<6} {setting:<8}  {str(temp):>5}  {str(top_p):>6}  {str(top_k):>6}{enabled}")
+
     def set_model_description(self, model_name: str, description: str):
         """Set description for a model."""
         models = self.models.get('models', {})
@@ -982,7 +1079,7 @@ class PluginManager:
 
     def ratelimit_set(self, tool_type: str, calls: int, window_seconds: int):
         """Set rate limit for a tool type in plugins-enabled.json."""
-        valid_types = {"llm_call", "search", "extract", "drive", "db", "system"}
+        valid_types = {"llm_call", "search", "extract", "drive", "db", "system", "agent_call", "tmux"}
         if tool_type not in valid_types:
             print(f"{Colors.RED}Unknown tool type '{tool_type}'{Colors.RESET}")
             print(f"Valid types: {', '.join(sorted(valid_types))}")
@@ -1016,7 +1113,7 @@ class PluginManager:
 
     def ratelimit_auto_disable(self, tool_type: str, value: bool):
         """Set auto_disable flag for a tool type rate limit."""
-        valid_types = {"llm_call", "search", "extract", "drive", "db", "system"}
+        valid_types = {"llm_call", "search", "extract", "drive", "db", "system", "agent_call", "tmux"}
         if tool_type not in valid_types:
             print(f"{Colors.RED}Unknown tool type '{tool_type}'{Colors.RESET}")
             print(f"Valid types: {', '.join(sorted(valid_types))}")
@@ -1082,6 +1179,10 @@ class PluginManager:
         "sysprompt_write": ["write"],
         "session":         ["read", "write"],
         "model":           ["write"],
+        "model_copy":      ["write"],
+        "model_delete":    ["write"],
+        "model_enable":    ["write"],
+        "model_disable":   ["write"],
         "reset":           ["write"],
         "sleep":           ["read"],
     }
@@ -1403,6 +1504,13 @@ class PluginManager:
         print("  model-llmcall <name> <true|false> - Set tool_call_available for model")
         print("  model-llmcall-all <true|false>    - Set tool_call_available for all enabled models")
         print("  model-timeout <name> <secs>       - Set llm_call_timeout for model")
+        print(f"\n{Colors.BOLD}Token Selection Commands:{Colors.RESET}")
+        print("  model-token-selection-list                - List temperature/top_p/top_k/mode for all models")
+        print("  model-token-selection <name> <default|custom> - Set token_selection_setting (persists)")
+        print("  model-temperature <name> <value>          - Set temperature (float 0.0–2.0, persists)")
+        print("  model-top-p <name> <value>                - Set top_p (float 0.0–1.0, persists)")
+        print("  model-top-k <name> <value>                - Set top_k (int >= 1, GEMINI only, persists)")
+        print(f"  Note: Changes take effect on the next LLM call (no restart needed).")
         print(f"\n{Colors.BOLD}Port Configuration:{Colors.RESET}")
         print("  port-list                         - Show listening ports for all client plugins")
         print("  port-set <plugin> <port>          - Set listening port for a plugin")
@@ -1708,6 +1816,41 @@ class PluginManager:
                     print(f"{Colors.RED}Usage: sleep-gate-allow <true|false>{Colors.RESET}")
                 else:
                     self.sleep_gate_allow(arg.lower() in ("true", "1", "yes"))
+            elif action == "model-token-selection-list":
+                self.model_token_selection_list()
+            elif action == "model-token-selection":
+                sub = arg.split()
+                if len(sub) < 2:
+                    print(f"{Colors.RED}Usage: model-token-selection <model> <default|custom>{Colors.RESET}")
+                else:
+                    self.model_token_selection(sub[0], sub[1])
+            elif action == "model-temperature":
+                sub = arg.split()
+                if len(sub) < 2:
+                    print(f"{Colors.RED}Usage: model-temperature <model> <value>{Colors.RESET}")
+                else:
+                    try:
+                        self.model_temperature(sub[0], float(sub[1]))
+                    except ValueError:
+                        print(f"{Colors.RED}✗ temperature must be a float (0.0–2.0){Colors.RESET}")
+            elif action == "model-top-p":
+                sub = arg.split()
+                if len(sub) < 2:
+                    print(f"{Colors.RED}Usage: model-top-p <model> <value>{Colors.RESET}")
+                else:
+                    try:
+                        self.model_top_p(sub[0], float(sub[1]))
+                    except ValueError:
+                        print(f"{Colors.RED}✗ top_p must be a float (0.0–1.0){Colors.RESET}")
+            elif action == "model-top-k":
+                sub = arg.split()
+                if len(sub) < 2:
+                    print(f"{Colors.RED}Usage: model-top-k <model> <value>{Colors.RESET}")
+                else:
+                    try:
+                        self.model_top_k(sub[0], int(sub[1]))
+                    except ValueError:
+                        print(f"{Colors.RED}✗ top_k must be an integer >= 1{Colors.RESET}")
             else:
                 print(f"{Colors.RED}Unknown command: {action}{Colors.RESET}")
 
@@ -2139,6 +2282,33 @@ def main():
                     return 1
             else:
                 print(f"{Colors.RED}✗ tool-suppress value must be true/false{Colors.RESET}")
+                return 1
+
+        # Token selection commands
+        elif cmd == "model-token-selection-list":
+            manager.model_token_selection_list()
+        elif cmd == "model-token-selection" and len(sys.argv) > 3:
+            manager.model_token_selection(sys.argv[2], sys.argv[3])
+        elif cmd == "model-temperature" and len(sys.argv) > 3:
+            try:
+                if not manager.model_temperature(sys.argv[2], float(sys.argv[3])):
+                    return 1
+            except ValueError:
+                print(f"{Colors.RED}✗ temperature must be a float (0.0–2.0){Colors.RESET}")
+                return 1
+        elif cmd == "model-top-p" and len(sys.argv) > 3:
+            try:
+                if not manager.model_top_p(sys.argv[2], float(sys.argv[3])):
+                    return 1
+            except ValueError:
+                print(f"{Colors.RED}✗ top_p must be a float (0.0–1.0){Colors.RESET}")
+                return 1
+        elif cmd == "model-top-k" and len(sys.argv) > 3:
+            try:
+                if not manager.model_top_k(sys.argv[2], int(sys.argv[3])):
+                    return 1
+            except ValueError:
+                print(f"{Colors.RED}✗ top_k must be an integer >= 1{Colors.RESET}")
                 return 1
 
         else:

@@ -21,3 +21,4 @@ tool-llm-delegation: llm_call, llm_timeout, and stream tool definitions
 tool-limits: limit_list and limit_set tool definitions
 tool-tool-preview-length: tool_preview_length tool definition
 tool-outbound-agent-filters: outbound_agent_filters tool definition
+tool-model-copy-delete: model_copy, model_delete, model_enable, model_disable tool definitions

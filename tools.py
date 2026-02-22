@@ -214,6 +214,10 @@ def get_core_tools():
             'sleep':                     _sleep_exec,
             'token_selection_list':      _token_selection_list_exec,
             'token_selection_set':       _token_selection_set_exec,
+            'model_copy':                _model_copy_exec,
+            'model_delete':              _model_delete_exec,
+            'model_enable':              _model_enable_exec,
+            'model_disable':             _model_disable_exec,
         }
     }
 
@@ -298,6 +302,10 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "sleep":                        "system",
     "token_selection_list":         "system",
     "token_selection_set":          "system",
+    "model_copy":                   "system",
+    "model_delete":                 "system",
+    "model_enable":                 "system",
+    "model_disable":                "system",
 }
 
 
@@ -352,6 +360,10 @@ def get_tool_executor(tool_name: str):
         'sleep':                     _sleep_exec,
         'token_selection_list':      _token_selection_list_exec,
         'token_selection_set':       _token_selection_set_exec,
+        'model_copy':                _model_copy_exec,
+        'model_delete':              _model_delete_exec,
+        'model_enable':              _model_enable_exec,
+        'model_disable':             _model_disable_exec,
     }
 
     if tool_name in core_executors:
@@ -905,6 +917,10 @@ async def _gate_list_exec() -> str:
         "limit_max_iteration_set":  ["write"],
         "token_selection_list":     ["read"],
         "token_selection_set":      ["write"],
+        "model_copy":               ["write"],
+        "model_delete":             ["write"],
+        "model_enable":             ["write"],
+        "model_disable":            ["write"],
     }
     all_tools = dict(_CORE_GATED)
     for name, meta in gate_tools.items():
@@ -1238,6 +1254,102 @@ class _TokenSelectionSetArgs(BaseModel):
             "For token_selection_setting: 'default' uses API defaults, 'custom' applies the stored values."
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Model copy / delete tool arg schemas and executors
+# ---------------------------------------------------------------------------
+
+class _ModelCopyArgs(BaseModel):
+    source_model: str = Field(
+        description=(
+            "Key of the existing model to copy from (e.g. 'gemini25f'). "
+            "Use model(action='list') or llm_list() to see valid keys."
+        )
+    )
+    new_model_name: str = Field(
+        description=(
+            "Unique key for the new model copy (e.g. 'gemini25f_lowtemp'). "
+            "Must not already exist. Use lowercase letters, digits, and underscores."
+        )
+    )
+
+
+class _ModelDeleteArgs(BaseModel):
+    model_name: str = Field(
+        description=(
+            "Key of the model to permanently delete (e.g. 'gemini25f_lowtemp'). "
+            "Use model(action='list') or llm_list() to see valid keys. "
+            "Cannot delete the currently active session model."
+        )
+    )
+
+
+async def _model_copy_exec(source_model: str, new_model_name: str) -> str:
+    from config import LLM_REGISTRY, copy_llm_model
+    if source_model not in LLM_REGISTRY:
+        available = ", ".join(sorted(LLM_REGISTRY.keys()))
+        return f"ERROR: Source model '{source_model}' not found.\nAvailable: {available}"
+    if new_model_name in LLM_REGISTRY:
+        return f"ERROR: Model '{new_model_name}' already exists. Choose a different name."
+    ok, msg = copy_llm_model(source_model, new_model_name)
+    if ok:
+        new_cfg = LLM_REGISTRY.get(new_model_name, {})
+        msg += (
+            f"\n  type={new_cfg.get('type')}, model_id={new_cfg.get('model_id')}"
+            f"\n  Use model(action='set', model_key='{new_model_name}') to switch, "
+            f"or token_selection_set() to adjust parameters."
+        )
+    return msg
+
+
+async def _model_delete_exec(model_name: str) -> str:
+    from config import LLM_REGISTRY, delete_llm_model
+    from state import current_client_id, sessions
+    if model_name not in LLM_REGISTRY:
+        available = ", ".join(sorted(LLM_REGISTRY.keys()))
+        return f"ERROR: Model '{model_name}' not found.\nAvailable: {available}"
+    cid = current_client_id.get("")
+    if cid and sessions.get(cid, {}).get("model") == model_name:
+        return (
+            f"ERROR: Cannot delete '{model_name}' — it is the active model for this session.\n"
+            f"Switch to a different model first with model(action='set', model_key=...), then retry."
+        )
+    ok, msg = delete_llm_model(model_name)
+    return msg
+
+
+class _ModelEnableArgs(BaseModel):
+    model_name: str = Field(
+        description=(
+            "Key of the disabled model to enable (e.g. 'Win11'). "
+            "Use model(action='list') or llm_list() to see available keys. "
+            "A server restart is required for the change to take effect."
+        )
+    )
+
+
+class _ModelDisableArgs(BaseModel):
+    model_name: str = Field(
+        description=(
+            "Key of the model to disable (e.g. 'Win11'). "
+            "Cannot disable the current default model. "
+            "Use model(action='list') or llm_list() to see valid keys. "
+            "A server restart is required for the change to take effect."
+        )
+    )
+
+
+async def _model_enable_exec(model_name: str) -> str:
+    from config import enable_llm_model
+    ok, msg = enable_llm_model(model_name)
+    return msg
+
+
+async def _model_disable_exec(model_name: str) -> str:
+    from config import disable_llm_model
+    ok, msg = disable_llm_model(model_name)
+    return msg
 
 
 def _make_core_lc_tools() -> list:
@@ -1592,6 +1704,55 @@ def _make_core_lc_tools() -> list:
                 "Requires write gate approval (controlled by !token_selection_set_gate_write, default: gated)."
             ),
             args_schema=_TokenSelectionSetArgs,
+        ),
+        # --- Model copy / delete tools ---
+        StructuredTool.from_function(
+            coroutine=_model_copy_exec,
+            name="model_copy",
+            description=(
+                "Copy an existing model entry to a new name. "
+                "The new model inherits all parameters (type, host, model_id, temperature, etc.) from the source. "
+                "Persists to llm-models.json and takes effect immediately — no restart needed. "
+                "Use this to create model variants with different temperature, top_p, or system_prompt_folder. "
+                "Use llm_list() or model(action='list') to see valid source keys. "
+                "Requires write gate approval (controlled by !model_copy_gate_write, default: gated)."
+            ),
+            args_schema=_ModelCopyArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_model_delete_exec,
+            name="model_delete",
+            description=(
+                "Permanently delete a model entry from llm-models.json. "
+                "The model is removed from the in-memory registry immediately — no restart needed. "
+                "Cannot delete the currently active session model; switch first with model(action='set'). "
+                "Use llm_list() or model(action='list') to see valid keys. "
+                "Requires write gate approval (controlled by !model_delete_gate_write, default: gated)."
+            ),
+            args_schema=_ModelDeleteArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_model_enable_exec,
+            name="model_enable",
+            description=(
+                "Enable a disabled model in llm-models.json. "
+                "The model will be available after the next server restart. "
+                "Use model(action='list') or llm_list() to see current model keys. "
+                "Requires write gate approval (controlled by !model_enable_gate_write, default: gated)."
+            ),
+            args_schema=_ModelEnableArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_model_disable_exec,
+            name="model_disable",
+            description=(
+                "Disable an enabled model in llm-models.json. "
+                "Cannot disable the server default model; change the default first. "
+                "The model will be hidden after the next server restart. "
+                "Use model(action='list') or llm_list() to see current model keys. "
+                "Requires write gate approval (controlled by !model_disable_gate_write, default: gated)."
+            ),
+            args_schema=_ModelDisableArgs,
         ),
     ]
 

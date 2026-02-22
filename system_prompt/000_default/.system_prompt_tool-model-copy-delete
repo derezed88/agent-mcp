@@ -1,0 +1,34 @@
+## tool-model-copy-delete: model_copy, model_delete, model_enable, model_disable tool definitions
+
+### model_copy(source_model: str, new_model_name: str) → str
+Copy an existing model entry to a new name in llm-models.json.
+The copy inherits ALL parameters from the source: type, host, model_id, temperature, top_p, top_k,
+token_selection_setting, max_context, tool_call_available, system_prompt_folder, and description.
+Changes persist to llm-models.json and take effect immediately — no server restart needed.
+
+**Use cases:**
+- Create a low-temperature variant: `model_copy("gemini25f", "gemini25f_lowtemp")`, then `token_selection_set("gemini25f_lowtemp", "temperature", "0.2")`
+- Create a model with a different system prompt folder: copy, then `sysprompt_set_dir("gemini25f_custom", "my_folder")`
+
+Requires write gate approval (controlled by !model_copy_gate_write, default: gated).
+
+### model_delete(model_name: str) → str
+Permanently delete a model entry from llm-models.json.
+Removes the model from the in-memory registry immediately — no restart needed.
+Cannot delete the currently active session model; use model(action='set') to switch first.
+
+Requires write gate approval (controlled by !model_delete_gate_write, default: gated).
+
+### model_enable(model_name: str) → str
+Enable a disabled model in llm-models.json.
+The model will be available after the next server restart.
+Cannot enable a model that does not exist in llm-models.json.
+
+Requires write gate approval (controlled by !model_enable_gate_write, default: gated).
+
+### model_disable(model_name: str) → str
+Disable an enabled model in llm-models.json.
+Cannot disable the server default model; change the default first with model(action='set').
+The model will be hidden after the next server restart.
+
+Requires write gate approval (controlled by !model_disable_gate_write, default: gated).

@@ -665,4 +665,29 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         clear_client_gate(client_id)
         return decision == "allow"
 
+    # model_copy / model_delete / model_enable / model_disable: write gate
+    if tool_name in ("model_copy", "model_delete", "model_enable", "model_disable"):
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get(tool_name, {})
+        if tool_perms.get("write", default_perms.get("write", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "write"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
+        return decision == "allow"
+
     return True

@@ -7,7 +7,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from config import log, LLM_REGISTRY, DEFAULT_MODEL
+from config import log, LLM_REGISTRY, DEFAULT_MODEL, copy_llm_model, delete_llm_model, enable_llm_model, disable_llm_model
 from state import sessions, get_queue, push_tok, push_done, push_model, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task, client_active_gates
 from database import execute_sql
 from prompt import (sp_list_files, sp_list_directories, sp_read_prompt, sp_read_file, sp_write_file,
@@ -121,6 +121,10 @@ async def cmd_help(client_id: str):
         "Available commands:\n"
         "  !model                                    - list available models (current marked)\n"
         "  !model <key>                              - switch active LLM\n"
+        "  !model_copy <source> <new_name>           - copy model entry to new name (persists to llm-models.json)\n"
+        "  !model_delete <model>                     - permanently delete a model entry\n"
+        "  !model_enable <model>                     - enable a disabled model (restart required)\n"
+        "  !model_disable <model>                    - disable an enabled model (restart required)\n"
         "  !stop                                     - interrupt the running LLM job\n"
         "  !reset                                    - clear conversation history\n"
         "  !help                                     - this help\n"
@@ -169,6 +173,10 @@ async def cmd_help(client_id: str):
         "  !session_gate_read <t|f>                  - gate session list: true=gated, false=auto-allow\n"
         "  !session_gate_write <t|f>                 - gate session delete: true=gated, false=auto-allow\n"
         "  !model_gate_write <t|f>                   - gate model set: true=gated, false=auto-allow\n"
+        "  !model_copy_gate_write <t|f>              - gate model_copy: true=gated (default), false=auto-allow\n"
+        "  !model_delete_gate_write <t|f>            - gate model_delete: true=gated (default), false=auto-allow\n"
+        "  !model_enable_gate_write <t|f>            - gate model_enable: true=gated (default), false=auto-allow\n"
+        "  !model_disable_gate_write <t|f>           - gate model_disable: true=gated (default), false=auto-allow\n"
         "  !reset_gate_write <t|f>                   - gate reset: true=gated, false=auto-allow\n"
         "\n"
         "Session & History:\n"
@@ -240,6 +248,10 @@ async def cmd_help(client_id: str):
         "  sysprompt_list/read                       - auto-allowed\n"
         "  sysprompt_write/delete/copy_dir/set_dir   - write gate\n"
         "  session/model/reset                       - per-action gate\n"
+        "  model_copy(source_model, new_model_name)  - write-gated; copy model entry (persists)\n"
+        "  model_delete(model_name)                  - write-gated; delete model entry (persists)\n"
+        "  model_enable(model_name)                  - write-gated; enable model (restart required)\n"
+        "  model_disable(model_name)                 - write-gated; disable model (restart required)\n"
     )
     await push_tok(client_id, help_text)
     await conditional_push_done(client_id)
@@ -357,7 +369,8 @@ async def cmd_sysprompt_list_dir(client_id: str):
 
 
 _WRITE_ONLY_GATES = {"agent_call", "at_llm", "sysprompt_write", "model", "reset",
-                     "limit_depth_set", "limit_rate_set", "limit_max_iteration_set"}
+                     "limit_depth_set", "limit_rate_set", "limit_max_iteration_set",
+                     "model_copy", "model_delete", "model_enable", "model_disable"}
 _READ_ONLY_GATES  = {"gate_list", "session",  # session has both but _gate_read makes sense
                      "limit_depth_list", "limit_rate_list", "limit_max_iteration_list", "sleep"}
 
@@ -811,6 +824,140 @@ async def cmd_set_model(client_id: str, key: str, session: dict):
             f"ERROR: Unknown model '{key}'\n"
             f"Available models: {available}\n"
             f"Use !model to list all models")
+    await conditional_push_done(client_id)
+
+
+async def cmd_model_copy(client_id: str, args: str):
+    """
+    Copy an existing model entry to a new name.
+    Usage: !model_copy <source_model> <new_model_name>
+    Persists to llm-models.json and takes effect immediately.
+    """
+    parts = args.split()
+    if len(parts) != 2:
+        await push_tok(client_id,
+            "Usage: !model_copy <source_model> <new_model_name>\n"
+            "  source_model    : key of an existing model (use !model to list)\n"
+            "  new_model_name  : new unique key for the copy\n"
+            "Example: !model_copy gemini25f gemini25f_lowtemp")
+        await conditional_push_done(client_id)
+        return
+
+    source, new_name = parts[0], parts[1]
+
+    if source not in LLM_REGISTRY:
+        available = ", ".join(sorted(LLM_REGISTRY.keys()))
+        await push_tok(client_id,
+            f"ERROR: Source model '{source}' not found.\n"
+            f"Available models: {available}")
+        await conditional_push_done(client_id)
+        return
+
+    if new_name in LLM_REGISTRY:
+        await push_tok(client_id,
+            f"ERROR: Model '{new_name}' already exists. Choose a different name.")
+        await conditional_push_done(client_id)
+        return
+
+    ok, msg = copy_llm_model(source, new_name)
+    await push_tok(client_id, msg)
+    if ok:
+        new_cfg = LLM_REGISTRY.get(new_name, {})
+        await push_tok(client_id,
+            f"  type={new_cfg.get('type')}, model_id={new_cfg.get('model_id')}\n"
+            f"  Use '!model {new_name}' to switch, or !temperature/!top_p to adjust parameters.")
+    await conditional_push_done(client_id)
+
+
+async def cmd_model_delete(client_id: str, args: str, session: dict):
+    """
+    Delete a model entry permanently from llm-models.json.
+    Usage: !model_delete <model_name>
+    Refuses to delete the currently active session model.
+    """
+    parts = args.split()
+    if len(parts) != 1 or not parts[0]:
+        await push_tok(client_id,
+            "Usage: !model_delete <model_name>\n"
+            "  model_name : key of the model to remove\n"
+            "Example: !model_delete gemini25f_lowtemp\n"
+            "WARNING: This permanently removes the model from llm-models.json.")
+        await conditional_push_done(client_id)
+        return
+
+    model_name = parts[0]
+
+    if model_name not in LLM_REGISTRY:
+        available = ", ".join(sorted(LLM_REGISTRY.keys()))
+        await push_tok(client_id,
+            f"ERROR: Model '{model_name}' not found.\n"
+            f"Available models: {available}")
+        await conditional_push_done(client_id)
+        return
+
+    # Refuse to delete the active model for this session
+    if session.get("model") == model_name:
+        await push_tok(client_id,
+            f"ERROR: Cannot delete '{model_name}' — it is the active model for this session.\n"
+            f"Switch to a different model first with !model <other_model>, then retry.")
+        await conditional_push_done(client_id)
+        return
+
+    ok, msg = delete_llm_model(model_name)
+    await push_tok(client_id, msg)
+    await conditional_push_done(client_id)
+
+
+async def cmd_model_enable(client_id: str, args: str):
+    """
+    Enable a model in llm-models.json (write-gated).
+    Usage: !model_enable <model_name>
+    Requires server restart to take effect.
+    """
+    parts = args.split()
+    if len(parts) != 1 or not parts[0]:
+        await push_tok(client_id,
+            "Usage: !model_enable <model_name>\n"
+            "  model_name : key of the model to enable (see all models with !model_enable_list)\n"
+            "Example: !model_enable tc_test\n"
+            "NOTE: Server restart required for changes to take effect.")
+        await conditional_push_done(client_id)
+        return
+
+    ok, msg = enable_llm_model(parts[0])
+    await push_tok(client_id, msg)
+    await conditional_push_done(client_id)
+
+
+async def cmd_model_disable(client_id: str, args: str, session: dict):
+    """
+    Disable a model in llm-models.json (write-gated).
+    Usage: !model_disable <model_name>
+    Cannot disable the current session model or the default model.
+    Requires server restart to take effect.
+    """
+    parts = args.split()
+    if len(parts) != 1 or not parts[0]:
+        await push_tok(client_id,
+            "Usage: !model_disable <model_name>\n"
+            "  model_name : key of the model to disable\n"
+            "Example: !model_disable tc_test\n"
+            "NOTE: Cannot disable the current session model or the server default model.\n"
+            "NOTE: Server restart required for changes to take effect.")
+        await conditional_push_done(client_id)
+        return
+
+    model_name = parts[0]
+
+    if session.get("model") == model_name:
+        await push_tok(client_id,
+            f"ERROR: Cannot disable '{model_name}' — it is the active model for this session.\n"
+            f"Switch to a different model first with !model <other_model>, then retry.")
+        await conditional_push_done(client_id)
+        return
+
+    ok, msg = disable_llm_model(model_name)
+    await push_tok(client_id, msg)
     await conditional_push_done(client_id)
 
 
@@ -1674,6 +1821,14 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_llm_clean_text(client_id, arg)
                 elif cmd == "llm_clean_tool":
                     await cmd_llm_clean_tool(client_id, arg)
+                elif cmd == "model_copy":
+                    await cmd_model_copy(client_id, arg)
+                elif cmd == "model_delete":
+                    await cmd_model_delete(client_id, arg, session)
+                elif cmd == "model_enable":
+                    await cmd_model_enable(client_id, arg)
+                elif cmd == "model_disable":
+                    await cmd_model_disable(client_id, arg, session)
                 elif cmd == "model":
                     if arg:
                         await cmd_set_model(client_id, arg, session)
@@ -1819,6 +1974,18 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "llm_clean_tool":
             await cmd_llm_clean_tool(client_id, arg)
             return
+        if cmd == "model_copy":
+            await cmd_model_copy(client_id, arg)
+            return
+        if cmd == "model_delete":
+            await cmd_model_delete(client_id, arg, session)
+            return
+        if cmd == "model_enable":
+            await cmd_model_enable(client_id, arg)
+            return
+        if cmd == "model_disable":
+            await cmd_model_disable(client_id, arg, session)
+            return
         if cmd == "model":
             if arg:
                 await cmd_set_model(client_id, arg, session)
@@ -1949,7 +2116,13 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
 
     try:
         final = await dispatch_llm(session["model"], session["history"], client_id)
-        if final: session["history"].append({"role": "assistant", "content": final})
+        if final:
+            session["history"].append({"role": "assistant", "content": final})
+        else:
+            # Remove dangling user message if LLM returned empty — prevents consecutive
+            # user turns in history, which causes Gemini to return empty on next request
+            if session["history"] and session["history"][-1]["role"] == "user":
+                session["history"].pop()
     except asyncio.CancelledError:
         # Remove the dangling user message so history stays consistent
         if session["history"] and session["history"][-1]["role"] == "user":
