@@ -105,6 +105,6 @@
   },
   "metadata": {
     "last_modified": "2026-02-20",
-    "notes": "LLM model registry. Modified by plugin-manager.py model commands."
+    "notes": "LLM model registry. Modified by agentctl.py model commands."
   }
 }

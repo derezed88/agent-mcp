@@ -84,7 +84,7 @@ Every plugin must have an entry in `plugin-manifest.json`:
   - 100–199: database plugins
   - 200–299: storage plugins
   - 300–399: search plugins
-- `tools` — list of tool names this plugin provides (for reference / plugin-manager display)
+- `tools` — list of tool names this plugin provides (for reference / agentctl display)
 
 ---
 

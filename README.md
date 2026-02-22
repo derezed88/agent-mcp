@@ -98,7 +98,7 @@ All configuration is JSON + commands. Nothing requires a restart:
 !limit_set max_agent_call_depth 2      # raise swarm recursion limit
 ```
 
-Rate limits, session timeouts, tool permissions, model timeouts — all configurable live via `!commands` or `plugin-manager.py` CLI.
+Rate limits, session timeouts, tool permissions, model timeouts — all configurable live via `!commands` or `agentctl.py` CLI.
 
 **The LLM has access to the same command surface you do.** Gate commands, model switching, session inspection, system prompt edits, and limit adjustments are all available as tools the LLM can call. You can instruct the agent in natural language ("switch to gemini", "allow drive reads from now on") and it executes the corresponding command itself, without you typing it.
 
@@ -482,7 +482,7 @@ Agent B ────HTTP──►    │   ChatOpenAI              │──► 
 - **`tools.py`** — StructuredTool registry; single source of truth for all tool schemas
 - **`shell.py`** — interactive terminal client with gate approval UI
 - **`plugin_*.py`** — pluggable data tools and client interfaces
-- **`plugin-manager.py`** — CLI tool for managing plugins and models
+- **`agentctl.py`** — CLI tool for managing plugins and models
 
 ---
 
@@ -519,9 +519,9 @@ Agent B ────HTTP──►    │   ChatOpenAI              │──► 
 Manage plugins:
 
 ```bash
-python plugin-manager.py list
-python plugin-manager.py enable <plugin_name>
-python plugin-manager.py disable <plugin_name>
+python agentctl.py list
+python agentctl.py enable <plugin_name>
+python agentctl.py disable <plugin_name>
 ```
 
 ---
