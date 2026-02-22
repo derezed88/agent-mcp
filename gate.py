@@ -116,8 +116,8 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         clear_client_gate(client_id)
         return decision == "allow"
 
-    if tool_name in ("get_system_info", "llm_list", "help", "sysprompt_list", "sysprompt_read",
-                     "llm_call", "llm_timeout", "stream", "tool_preview_length"):
+    if tool_name in ("get_system_info", "llm_list", "help", "sysprompt_list_dir", "sysprompt_list",
+                     "sysprompt_read", "llm_call", "llm_timeout", "stream", "tool_preview_length"):
         return True
 
     # at_llm: always treated as write (worst-case) — gated via at_llm_gate_write
@@ -299,6 +299,56 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
     if tool_name == "limit_max_iteration_set":
         default_perms = tool_gate_state.get("*", {})
         tool_perms = tool_gate_state.get("limit_max_iteration_set", {})
+        if tool_perms.get("write", default_perms.get("write", False)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {**tool_args, "operation_type": "write"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
+        return decision == "allow"
+
+    # token_selection_list: read-only, gatable via token_selection_list_gate_read (default: auto-allowed)
+    if tool_name == "token_selection_list":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("token_selection_list", {})
+        if tool_perms.get("read", default_perms.get("read", True)):
+            return True
+        if is_non_interactive:
+            return False
+        gate_data = {
+            "gate_id": str(uuid.uuid4()),
+            "tool_name": tool_name,
+            "tool_args": {"operation_type": "read"},
+            "tables": [],
+        }
+        if is_api_client:
+            return await do_api_gate(gate_data)
+        gate_id = gate_data["gate_id"]
+        pending_gates[gate_id] = {"event": asyncio.Event(), "decision": None}
+        await push_gate(client_id, gate_data)
+        await pending_gates[gate_id]["event"].wait()
+        decision = pending_gates[gate_id].pop("decision", "reject")
+        pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
+        return decision == "allow"
+
+    # token_selection_set: write operation, gatable via token_selection_set_gate_write (default: gated)
+    if tool_name == "token_selection_set":
+        default_perms = tool_gate_state.get("*", {})
+        tool_perms = tool_gate_state.get("token_selection_set", {})
         if tool_perms.get("write", default_perms.get("write", False)):
             return True
         if is_non_interactive:

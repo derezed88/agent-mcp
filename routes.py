@@ -10,7 +10,7 @@ from sse_starlette.sse import EventSourceResponse
 from config import log, LLM_REGISTRY, DEFAULT_MODEL
 from state import sessions, get_queue, push_tok, push_done, push_model, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task, client_active_gates
 from database import execute_sql
-from prompt import (sp_list_files, sp_read_prompt, sp_read_file, sp_write_file,
+from prompt import (sp_list_files, sp_list_directories, sp_read_prompt, sp_read_file, sp_write_file,
                     sp_delete_file, sp_delete_directory, sp_copy_directory, sp_set_directory,
                     sp_resolve_model)
 from agents import dispatch_llm
@@ -127,6 +127,7 @@ async def cmd_help(client_id: str):
         "  !input_lines <n>                          - resize input area (client-side only)\n"
         "\n"
         "System Prompt:\n"
+        "  !sysprompt_list_dir                       - list all system prompt directories\n"
         "  !sysprompt_list <model|self>              - list system prompt files for a model\n"
         "  !sysprompt_read <model|self>              - read full assembled prompt for a model\n"
         "  !sysprompt_read <model|self> <file>       - read a specific file for a model\n"
@@ -196,6 +197,14 @@ async def cmd_help(client_id: str):
         "  !stream <true|false>                      - enable/disable agent_call streaming\n"
         "  !agent_call_gate_write <t|f>              - gate agent_call: true=gated (default), false=auto-allow\n"
         "  !at_llm_gate_write <t|f>                  - gate at_llm: true=gated (default), false=auto-allow\n"
+        "\n"
+        "Token Selection:\n"
+        "  !set_token_selection_setting                          - show all models' sampling config\n"
+        "  !set_token_selection_setting <model>                 - show one model's sampling config\n"
+        "  !set_token_selection_setting <model> <default|custom> - switch mode (persists)\n"
+        "  !temperature [model] [value]                         - get/set temperature (0.0–2.0)\n"
+        "  !top_p [model] [value]                               - get/set top_p (0.0–1.0)\n"
+        "  !top_k [model] [value]                               - get/set top_k (GEMINI only, int >= 1)\n"
         "\n"
         "Limits:\n"
         "  !limit_depth_list                         - show depth/iteration limits (runtime)\n"
@@ -336,6 +345,16 @@ async def cmd_sysprompt_set_dir(client_id: str, args: str, session: dict):
     result = sp_set_directory(resolved, dir_name)
     await push_tok(client_id, result)
     await conditional_push_done(client_id)
+
+async def cmd_sysprompt_list_dir(client_id: str):
+    """
+    List all directories in the system_prompt/ base directory.
+    Usage: !sysprompt_list_dir
+    """
+    result = sp_list_directories()
+    await push_tok(client_id, result)
+    await conditional_push_done(client_id)
+
 
 _WRITE_ONLY_GATES = {"agent_call", "at_llm", "sysprompt_write", "model", "reset",
                      "limit_depth_set", "limit_rate_set", "limit_max_iteration_set"}
@@ -1034,6 +1053,305 @@ async def cmd_llm_timeout(client_id: str, args: str):
     await conditional_push_done(client_id)
 
 
+async def cmd_token_selection_setting(client_id: str, args: str):
+    """
+    Get or set token_selection_setting for LLM models.
+
+    !set_token_selection_setting                          - show all models' sampling config
+    !set_token_selection_setting <model>                 - show one model's sampling config
+    !set_token_selection_setting <model> <default|custom> - set mode (persists to llm-models.json)
+    """
+    from model_settings import get_token_selection_setting, set_token_selection_setting
+
+    parts = args.split()
+
+    if not args.strip():
+        lines = ["token_selection_setting per model:"]
+        for name in sorted(LLM_REGISTRY.keys()):
+            cfg = LLM_REGISTRY[name]
+            setting = get_token_selection_setting(name)
+            mtype = cfg.get("type", "?")
+            temp = cfg.get("temperature", "n/a")
+            top_p = cfg.get("top_p", "n/a")
+            top_k = cfg.get("top_k", "n/a")
+            lines.append(f"  {name:<16} {mtype:<6} token_selection={setting:<8}  temp={temp}  top_p={top_p}  top_k={top_k}")
+        await push_tok(client_id, "\n".join(lines))
+        await conditional_push_done(client_id)
+        return
+
+    if len(parts) == 1:
+        model_name = parts[0]
+        if model_name not in LLM_REGISTRY:
+            await push_tok(client_id,
+                f"ERROR: Unknown model '{model_name}'\n"
+                f"Available: {', '.join(sorted(LLM_REGISTRY.keys()))}")
+            await conditional_push_done(client_id)
+            return
+        cfg = LLM_REGISTRY[model_name]
+        setting = get_token_selection_setting(model_name)
+        mtype = cfg.get("type", "?")
+        await push_tok(client_id,
+            f"Model: {model_name} ({mtype})\n"
+            f"  token_selection_setting : {setting}\n"
+            f"  temperature             : {cfg.get('temperature', 'n/a')}\n"
+            f"  top_p                   : {cfg.get('top_p', 'n/a')}\n"
+            f"  top_k                   : {cfg.get('top_k', 'n/a')}  {'(GEMINI only)' if mtype == 'OPENAI' else ''}")
+        await conditional_push_done(client_id)
+        return
+
+    if len(parts) == 2:
+        model_name, value = parts[0], parts[1].lower()
+        if model_name not in LLM_REGISTRY:
+            await push_tok(client_id,
+                f"ERROR: Unknown model '{model_name}'\n"
+                f"Available: {', '.join(sorted(LLM_REGISTRY.keys()))}")
+            await conditional_push_done(client_id)
+            return
+        try:
+            set_token_selection_setting(model_name, value)
+        except (KeyError, ValueError) as e:
+            await push_tok(client_id, f"ERROR: {e}")
+            await conditional_push_done(client_id)
+            return
+        await push_tok(client_id,
+            f"token_selection_setting='{value}' for '{model_name}' (persisted to llm-models.json).")
+        await conditional_push_done(client_id)
+        return
+
+    await push_tok(client_id,
+        "ERROR: Too many arguments\n"
+        "Usage:\n"
+        "  !set_token_selection_setting                          - show all\n"
+        "  !set_token_selection_setting <model>                 - show one\n"
+        "  !set_token_selection_setting <model> <default|custom> - set it")
+    await conditional_push_done(client_id)
+
+
+async def cmd_temperature(client_id: str, args: str):
+    """
+    Get or set temperature for LLM models.
+
+    !temperature                   - show temperature for all models
+    !temperature <model>           - show current temperature for one model
+    !temperature <model> <value>   - set temperature (0.0–2.0); persists to llm-models.json
+    """
+    from model_settings import get_model_temperature, set_model_temperature
+
+    parts = args.split()
+
+    if not args.strip():
+        lines = ["LLM temperature settings:"]
+        for name in sorted(LLM_REGISTRY.keys()):
+            temp = get_model_temperature(name)
+            setting = LLM_REGISTRY[name].get("token_selection_setting", "default")
+            lines.append(f"  {name:<16} temperature={temp:<6}  (token_selection={setting})")
+        await push_tok(client_id, "\n".join(lines))
+        await conditional_push_done(client_id)
+        return
+
+    if len(parts) == 1:
+        model_name = parts[0]
+        if model_name not in LLM_REGISTRY:
+            await push_tok(client_id,
+                f"ERROR: Unknown model '{model_name}'\n"
+                f"Available: {', '.join(sorted(LLM_REGISTRY.keys()))}")
+            await conditional_push_done(client_id)
+            return
+        temp = get_model_temperature(model_name)
+        setting = LLM_REGISTRY[model_name].get("token_selection_setting", "default")
+        await push_tok(client_id,
+            f"temperature for '{model_name}': {temp}  (token_selection={setting})")
+        await conditional_push_done(client_id)
+        return
+
+    if len(parts) == 2:
+        model_name, val_str = parts[0], parts[1]
+        if model_name not in LLM_REGISTRY:
+            await push_tok(client_id,
+                f"ERROR: Unknown model '{model_name}'\n"
+                f"Available: {', '.join(sorted(LLM_REGISTRY.keys()))}")
+            await conditional_push_done(client_id)
+            return
+        try:
+            value = float(val_str)
+        except ValueError:
+            await push_tok(client_id,
+                f"ERROR: Invalid value '{val_str}' — must be a float (0.0–2.0)")
+            await conditional_push_done(client_id)
+            return
+        try:
+            set_model_temperature(model_name, value)
+        except (ValueError, TypeError) as e:
+            await push_tok(client_id, f"ERROR: {e}")
+            await conditional_push_done(client_id)
+            return
+        await push_tok(client_id,
+            f"temperature={value} for '{model_name}' (persisted to llm-models.json).")
+        await conditional_push_done(client_id)
+        return
+
+    await push_tok(client_id,
+        "ERROR: Too many arguments\n"
+        "Usage:\n"
+        "  !temperature                   - show all\n"
+        "  !temperature <model>           - show one\n"
+        "  !temperature <model> <value>   - set (0.0–2.0)")
+    await conditional_push_done(client_id)
+
+
+async def cmd_top_p(client_id: str, args: str):
+    """
+    Get or set top_p for LLM models.
+
+    !top_p                   - show top_p for all models
+    !top_p <model>           - show current top_p for one model
+    !top_p <model> <value>   - set top_p (0.0–1.0); persists to llm-models.json
+    """
+    from model_settings import get_model_top_p, set_model_top_p
+
+    parts = args.split()
+
+    if not args.strip():
+        lines = ["LLM top_p settings:"]
+        for name in sorted(LLM_REGISTRY.keys()):
+            tp = get_model_top_p(name)
+            setting = LLM_REGISTRY[name].get("token_selection_setting", "default")
+            lines.append(f"  {name:<16} top_p={tp:<6}  (token_selection={setting})")
+        await push_tok(client_id, "\n".join(lines))
+        await conditional_push_done(client_id)
+        return
+
+    if len(parts) == 1:
+        model_name = parts[0]
+        if model_name not in LLM_REGISTRY:
+            await push_tok(client_id,
+                f"ERROR: Unknown model '{model_name}'\n"
+                f"Available: {', '.join(sorted(LLM_REGISTRY.keys()))}")
+            await conditional_push_done(client_id)
+            return
+        tp = get_model_top_p(model_name)
+        setting = LLM_REGISTRY[model_name].get("token_selection_setting", "default")
+        await push_tok(client_id,
+            f"top_p for '{model_name}': {tp}  (token_selection={setting})")
+        await conditional_push_done(client_id)
+        return
+
+    if len(parts) == 2:
+        model_name, val_str = parts[0], parts[1]
+        if model_name not in LLM_REGISTRY:
+            await push_tok(client_id,
+                f"ERROR: Unknown model '{model_name}'\n"
+                f"Available: {', '.join(sorted(LLM_REGISTRY.keys()))}")
+            await conditional_push_done(client_id)
+            return
+        try:
+            value = float(val_str)
+        except ValueError:
+            await push_tok(client_id,
+                f"ERROR: Invalid value '{val_str}' — must be a float (0.0–1.0)")
+            await conditional_push_done(client_id)
+            return
+        try:
+            set_model_top_p(model_name, value)
+        except (ValueError, TypeError) as e:
+            await push_tok(client_id, f"ERROR: {e}")
+            await conditional_push_done(client_id)
+            return
+        await push_tok(client_id,
+            f"top_p={value} for '{model_name}' (persisted to llm-models.json).")
+        await conditional_push_done(client_id)
+        return
+
+    await push_tok(client_id,
+        "ERROR: Too many arguments\n"
+        "Usage:\n"
+        "  !top_p                   - show all\n"
+        "  !top_p <model>           - show one\n"
+        "  !top_p <model> <value>   - set (0.0–1.0)")
+    await conditional_push_done(client_id)
+
+
+async def cmd_top_k(client_id: str, args: str):
+    """
+    Get or set top_k for GEMINI models (not supported by OPENAI-type models).
+
+    !top_k                   - show top_k for all models
+    !top_k <model>           - show current top_k (error if OPENAI)
+    !top_k <model> <value>   - set top_k (integer >= 1, GEMINI only); persists to llm-models.json
+    """
+    from model_settings import get_model_top_k, set_model_top_k
+
+    parts = args.split()
+
+    if not args.strip():
+        lines = ["LLM top_k settings (GEMINI models only):"]
+        for name in sorted(LLM_REGISTRY.keys()):
+            mtype = LLM_REGISTRY[name].get("type", "?")
+            if mtype == "GEMINI":
+                tk = LLM_REGISTRY[name].get("top_k", "not set")
+                setting = LLM_REGISTRY[name].get("token_selection_setting", "default")
+                lines.append(f"  {name:<16} top_k={tk:<6}  (token_selection={setting})")
+            else:
+                lines.append(f"  {name:<16} (OPENAI — top_k not supported)")
+        await push_tok(client_id, "\n".join(lines))
+        await conditional_push_done(client_id)
+        return
+
+    if len(parts) == 1:
+        model_name = parts[0]
+        if model_name not in LLM_REGISTRY:
+            await push_tok(client_id,
+                f"ERROR: Unknown model '{model_name}'\n"
+                f"Available: {', '.join(sorted(LLM_REGISTRY.keys()))}")
+            await conditional_push_done(client_id)
+            return
+        try:
+            tk = get_model_top_k(model_name)
+        except ValueError as e:
+            await push_tok(client_id, f"ERROR: {e}")
+            await conditional_push_done(client_id)
+            return
+        setting = LLM_REGISTRY[model_name].get("token_selection_setting", "default")
+        await push_tok(client_id,
+            f"top_k for '{model_name}': {tk}  (token_selection={setting})")
+        await conditional_push_done(client_id)
+        return
+
+    if len(parts) == 2:
+        model_name, val_str = parts[0], parts[1]
+        if model_name not in LLM_REGISTRY:
+            await push_tok(client_id,
+                f"ERROR: Unknown model '{model_name}'\n"
+                f"Available: {', '.join(sorted(LLM_REGISTRY.keys()))}")
+            await conditional_push_done(client_id)
+            return
+        try:
+            value = int(val_str)
+        except ValueError:
+            await push_tok(client_id,
+                f"ERROR: Invalid value '{val_str}' — must be a positive integer")
+            await conditional_push_done(client_id)
+            return
+        try:
+            set_model_top_k(model_name, value)
+        except (ValueError, TypeError) as e:
+            await push_tok(client_id, f"ERROR: {e}")
+            await conditional_push_done(client_id)
+            return
+        await push_tok(client_id,
+            f"top_k={value} for '{model_name}' (persisted to llm-models.json).")
+        await conditional_push_done(client_id)
+        return
+
+    await push_tok(client_id,
+        "ERROR: Too many arguments\n"
+        "Usage:\n"
+        "  !top_k                   - show all (GEMINI only)\n"
+        "  !top_k <model>           - show one\n"
+        "  !top_k <model> <value>   - set (integer >= 1, GEMINI only)")
+    await conditional_push_done(client_id)
+
+
 async def cmd_tool_preview_length(client_id: str, arg: str, session: dict):
     """
     Get or set the tool result preview length for this session.
@@ -1339,6 +1657,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_sysprompt_copy_dir(client_id, arg, session)
                 elif cmd == "sysprompt_set_dir":
                     await cmd_sysprompt_set_dir(client_id, arg, session)
+                elif cmd == "sysprompt_list_dir":
+                    await cmd_sysprompt_list_dir(client_id)
                 elif cmd in ("search_ddgs", "search_google", "search_tavily", "search_xai"):
                     engine = cmd[len("search_"):]
                     await cmd_search(client_id, engine, arg)
@@ -1365,6 +1685,14 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_llm_call(client_id, arg)
                 elif cmd == "llm_timeout":
                     await cmd_llm_timeout(client_id, arg)
+                elif cmd == "set_token_selection_setting":
+                    await cmd_token_selection_setting(client_id, arg)
+                elif cmd == "temperature":
+                    await cmd_temperature(client_id, arg)
+                elif cmd == "top_p":
+                    await cmd_top_p(client_id, arg)
+                elif cmd == "top_k":
+                    await cmd_top_k(client_id, arg)
                 elif cmd == "tool_preview_length":
                     await cmd_tool_preview_length(client_id, arg, session)
                 elif cmd == "tool_suppress":
@@ -1502,6 +1830,18 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "llm_timeout":
             await cmd_llm_timeout(client_id, arg)
+            return
+        if cmd == "set_token_selection_setting":
+            await cmd_token_selection_setting(client_id, arg)
+            return
+        if cmd == "temperature":
+            await cmd_temperature(client_id, arg)
+            return
+        if cmd == "top_p":
+            await cmd_top_p(client_id, arg)
+            return
+        if cmd == "top_k":
+            await cmd_top_k(client_id, arg)
             return
         if cmd == "tool_preview_length":
             await cmd_tool_preview_length(client_id, arg, session)

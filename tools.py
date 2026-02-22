@@ -189,6 +189,7 @@ def get_core_tools():
             'llm_clean_tool':        _agents.llm_clean_tool,
             'llm_list':              _agents.llm_list,
             'agent_call':            _agents.agent_call,
+            'sysprompt_list_dir':    _sysprompt_list_dir_exec,
             'sysprompt_list':        _sysprompt_list_exec,
             'sysprompt_read':        _sysprompt_read_exec,
             'sysprompt_write':       _sysprompt_write_exec,
@@ -211,6 +212,8 @@ def get_core_tools():
             'limit_max_iteration_list':  _limit_max_iteration_list_exec,
             'limit_max_iteration_set':   _limit_max_iteration_set_exec,
             'sleep':                     _sleep_exec,
+            'token_selection_list':      _token_selection_list_exec,
+            'token_selection_set':       _token_selection_set_exec,
         }
     }
 
@@ -269,6 +272,7 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "at_llm":                "llm_call",
     "llm_list":              "system",
     "agent_call":            "agent_call",
+    "sysprompt_list_dir":    "system",
     "sysprompt_list":        "system",
     "sysprompt_read":        "system",
     "sysprompt_write":       "system",
@@ -292,6 +296,8 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "limit_max_iteration_set":      "system",
     "outbound_agent_filters":       "system",
     "sleep":                        "system",
+    "token_selection_list":         "system",
+    "token_selection_set":          "system",
 }
 
 
@@ -320,6 +326,7 @@ def get_tool_executor(tool_name: str):
         'at_llm':                _agents.at_llm,
         'llm_list':              _agents.llm_list,
         'agent_call':            _agents.agent_call,
+        'sysprompt_list_dir':    _sysprompt_list_dir_exec,
         'sysprompt_list':        _sysprompt_list_exec,
         'sysprompt_read':        _sysprompt_read_exec,
         'sysprompt_write':       _sysprompt_write_exec,
@@ -343,6 +350,8 @@ def get_tool_executor(tool_name: str):
         'limit_max_iteration_set':   _limit_max_iteration_set_exec,
         'outbound_agent_filters':    _outbound_agent_filters_exec,
         'sleep':                     _sleep_exec,
+        'token_selection_list':      _token_selection_list_exec,
+        'token_selection_set':       _token_selection_set_exec,
     }
 
     if tool_name in core_executors:
@@ -383,6 +392,10 @@ class _LlmCleanToolArgs(BaseModel):
 # ---------------------------------------------------------------------------
 # Sysprompt tool arg schemas
 # ---------------------------------------------------------------------------
+
+class _SyspromptListDirArgs(BaseModel):
+    pass
+
 
 class _SyspromptListArgs(BaseModel):
     model: str = Field(
@@ -575,6 +588,11 @@ class _AgentCallArgs(BaseModel):
 # Sysprompt tool executors
 # ---------------------------------------------------------------------------
 
+async def _sysprompt_list_dir_exec() -> str:
+    from prompt import sp_list_directories
+    return sp_list_directories()
+
+
 async def _sysprompt_list_exec(model: str) -> str:
     from prompt import sp_list_files, sp_resolve_model
     from config import LLM_REGISTRY
@@ -733,6 +751,7 @@ async def _help_exec() -> str:
     return (
         "Available commands: Use !help in the chat interface for full command list.\n"
         "Key tool calls (LLM-invocable):\n"
+        "  sysprompt_list_dir()          - list all system prompt directories\n"
         "  sysprompt_list(model)         - list system prompt files for a model\n"
         "  sysprompt_read(model, file)   - read full prompt or specific file\n"
         "  sysprompt_write(model, file, data) - write a system prompt file\n"
@@ -884,6 +903,8 @@ async def _gate_list_exec() -> str:
         "limit_rate_set":           ["write"],
         "limit_max_iteration_list": ["read"],
         "limit_max_iteration_set":  ["write"],
+        "token_selection_list":     ["read"],
+        "token_selection_set":      ["write"],
     }
     all_tools = dict(_CORE_GATED)
     for name, meta in gate_tools.items():
@@ -1101,6 +1122,124 @@ async def _sleep_exec(seconds: int) -> str:
     return f"Slept for {seconds} second(s)."
 
 
+# ---------------------------------------------------------------------------
+# Token Selection Tools — temperature / top_p / top_k / token_selection_setting
+# ---------------------------------------------------------------------------
+
+async def _token_selection_list_exec(model: str = "") -> str:
+    """
+    List token selection settings (temperature, top_p, top_k, token_selection_setting)
+    for all models or a single model.
+    """
+    from model_settings import get_token_selection_setting
+    from config import LLM_REGISTRY
+
+    if model:
+        cfg = LLM_REGISTRY.get(model)
+        if cfg is None:
+            available = ", ".join(sorted(LLM_REGISTRY.keys()))
+            return f"ERROR: Unknown model '{model}'. Available: {available}"
+        setting = get_token_selection_setting(model)
+        mtype = cfg.get("type", "?")
+        lines = [
+            f"Model: {model} ({mtype})",
+            f"  token_selection_setting : {setting}",
+            f"  temperature             : {cfg.get('temperature', 'n/a')}",
+            f"  top_p                   : {cfg.get('top_p', 'n/a')}",
+            f"  top_k                   : {cfg.get('top_k', 'n/a')}  {'(GEMINI only)' if mtype == 'OPENAI' else ''}",
+        ]
+        return "\n".join(lines)
+
+    lines = ["Token selection settings per model:"]
+    lines.append(f"  {'Model':<16} {'Type':<6} {'Mode':<8}  {'Temp':>5}  {'top_p':>6}  {'top_k':>6}")
+    lines.append(f"  {'-'*16} {'-'*6} {'-'*8}  {'-'*5}  {'-'*6}  {'-'*6}")
+    for name in sorted(LLM_REGISTRY.keys()):
+        cfg = LLM_REGISTRY[name]
+        setting = get_token_selection_setting(name)
+        mtype = cfg.get("type", "?")
+        temp = cfg.get("temperature", "n/a")
+        top_p = cfg.get("top_p", "n/a")
+        top_k = cfg.get("top_k", "n/a") if mtype == "GEMINI" else "N/A"
+        lines.append(f"  {name:<16} {mtype:<6} {setting:<8}  {str(temp):>5}  {str(top_p):>6}  {str(top_k):>6}")
+    lines.append("\nUse token_selection_set() to change settings. Changes persist to llm-models.json.")
+    return "\n".join(lines)
+
+
+async def _token_selection_set_exec(
+    model: str,
+    param: str,
+    value: str,
+) -> str:
+    """
+    Set a token selection parameter for a model.
+    param must be one of: token_selection_setting, temperature, top_p, top_k
+    """
+    from model_settings import (
+        set_token_selection_setting,
+        set_model_temperature,
+        set_model_top_p,
+        set_model_top_k,
+    )
+    from config import LLM_REGISTRY
+
+    if model not in LLM_REGISTRY:
+        available = ", ".join(sorted(LLM_REGISTRY.keys()))
+        return f"ERROR: Unknown model '{model}'. Available: {available}"
+
+    param = param.strip().lower()
+    try:
+        if param == "token_selection_setting":
+            set_token_selection_setting(model, value)
+            return f"token_selection_setting='{value}' for '{model}' (persisted to llm-models.json)."
+        elif param == "temperature":
+            set_model_temperature(model, float(value))
+            return f"temperature={value} for '{model}' (persisted to llm-models.json)."
+        elif param == "top_p":
+            set_model_top_p(model, float(value))
+            return f"top_p={value} for '{model}' (persisted to llm-models.json)."
+        elif param == "top_k":
+            set_model_top_k(model, int(value))
+            return f"top_k={value} for '{model}' (persisted to llm-models.json)."
+        else:
+            return (
+                f"ERROR: Unknown param '{param}'. "
+                "Valid params: token_selection_setting, temperature, top_p, top_k"
+            )
+    except (ValueError, TypeError, KeyError) as e:
+        return f"ERROR: {e}"
+
+
+class _TokenSelectionListArgs(BaseModel):
+    model: str = Field(
+        default="",
+        description=(
+            "Model key to inspect (e.g. 'gemini25f', 'gpt4om'). "
+            "Leave empty to list all models."
+        ),
+    )
+
+
+class _TokenSelectionSetArgs(BaseModel):
+    model: str = Field(
+        description="Model key to update (e.g. 'gemini25f', 'gpt4om'). Use token_selection_list() to see valid keys."
+    )
+    param: str = Field(
+        description=(
+            "Parameter to set. Must be one of: "
+            "'token_selection_setting' (values: default|custom), "
+            "'temperature' (float 0.0–2.0), "
+            "'top_p' (float 0.0–1.0), "
+            "'top_k' (int >= 1, GEMINI models only)."
+        )
+    )
+    value: str = Field(
+        description=(
+            "New value as a string. Examples: '0.7', '0.95', '40', 'custom', 'default'. "
+            "For token_selection_setting: 'default' uses API defaults, 'custom' applies the stored values."
+        )
+    )
+
+
 def _make_core_lc_tools() -> list:
     """Build CORE_LC_TOOLS after agents module is available (avoids circular import)."""
     import agents as _agents
@@ -1189,6 +1328,15 @@ def _make_core_lc_tools() -> list:
             args_schema=_AtLlmArgs,
         ),
         # --- Sysprompt management tools ---
+        StructuredTool.from_function(
+            coroutine=_sysprompt_list_dir_exec,
+            name="sysprompt_list_dir",
+            description=(
+                "List all available directories in the system_prompt/ base directory. "
+                "Use this to discover which prompt folders exist before assigning one to a model."
+            ),
+            args_schema=_SyspromptListDirArgs,
+        ),
         StructuredTool.from_function(
             coroutine=_sysprompt_list_exec,
             name="sysprompt_list",
@@ -1419,6 +1567,31 @@ def _make_core_lc_tools() -> list:
                 "Requires write gate approval (controlled by !sleep_gate_read, default: gated)."
             ),
             args_schema=_SleepArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_token_selection_list_exec,
+            name="token_selection_list",
+            description=(
+                "List token selection settings (temperature, top_p, top_k, token_selection_setting) "
+                "for all models or a single model. "
+                "When token_selection_setting='custom', those values are sent to the API on every call. "
+                "When 'default', the API uses its own defaults. "
+                "Read-only. Requires read gate approval (controlled by !token_selection_list_gate_read, default: auto-allowed)."
+            ),
+            args_schema=_TokenSelectionListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_token_selection_set_exec,
+            name="token_selection_set",
+            description=(
+                "Set a token selection parameter for a model. "
+                "Params: token_selection_setting (default|custom), temperature (0.0–2.0), "
+                "top_p (0.0–1.0), top_k (int >= 1, GEMINI only). "
+                "Changes persist to llm-models.json and take effect on the next LLM call. "
+                "Set token_selection_setting='custom' to activate custom temperature/top_p/top_k. "
+                "Requires write gate approval (controlled by !token_selection_set_gate_write, default: gated)."
+            ),
+            args_schema=_TokenSelectionSetArgs,
         ),
     ]
 
