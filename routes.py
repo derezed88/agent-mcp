@@ -7,7 +7,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from config import log, LLM_REGISTRY, DEFAULT_MODEL, copy_llm_model, delete_llm_model, enable_llm_model, disable_llm_model
+from config import log, LLM_REGISTRY, DEFAULT_MODEL, LLM_MODELS_FILE, copy_llm_model, delete_llm_model, enable_llm_model, disable_llm_model
 from state import sessions, get_queue, push_tok, push_done, push_model, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task, client_active_gates
 from database import execute_sql
 from prompt import (sp_list_files, sp_list_directories, sp_read_prompt, sp_read_file, sp_write_file,
@@ -774,10 +774,22 @@ async def cmd_llm_clean_tool(client_id: str, args: str):
 
 async def cmd_list_models(client_id: str, current: str):
     lines = ["Available models:"]
+    # Enabled models from in-memory registry
     for key, meta in LLM_REGISTRY.items():
         model_id = meta.get("model_id", key)
         marker = " (current)" if key == current else ""
         lines.append(f"  {key:<12} {model_id}{marker}")
+    # Disabled models from llm-models.json (not in LLM_REGISTRY)
+    try:
+        import json as _json
+        with open(LLM_MODELS_FILE, "r") as _f:
+            _data = _json.load(_f)
+        for key, cfg in _data.get("models", {}).items():
+            if not cfg.get("enabled", True) and key not in LLM_REGISTRY:
+                model_id = cfg.get("model_id", key)
+                lines.append(f"  {key:<12} {model_id}  [disabled]")
+    except Exception:
+        pass
     await push_tok(client_id, "\n".join(lines))
     await conditional_push_done(client_id)
 
