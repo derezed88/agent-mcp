@@ -8,7 +8,7 @@ from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from config import log, LLM_REGISTRY, DEFAULT_MODEL
-from state import sessions, get_queue, push_tok, push_done, push_model, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task
+from state import sessions, get_queue, push_tok, push_done, push_model, pending_gates, auto_aidb_state, tool_gate_state, active_tasks, cancel_active_task, client_active_gates
 from database import execute_sql
 from prompt import (sp_list_files, sp_read_prompt, sp_read_file, sp_write_file,
                     sp_delete_file, sp_delete_directory, sp_copy_directory, sp_set_directory,
@@ -1624,6 +1624,16 @@ async def endpoint_submit(request: Request) -> JSONResponse:
 
     client_id, text = payload.get("client_id"), payload.get("text", "")
     if not client_id or not text: return JSONResponse({"error": "Missing fields"}, 400)
+
+    # If a human gate is waiting for approval, reject the new submission rather
+    # than cancelling the blocked task — the gate would be lost and the LLM would
+    # restart from scratch requiring another gate prompt.
+    if client_id in client_active_gates:
+        await push_tok(client_id,
+            "\n[Gate pending] Please respond to the gate request above with [a]llow or [r]eject "
+            "before sending a new message.\n")
+        await push_done(client_id)
+        return JSONResponse({"status": "OK"})
 
     peer_ip = request.client.host if request.client else None
     await cancel_active_task(client_id)

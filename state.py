@@ -46,6 +46,10 @@ active_tasks: dict[str, asyncio.Task] = {}
 
 # Human gate
 pending_gates: dict[str, dict] = {}
+# Maps client_id -> gate_id while a gate is awaiting human response.
+# Used to detect when a new submission should be rejected rather than
+# cancelling a task that is legitimately blocked waiting for gate approval.
+client_active_gates: dict[str, str] = {}
 
 # autoAIdb state { table_name -> {"read": bool, "write": bool} }
 # True = gate OFF (auto-allow), False = gate ON (requires approval)
@@ -116,7 +120,12 @@ async def push_err(client_id: str, msg: str):
     (await get_queue(client_id)).put_nowait({"t": "done"})
 
 async def push_gate(client_id: str, gate_data: dict):
+    client_active_gates[client_id] = gate_data["gate_id"]
     (await get_queue(client_id)).put_nowait({"t": "gate", "d": gate_data})
+
+def clear_client_gate(client_id: str):
+    """Remove the active gate record for a client once it is resolved or cancelled."""
+    client_active_gates.pop(client_id, None)
 
 async def push_model(client_id: str, model_key: str):
     (await get_queue(client_id)).put_nowait({"t": "model", "d": model_key})

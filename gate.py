@@ -2,7 +2,7 @@ import uuid
 import asyncio
 import os
 import re
-from state import push_gate, pending_gates, auto_aidb_state, tool_gate_state, sessions
+from state import push_gate, pending_gates, auto_aidb_state, tool_gate_state, sessions, clear_client_gate
 from database import extract_table_names
 from tools import get_gate_tools_by_type
 
@@ -60,6 +60,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         except asyncio.TimeoutError:
             decision = "reject"
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     if tool_name == "db_query":
@@ -112,6 +113,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     if tool_name in ("get_system_info", "llm_list", "help", "sysprompt_list", "sysprompt_read",
@@ -140,6 +142,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # gate_list: read-only, gatable via gate_list_gate_read
@@ -164,6 +167,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # limit_depth_list: read-only, gatable via limit_depth_list_gate_read
@@ -188,6 +192,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # limit_depth_set: write operation, gatable via limit_depth_set_gate_write
@@ -212,6 +217,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # limit_rate_list: read-only, gatable via limit_rate_list_gate_read (default: auto-allowed)
@@ -236,6 +242,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # limit_rate_set: write operation, gatable via limit_rate_set_gate_write (default: gated)
@@ -260,6 +267,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # limit_max_iteration_list: read-only, gatable via limit_max_iteration_list_gate_read (default: auto-allowed)
@@ -284,6 +292,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # limit_max_iteration_set: write operation, gatable via limit_max_iteration_set_gate_write (default: gated)
@@ -308,6 +317,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # sysprompt write operations — gated
@@ -332,6 +342,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # session: read gate for "list", write gate for "delete"
@@ -358,6 +369,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # model: list is auto-allowed; set requires write gate
@@ -385,6 +397,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # reset: write gate
@@ -409,6 +422,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # tmux: all registered tmux tools — checked dynamically from plugin registry.
@@ -451,6 +465,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # All registered extract tools are read-only — checked dynamically from plugin registry
@@ -483,6 +498,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # All registered search tools are read-only — checked dynamically from plugin registry
@@ -570,6 +586,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     # sleep: write gate (sleeping affects execution flow)
@@ -595,6 +612,7 @@ async def check_human_gate(client_id: str, tool_name: str, tool_args: dict) -> b
         await pending_gates[gate_id]["event"].wait()
         decision = pending_gates[gate_id].pop("decision", "reject")
         pending_gates.pop(gate_id, None)
+        clear_client_gate(client_id)
         return decision == "allow"
 
     return True
