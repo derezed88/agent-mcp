@@ -545,8 +545,10 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         # Convert internal message format to LangChain message objects
         ctx: list[BaseMessage] = _to_lc_messages(system_prompt, messages)
 
+        _suppress = sessions.get(client_id, {}).get("tool_suppress", False)
         for _ in range(LIVE_LIMITS.get("max_tool_iterations", MAX_TOOL_ITERATIONS)):
-            await push_tok(client_id, "\n[thinking…]\n")
+            if not _suppress:
+                await push_tok(client_id, "\n[thinking…]\n")
             try:
                 ai_msg: AIMessage = await asyncio.wait_for(
                     llm_with_tools.ainvoke(ctx),
@@ -565,7 +567,8 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 if forced_calls:
                     tool_results = []
                     for tool_name, tool_args, _call_id in forced_calls:
-                        await push_tok(client_id, f"\n[catcher] Detected bare {tool_name} call…\n")
+                        if not _suppress:
+                            await push_tok(client_id, f"\n[catcher] Detected bare {tool_name} call…\n")
                         result = await execute_tool(client_id, tool_name, tool_args)
                         tool_results.append(f"[Tool result for {tool_name}]: {result}")
                     # Inject results as a user turn (plain text — local models don't
@@ -605,7 +608,8 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
             if has_non_agent_call_output:
                 await push_done(client_id)
 
-        await push_tok(client_id, "\n[Max iterations]\n")
+        if not _suppress:
+            await push_tok(client_id, "\n[Max iterations]\n")
         await push_done(client_id)
         return ""
 
