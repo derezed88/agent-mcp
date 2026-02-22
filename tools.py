@@ -72,6 +72,13 @@ _PLUGIN_TOOL_EXECUTORS: dict = {}
 # operations: ["read"], ["write"], ["read", "write"]
 _PLUGIN_GATE_TOOLS: dict = {}
 
+# Plugin command registry: command_name -> async handler(subcommand_or_args: str) -> str
+# Handlers have signature: async (args: str) -> str
+# Populated at startup by register_plugin_commands(); queried by routes.py dispatch.
+# Also stores optional help text per plugin: _PLUGIN_HELP[plugin_name] -> str
+_PLUGIN_COMMANDS: dict = {}   # cmd_name -> async handler
+_PLUGIN_HELP: dict = {}       # plugin_name -> help string (from get_help())
+
 
 def register_gate_tools(plugin_name: str, gate_tools: dict):
     """
@@ -94,6 +101,32 @@ def get_gate_tools_by_type(tool_type: str) -> list[str]:
 def get_all_gate_tools() -> dict:
     """Return the full gate tool registry."""
     return _PLUGIN_GATE_TOOLS
+
+
+def register_plugin_commands(plugin_name: str, commands: dict, help_text: str = ""):
+    """
+    Register !command handlers contributed by a plugin.
+
+    Args:
+        plugin_name: Plugin identifier (for logging)
+        commands: Dict mapping command_name -> async handler(args: str) -> str
+        help_text: Optional help section string from plugin.get_help()
+    """
+    global _PLUGIN_COMMANDS, _PLUGIN_HELP
+    _PLUGIN_COMMANDS.update(commands)
+    if help_text:
+        _PLUGIN_HELP[plugin_name] = help_text
+    log.info(f"Registered {len(commands)} command(s) from {plugin_name}: {list(commands.keys())}")
+
+
+def get_plugin_command(cmd_name: str):
+    """Return the handler for a plugin-registered command, or None if not found."""
+    return _PLUGIN_COMMANDS.get(cmd_name)
+
+
+def get_plugin_help_sections() -> list[str]:
+    """Return all plugin help section strings, in registration order."""
+    return list(_PLUGIN_HELP.values())
 
 
 def register_plugin_tools(plugin_name: str, tool_defs: dict):
@@ -171,6 +204,13 @@ def get_core_tools():
             'stream':                _stream_exec,
             'tool_preview_length':   _tool_preview_length_exec,
             'gate_list':             _gate_list_exec,
+            'limit_depth_list':          _limit_depth_list_exec,
+            'limit_depth_set':           _limit_depth_set_exec,
+            'limit_rate_list':           _limit_rate_list_exec,
+            'limit_rate_set':            _limit_rate_set_exec,
+            'limit_max_iteration_list':  _limit_max_iteration_list_exec,
+            'limit_max_iteration_set':   _limit_max_iteration_set_exec,
+            'sleep':                     _sleep_exec,
         }
     }
 
@@ -244,6 +284,14 @@ _CORE_TOOL_TYPES: dict[str, str] = {
     "stream":                "system",
     "tool_preview_length":   "system",
     "gate_list":             "system",
+    "limit_depth_list":             "system",
+    "limit_depth_set":              "system",
+    "limit_rate_list":              "system",
+    "limit_rate_set":               "system",
+    "limit_max_iteration_list":     "system",
+    "limit_max_iteration_set":      "system",
+    "outbound_agent_filters":       "system",
+    "sleep":                        "system",
 }
 
 
@@ -287,6 +335,14 @@ def get_tool_executor(tool_name: str):
         'stream':                _stream_exec,
         'tool_preview_length':   _tool_preview_length_exec,
         'gate_list':             _gate_list_exec,
+        'limit_depth_list':          _limit_depth_list_exec,
+        'limit_depth_set':           _limit_depth_set_exec,
+        'limit_rate_list':           _limit_rate_list_exec,
+        'limit_rate_set':            _limit_rate_set_exec,
+        'limit_max_iteration_list':  _limit_max_iteration_list_exec,
+        'limit_max_iteration_set':   _limit_max_iteration_set_exec,
+        'outbound_agent_filters':    _outbound_agent_filters_exec,
+        'sleep':                     _sleep_exec,
     }
 
     if tool_name in core_executors:
@@ -314,7 +370,7 @@ class _GetSystemInfoArgs(BaseModel):
 
 
 class _LlmCleanTextArgs(BaseModel):
-    model: str = Field(description="Model key name (e.g., 'nuc11Local', 'gemini25'). Use llm_list() to see valid names.")
+    model: str = Field(description="Model key name. Use llm_list() to see valid names.")
     prompt: str = Field(description="The complete self-contained prompt. Embed all data the target model needs here.")
 
 
@@ -330,7 +386,7 @@ class _LlmCleanToolArgs(BaseModel):
 
 class _SyspromptListArgs(BaseModel):
     model: str = Field(
-        description="Model key name (e.g., 'gemini25', 'grok4') or 'self' for the current model."
+        description="Model key name (use llm_list() to see valid names) or 'self' for the current model."
     )
 
 
@@ -477,7 +533,7 @@ class _ToolPreviewLengthArgs(BaseModel):
 
 class _AtLlmArgs(BaseModel):
     model: str = Field(
-        description="Model key name (e.g., 'gemini25', 'grok4'). Use llm_list() to see valid names."
+        description="Model key name. Use llm_list() to see valid names."
     )
     prompt: str = Field(
         description="The prompt to send. The model receives the full chat history plus this prompt as a new user turn."
@@ -698,14 +754,15 @@ async def _help_exec() -> str:
         "  llm_timeout(action, ...)      - manage delegation timeouts\n"
         "  stream(action, ...)           - control streaming mode\n"
         "  tool_preview_length(action, ...) - control tool output display\n"
-        "  agent_call(agent_url, message) - call remote agent\n"
+        "  agent_call(agent_url, message) - call remote agent (write-gated)\n"
+        "  sleep(seconds)                - sleep 1–300 seconds (write-gated)\n"
         "\nGated tools (listed below require human approval unless gate is off):\n"
         + "\n".join(tool_lines)
     )
 
 
 async def _llm_call_exec(action: str, model_key: str = "", enabled: bool = None) -> str:
-    from config import LLM_REGISTRY, save_llm_model_field
+    from config import LLM_REGISTRY
     if action == "list":
         lines = ["LLM tool_call_available status:"]
         for name, cfg in sorted(LLM_REGISTRY.items()):
@@ -718,20 +775,17 @@ async def _llm_call_exec(action: str, model_key: str = "", enabled: bool = None)
         if enabled is None:
             return "ERROR: 'enabled' required for action='set'."
         targets = [model_key] if model_key and model_key != "*" else list(LLM_REGISTRY.keys())
-        changed = []
         for name in targets:
             if name not in LLM_REGISTRY:
                 return f"ERROR: Unknown model '{name}'."
             LLM_REGISTRY[name]["tool_call_available"] = enabled
-            if save_llm_model_field(name, "tool_call_available", enabled):
-                changed.append(name)
         status = "enabled" if enabled else "disabled"
-        return f"tool_call_available={status} for: {', '.join(changed)}. Persisted to llm-models.json."
+        return f"tool_call_available={status} for: {', '.join(targets)} (runtime only — use agentctl model-llmcall to persist)."
     return f"Unknown action '{action}'. Valid: list, set"
 
 
 async def _llm_timeout_exec(action: str, model_key: str = "", seconds: int = None) -> str:
-    from config import LLM_REGISTRY, save_llm_model_field
+    from config import LLM_REGISTRY
     if action == "list":
         lines = ["LLM delegation timeouts:"]
         for name, cfg in sorted(LLM_REGISTRY.items()):
@@ -743,14 +797,11 @@ async def _llm_timeout_exec(action: str, model_key: str = "", seconds: int = Non
         if seconds is None or seconds < 1:
             return "ERROR: 'seconds' must be a positive integer for action='set'."
         targets = [model_key] if model_key and model_key != "*" else list(LLM_REGISTRY.keys())
-        changed = []
         for name in targets:
             if name not in LLM_REGISTRY:
                 return f"ERROR: Unknown model '{name}'."
             LLM_REGISTRY[name]["llm_call_timeout"] = seconds
-            if save_llm_model_field(name, "llm_call_timeout", seconds):
-                changed.append(name)
-        return f"llm_call_timeout={seconds}s for: {', '.join(changed)}. Persisted to llm-models.json."
+        return f"llm_call_timeout={seconds}s for: {', '.join(targets)} (runtime only — use agentctl model-timeout to persist)."
     return f"Unknown action '{action}'. Valid: list, set"
 
 
@@ -789,7 +840,18 @@ async def _tool_preview_length_exec(action: str, length: int = None) -> str:
 async def _gate_list_exec() -> str:
     from state import auto_aidb_state, tool_gate_state
     from tools import get_all_gate_tools
-    lines = ["Gate status (true=auto-allow/gate OFF, false=gated/requires approval):"]
+
+    def perm_str(is_auto: bool, perm: str) -> str:
+        """Format one permission: gate=ON/OFF then effect."""
+        if is_auto:
+            return f"gate=OFF ({perm}=auto-allow)"
+        else:
+            return f"gate=ON  ({perm}=gated)"
+
+    lines = [
+        "Gate status  (gate=ON → requires approval; gate=OFF → auto-allow)",
+        "  Runtime toggle: !<tool>_gate_read/write true=gate-ON  false=gate-OFF",
+    ]
 
     # DB gates
     lines.append("\ndb_query (per-table):")
@@ -799,26 +861,36 @@ async def _gate_list_exec() -> str:
         for table in sorted(auto_aidb_state.keys()):
             perms = auto_aidb_state[table]
             label = "(default *)" if table == "*" else ("(metadata)" if table == "__meta__" else table)
-            r = "auto-allow" if perms.get("read", False) else "gated"
-            w = "auto-allow" if perms.get("write", False) else "gated"
-            lines.append(f"  {label:<20} read={r}  write={w}")
+            r = perms.get("read", False)
+            w = perms.get("write", False)
+            lines.append(f"  {label:<20} read: {perm_str(r, 'read')}  write: {perm_str(w, 'write')}")
 
     # Tool gates — iterate all gate-able tools from registry
     lines.append("\nTool gates:")
     gate_tools = get_all_gate_tools()
-    # Also include core gated tools not in plugin registry
+    # Core gated tools not in plugin registry
     _CORE_GATED = {
+        "agent_call":      ["write"],
         "at_llm":          ["write"],
         "sysprompt_write": ["write"],
         "session":         ["read", "write"],
         "model":           ["write"],
         "reset":           ["write"],
-        "gate_list":       ["read"],
+        "sleep":           ["read"],
+        "gate_list":            ["read"],
+        "limit_depth_list":         ["read"],
+        "limit_depth_set":          ["write"],
+        "limit_rate_list":          ["read"],
+        "limit_rate_set":           ["write"],
+        "limit_max_iteration_list": ["read"],
+        "limit_max_iteration_set":  ["write"],
     }
     all_tools = dict(_CORE_GATED)
     for name, meta in gate_tools.items():
         ops = meta.get("operations", ["read"])
         all_tools[name] = ops
+    # db_query is handled separately via auto_aidb_state (per-table), never in Tool gates
+    all_tools.pop("db_query", None)
     for tool in sorted(all_tools.keys()):
         ops = all_tools[tool]
         perms = tool_gate_state.get(tool, {})
@@ -826,10 +898,207 @@ async def _gate_list_exec() -> str:
         parts = []
         for op in ops:
             val = perms.get(op, default_perms.get(op, False))
-            parts.append(f"{op}={'auto-allow' if val else 'gated'}")
-        lines.append(f"  {tool:<25} {' '.join(parts)}")
+            parts.append(f"{op}: {perm_str(val, op)}")
+        lines.append(f"  {tool:<22} {' '.join(parts)}")
 
     return "\n".join(lines)
+
+
+_LIMIT_DEPTH_KEY_DESCRIPTIONS: dict[str, str] = {
+    "max_at_llm_depth":    "Max nested at_llm hops before rejection (1 = no recursion)",
+    "max_agent_call_depth": "Max nested agent_call hops before rejection (1 = no recursion)",
+}
+
+_LIMIT_MAX_ITER_DEFAULT = 10
+
+
+async def _limit_max_iteration_list_exec() -> str:
+    from config import LIVE_LIMITS
+    val = LIVE_LIMITS.get("max_tool_iterations", _LIMIT_MAX_ITER_DEFAULT)
+    lines = [
+        "Max Tool Iterations (per request):",
+        f"  {'Key':<26} {'Value':>6}  Description",
+        f"  {'-'*26} {'-'*6}  {'-'*50}",
+        f"  {'max_tool_iterations':<26} {str(val):>6}  Max LLM\u2194tool round-trips before [Max iterations] is emitted",
+        "",
+        "Changes take effect immediately. agentctl limit-max-iteration-set persists across restarts.",
+    ]
+    return "\n".join(lines)
+
+
+async def _limit_max_iteration_set_exec(value: int) -> str:
+    from config import LIVE_LIMITS
+    if value < 1:
+        return "ERROR: value must be >= 1."
+    old = LIVE_LIMITS.get("max_tool_iterations", _LIMIT_MAX_ITER_DEFAULT)
+    LIVE_LIMITS["max_tool_iterations"] = value
+    return f"max_tool_iterations: {old} \u2192 {value}. Applied immediately (runtime only \u2014 use agentctl limit-max-iteration-set to persist)."
+
+
+class _LimitMaxIterationListArgs(BaseModel):
+    pass
+
+
+class _LimitMaxIterationSetArgs(BaseModel):
+    value: int = Field(
+        description=(
+            "New max iterations value. Must be >= 1. "
+            "Controls how many LLM\u2194tool round-trips are allowed before the agent loop stops. "
+            "Default is 10. Increase for complex multi-tool tasks."
+        )
+    )
+
+
+async def _limit_depth_list_exec() -> str:
+    from config import LIVE_LIMITS
+    lines = ["Depth / Iteration Limits:"]
+    lines.append(f"  {'Key':<26} {'Value':>6}  Description")
+    lines.append(f"  {'-'*26} {'-'*6}  {'-'*40}")
+    for key, desc in sorted(_LIMIT_DEPTH_KEY_DESCRIPTIONS.items()):
+        val = LIVE_LIMITS.get(key, 1)
+        lines.append(f"  {key:<26} {str(val):>6}  {desc}")
+    lines.append("\nChanges take effect immediately. agentctl limit-depth-set persists across restarts.")
+    return "\n".join(lines)
+
+
+async def _limit_depth_set_exec(key: str, value: int) -> str:
+    from config import LIVE_LIMITS, save_limit_field
+    if key not in _LIMIT_DEPTH_KEY_DESCRIPTIONS:
+        valid = ", ".join(sorted(_LIMIT_DEPTH_KEY_DESCRIPTIONS.keys()))
+        return f"ERROR: Unknown limit key '{key}'. Valid keys: {valid}"
+    if value < 0:
+        return "ERROR: Value must be >= 0."
+    old = LIVE_LIMITS.get(key, 1)
+    LIVE_LIMITS[key] = value
+    return f"{key}: {old} → {value}. Applied immediately (runtime only — use agentctl limit-depth-set to persist)."
+
+
+class _LimitDepthListArgs(BaseModel):
+    pass
+
+
+class _LimitDepthSetArgs(BaseModel):
+    key: str = Field(
+        description=(
+            "Depth limit key to update. Valid keys: 'max_at_llm_depth', 'max_agent_call_depth'. "
+            "Use limit_depth_list() first to see current values and descriptions."
+        )
+    )
+    value: int = Field(
+        description="New integer value. Must be >= 0. (1 = no recursion/nesting, 0 = fully disabled)"
+    )
+
+
+async def _limit_rate_list_exec() -> str:
+    from config import RATE_LIMITS
+    lines = ["Rate Limits by Tool Type:"]
+    lines.append(f"  {'Tool Type':<14} {'Calls':>6}  {'Window':>8}  Auto-Disable")
+    lines.append(f"  {'-'*14} {'-'*6}  {'-'*8}  {'-'*12}")
+    for tool_type, cfg in sorted(RATE_LIMITS.items()):
+        calls = cfg.get("calls", 0)
+        window = cfg.get("window_seconds", 0)
+        auto_dis = cfg.get("auto_disable", False)
+        calls_str = "unlimited" if calls == 0 else str(calls)
+        window_str = "n/a" if window == 0 else f"{window}s"
+        auto_str = "YES" if auto_dis else "no"
+        lines.append(f"  {tool_type:<14} {calls_str:>6}  {window_str:>8}  {auto_str}")
+    lines.append("\nChanges take effect immediately. agentctl ratelimit-set persists across restarts.")
+    return "\n".join(lines)
+
+
+async def _limit_rate_set_exec(tool_type: str, calls: int, window_seconds: int) -> str:
+    from config import RATE_LIMITS
+    if calls < 0:
+        return "ERROR: calls must be >= 0 (0 = unlimited)."
+    if window_seconds < 0:
+        return "ERROR: window_seconds must be >= 0 (0 = unlimited)."
+    if tool_type not in RATE_LIMITS and calls == 0:
+        return f"ERROR: Unknown tool type '{tool_type}'. Known types: {', '.join(sorted(RATE_LIMITS.keys()))}"
+    old = RATE_LIMITS.get(tool_type, {})
+    old_calls = old.get("calls", 0)
+    old_window = old.get("window_seconds", 0)
+    if tool_type not in RATE_LIMITS:
+        RATE_LIMITS[tool_type] = {}
+    RATE_LIMITS[tool_type]["calls"] = calls
+    RATE_LIMITS[tool_type]["window_seconds"] = window_seconds
+    calls_str = "unlimited" if calls == 0 else str(calls)
+    old_calls_str = "unlimited" if old_calls == 0 else str(old_calls)
+    return (
+        f"{tool_type}: {old_calls_str}/{old_window}s → {calls_str}/{window_seconds}s. "
+        f"Applied immediately (runtime only — use agentctl ratelimit-set to persist)."
+    )
+
+
+class _LimitRateListArgs(BaseModel):
+    pass
+
+
+class _LimitRateSetArgs(BaseModel):
+    tool_type: str = Field(
+        description=(
+            "Tool type to update rate limit for. "
+            "Use limit_rate_list() first to see valid types and current values. "
+            "Common types: llm_call, search, drive, db, extract, system, agent_call, tmux."
+        )
+    )
+    calls: int = Field(
+        description="Max calls allowed within the window. 0 = unlimited."
+    )
+    window_seconds: int = Field(
+        description="Window duration in seconds. 0 = unlimited (no rate limit)."
+    )
+
+
+async def _outbound_agent_filters_exec() -> str:
+    """Return the current OUTBOUND_AGENT_ALLOWED/BLOCKED_COMMANDS configuration."""
+    import json as _json, os as _os
+    try:
+        path = _os.path.join(_os.path.dirname(__file__), "plugins-enabled.json")
+        with open(path, "r") as f:
+            cfg = _json.load(f)
+        api_cfg = cfg.get("plugin_config", {}).get("plugin_client_api", {})
+        allowed = api_cfg.get("OUTBOUND_AGENT_ALLOWED_COMMANDS", [])
+        blocked = api_cfg.get("OUTBOUND_AGENT_BLOCKED_COMMANDS", [])
+    except Exception as e:
+        return f"ERROR: Could not read outbound agent filters: {e}"
+
+    lines = ["Outbound agent message filters (applied to agent_call messages):"]
+    if allowed:
+        lines.append(f"  OUTBOUND_AGENT_ALLOWED_COMMANDS ({len(allowed)} entries):")
+        for p in allowed:
+            lines.append(f"    - {p}")
+        lines.append("  → Messages must start with one of the above prefixes.")
+    else:
+        lines.append("  OUTBOUND_AGENT_ALLOWED_COMMANDS: [] (empty — all messages permitted)")
+
+    if blocked:
+        lines.append(f"  OUTBOUND_AGENT_BLOCKED_COMMANDS ({len(blocked)} entries):")
+        for p in blocked:
+            lines.append(f"    - {p}")
+        lines.append("  → Messages must NOT start with any of the above prefixes.")
+    else:
+        lines.append("  OUTBOUND_AGENT_BLOCKED_COMMANDS: [] (empty — nothing blocked)")
+
+    return "\n".join(lines)
+
+
+class _OutboundAgentFiltersArgs(BaseModel):
+    pass
+
+
+class _SleepArgs(BaseModel):
+    seconds: int = Field(description="Number of seconds to sleep (1–300).")
+
+
+async def _sleep_exec(seconds: int) -> str:
+    """Sleep for the given number of seconds (1–300)."""
+    import asyncio as _asyncio
+    if not isinstance(seconds, int) or seconds < 1:
+        return "ERROR: seconds must be a positive integer."
+    if seconds > 300:
+        return "ERROR: maximum sleep is 300 seconds."
+    await _asyncio.sleep(seconds)
+    return f"Slept for {seconds} second(s)."
 
 
 def _make_core_lc_tools() -> list:
@@ -897,7 +1166,8 @@ def _make_core_lc_tools() -> list:
                 "Max swarm depth errors.\n\n"
                 "Rate limited: 5 calls per 60 seconds per session. "
                 "By default (stream=True) remote tokens are relayed in real-time for live Slack progress. "
-                "Set stream=False to suppress streaming and return only the final result."
+                "Set stream=False to suppress streaming and return only the final result. "
+                "Requires write gate approval (controlled by !agent_call_gate_write). Default: gated."
             ),
             args_schema=_AgentCallArgs,
         ),
@@ -1067,6 +1337,88 @@ def _make_core_lc_tools() -> list:
                 "Read-only. Requires read gate approval (controlled by !gate_list_gate_read)."
             ),
             args_schema=_GateListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_limit_depth_list_exec,
+            name="limit_depth_list",
+            description=(
+                "List all configurable depth and iteration limits (e.g. max_at_llm_depth, max_agent_call_depth). "
+                "Shows current runtime values and descriptions. Read-only. "
+                "Requires read gate approval (controlled by !limit_depth_list_gate_read, default: auto-allowed)."
+            ),
+            args_schema=_LimitDepthListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_limit_depth_set_exec,
+            name="limit_depth_set",
+            description=(
+                "Update a depth or iteration limit. Changes take effect immediately at runtime. "
+                "Valid keys: max_at_llm_depth, max_agent_call_depth. "
+                "Requires write gate approval (controlled by !limit_depth_set_gate_write, default: gated)."
+            ),
+            args_schema=_LimitDepthSetArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_limit_rate_list_exec,
+            name="limit_rate_list",
+            description=(
+                "List all rate limit settings by tool type (llm_call, search, drive, db, etc.). "
+                "Shows current runtime values. Read-only. "
+                "Requires read gate approval (controlled by !limit_rate_list_gate_read, default: auto-allowed)."
+            ),
+            args_schema=_LimitRateListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_limit_rate_set_exec,
+            name="limit_rate_set",
+            description=(
+                "Update rate limit for a tool type. Changes take effect immediately at runtime. "
+                "Use limit_rate_list() to see valid tool types and current values. "
+                "Requires write gate approval (controlled by !limit_rate_set_gate_write, default: gated)."
+            ),
+            args_schema=_LimitRateSetArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_limit_max_iteration_list_exec,
+            name="limit_max_iteration_list",
+            description=(
+                "Show the current max_tool_iterations limit — how many LLM↔tool round-trips are "
+                "allowed per request before the [Max iterations] stop is emitted. "
+                "Read-only. Requires read gate approval (controlled by !limit_max_iteration_list_gate_read, default: auto-allowed)."
+            ),
+            args_schema=_LimitMaxIterationListArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_limit_max_iteration_set_exec,
+            name="limit_max_iteration_set",
+            description=(
+                "Update the max_tool_iterations limit. Changes take effect immediately at runtime. "
+                "Increase this when a complex task requires more LLM↔tool round-trips than the current limit. "
+                "Requires write gate approval (controlled by !limit_max_iteration_set_gate_write, default: gated)."
+            ),
+            args_schema=_LimitMaxIterationSetArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_outbound_agent_filters_exec,
+            name="outbound_agent_filters",
+            description=(
+                "Show the current outbound agent message filter configuration. "
+                "Returns OUTBOUND_AGENT_ALLOWED_COMMANDS and OUTBOUND_AGENT_BLOCKED_COMMANDS lists "
+                "that are applied to messages sent via agent_call to remote agents. "
+                "Call this before using agent_call if you want to ensure your message will pass the filters. "
+                "Always allowed — no gate required."
+            ),
+            args_schema=_OutboundAgentFiltersArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_sleep_exec,
+            name="sleep",
+            description=(
+                "Sleep (pause execution) for a specified number of seconds (1–300). "
+                "Useful for rate-limiting, polling loops, or staged sequences. "
+                "Requires write gate approval (controlled by !sleep_gate_read, default: gated)."
+            ),
+            args_schema=_SleepArgs,
         ),
     ]
 

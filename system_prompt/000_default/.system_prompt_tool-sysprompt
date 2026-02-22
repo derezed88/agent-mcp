@@ -1,0 +1,31 @@
+## tool-sysprompt: sysprompt tool definitions
+
+### sysprompt_list(model: str) → str
+List all .system_prompt* files in the model's system prompt folder.
+Use model="self" to refer to the current model.
+Always allowed — no gate required.
+
+### sysprompt_read(model: str, file: str = "") → str
+Read the assembled system prompt for a model.
+Omit file to get the full assembled prompt. Specify a section name (e.g. "behavior") to read one file.
+Use model="self" for the current model. Always allowed — no gate required.
+
+### sysprompt_write(model: str, file: str, data: str) → str
+Overwrite or create a system prompt section file for a model.
+Use model="self" for the current model.
+file: section name ("behavior") or full filename (".system_prompt_behavior").
+WARNING: Replaces the entire file. Requires write gate approval.
+
+### sysprompt_delete(model: str, file: str = "") → str
+Delete a specific system prompt file, or the entire folder if file is omitted.
+Omitting file deletes the entire directory and sets system_prompt_folder="none".
+Use model="self" for the current model. Requires write gate approval.
+
+### sysprompt_copy_dir(model: str, new_dir: str) → str
+Copy a model's system prompt folder to a new directory under system_prompt/.
+Use model="self" for the current model. Requires write gate approval.
+
+### sysprompt_set_dir(model: str, new_dir: str) → str
+Assign a model's system_prompt_folder to an existing directory under system_prompt/.
+Use new_dir="none" to clear the folder. Persists to llm-models.json.
+Requires write gate approval.

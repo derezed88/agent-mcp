@@ -1,0 +1,17 @@
+## tool-at-llm: at_llm tool definition
+
+### at_llm(model: str, prompt: str) → str
+Call a named LLM model using the full current session context.
+The target model receives: the current system prompt + the complete chat history + the given prompt as a new user turn.
+Equivalent to the @<model> prefix syntax but usable mid-tool-chain.
+The result is NOT added to session history.
+
+When to use:
+- Get a second opinion on a complex answer without permanently switching models.
+- Delegate a sub-question to a specialised model (e.g. a coding model for a code review).
+- Cross-check your own reasoning using a different LLM.
+
+Constraints:
+- Subject to rate limiting (same bucket as llm_clean_text).
+- Requires at_llm write gate approval (controlled by !at_llm_gate_write, default: gated).
+- All tool gates are bypassed for the called model (same as @<model> prefix).

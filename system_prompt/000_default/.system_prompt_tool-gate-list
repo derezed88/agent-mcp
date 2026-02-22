@@ -1,0 +1,16 @@
+## tool-gate-list: gate_list tool definition
+
+### gate_list() → str
+List the current live gate status for all tools and DB tables.
+Shows whether each tool requires human approval (gated) or runs automatically (gate OFF).
+
+When to use:
+- Before attempting a tool call you are unsure about — check whether it is gated or auto-allowed.
+- After the user changes gate settings, to confirm the new state.
+- When diagnosing why a tool call was rejected.
+
+Gate states:
+- gate=OFF → auto-allowed: the tool executes without human approval.
+- gate=ON  → gated: the server prompts the user for approval before executing.
+
+Access: requires read gate approval (controlled by !gate_list_gate_read, default: gated).

@@ -23,7 +23,7 @@ from langchain_core.messages import (
 
 import time
 
-from config import log, MAX_TOOL_ITERATIONS, MAX_AT_LLM_DEPTH, MAX_AGENT_CALL_DEPTH, LLM_REGISTRY, RATE_LIMITS, save_llm_model_field
+from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, LIVE_LIMITS, save_llm_model_field
 from state import push_tok, push_done, push_err, current_client_id, sessions
 from prompt import get_current_prompt, load_prompt_for_folder
 from gate import check_human_gate
@@ -33,6 +33,90 @@ from tools import (
     get_all_lc_tools, get_all_openai_tools, get_tool_executor,
     get_tool_type,
 )
+
+# ---------------------------------------------------------------------------
+# Outbound agent message filters
+# Loaded once at startup from plugins-enabled.json
+# plugin_config.plugin_client_api.OUTBOUND_AGENT_ALLOWED_COMMANDS
+# plugin_config.plugin_client_api.OUTBOUND_AGENT_BLOCKED_COMMANDS
+#
+# These filter the *message* text sent outbound via agent_call — not tool names.
+# ALLOWED (non-empty): message must start with one of the listed prefixes.
+#          Empty [] = all messages permitted (no check performed).
+# BLOCKED: message must not start with any of the listed prefixes.
+#          Always checked when non-empty; empty [] = nothing blocked.
+# Both lists are lowercased prefix strings.
+# Default is empty for both — all agent-to-agent messages are permitted.
+# ---------------------------------------------------------------------------
+
+_outbound_agent_allowed: list[str] = []
+_outbound_agent_blocked: list[str] = []
+
+
+def _load_outbound_agent_filters() -> None:
+    """Load OUTBOUND_AGENT_ALLOWED/BLOCKED_COMMANDS from plugins-enabled.json."""
+    global _outbound_agent_allowed, _outbound_agent_blocked
+    try:
+        path = os.path.join(os.path.dirname(__file__), "plugins-enabled.json")
+        with open(path, "r") as f:
+            cfg = json.load(f)
+        api_cfg = cfg.get("plugin_config", {}).get("plugin_client_api", {})
+        raw_allow = api_cfg.get("OUTBOUND_AGENT_ALLOWED_COMMANDS", [])
+        raw_block = api_cfg.get("OUTBOUND_AGENT_BLOCKED_COMMANDS", [])
+        _outbound_agent_allowed = [s.strip().lower() for s in raw_allow if s.strip()]
+        _outbound_agent_blocked = [s.strip().lower() for s in raw_block if s.strip()]
+    except Exception:
+        pass   # no filter file = no restrictions
+
+
+_load_outbound_agent_filters()
+
+
+def _match_outbound_pattern(msg_lower: str, pattern: str) -> bool:
+    """
+    Match a lowercased, stripped message against a filter pattern.
+
+    Special commands have multiple forms:
+      !reset                       (no args)
+      !model / !model <name>        (optional args after space)
+      !tmux new foo / !tmux ls     (subcommand + optional args)
+
+    Rules:
+    - If pattern ends with a space: raw prefix match (caller controls boundary).
+    - Otherwise: match if msg == pattern OR msg starts with pattern + " ".
+      This prevents "!mod" from matching "!model" while still matching
+      "!model", "!model <name>", and "!model list".
+    - Non-! patterns (plain text prefixes) use the same boundary logic.
+    """
+    if pattern.endswith(" "):
+        return msg_lower.startswith(pattern)
+    return msg_lower == pattern or msg_lower.startswith(pattern + " ")
+
+
+def _check_outbound_agent_message(message: str) -> str | None:
+    """
+    Apply outbound agent message filters.
+    Returns None if permitted, or an error string if blocked.
+
+    Patterns are lowercased at load time. Matching is word-boundary aware:
+    pattern '!model' matches '!model' and '!model <name>' but NOT '!modelx'.
+    To match any prefix including mid-word, end the pattern with a space.
+    """
+    msg_lower = message.strip().lower()
+    if _outbound_agent_allowed:
+        if not any(_match_outbound_pattern(msg_lower, p) for p in _outbound_agent_allowed):
+            return (
+                f"BLOCKED by OUTBOUND_AGENT_ALLOWED_COMMANDS: message does not match "
+                f"any allowed prefix. Allowed: {', '.join(_outbound_agent_allowed)}"
+            )
+    for pattern in _outbound_agent_blocked:
+        if _match_outbound_pattern(msg_lower, pattern):
+            return (
+                f"BLOCKED by OUTBOUND_AGENT_BLOCKED_COMMANDS: message matches "
+                f"blocked pattern '{pattern}'."
+            )
+    return None
+
 
 # ---------------------------------------------------------------------------
 # LangChain LLM Factory
@@ -425,11 +509,24 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         else:
             system_prompt = get_current_prompt()
 
+        # Per-model timeout for ainvoke (same setting used by llm_clean_text/tool).
+        # Prevents indefinite stalls when the LLM API hangs or thinks too long.
+        invoke_timeout = model_cfg.get("llm_call_timeout", 120)
+
         # Convert internal message format to LangChain message objects
         ctx: list[BaseMessage] = _to_lc_messages(system_prompt, messages)
 
-        for _ in range(MAX_TOOL_ITERATIONS):
-            ai_msg: AIMessage = await llm_with_tools.ainvoke(ctx)
+        for _ in range(LIVE_LIMITS.get("max_tool_iterations", MAX_TOOL_ITERATIONS)):
+            await push_tok(client_id, "\n[thinking…]\n")
+            try:
+                ai_msg: AIMessage = await asyncio.wait_for(
+                    llm_with_tools.ainvoke(ctx),
+                    timeout=invoke_timeout,
+                )
+            except asyncio.TimeoutError:
+                await push_tok(client_id, f"\n[LLM timeout after {invoke_timeout}s — aborting turn]\n")
+                await push_done(client_id)
+                return ""
             ctx.append(ai_msg)
 
             if not ai_msg.tool_calls:
@@ -468,7 +565,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 # Flush immediately after each streaming agent_call so Slack posts
                 # per-turn progress as it arrives rather than batching all turns.
                 # Without this, when the LLM issues N agent_calls in one batch
-                # (grok4 batches all turns), a single push_done at the end causes
+                # (some models batch all turns), a single push_done at the end causes
                 # the Slack consumer to post the entire N-turn conversation as one
                 # block — the batch behaviour observed in Test 6 (5-turn).
                 if is_streaming_agent_call:
@@ -697,13 +794,20 @@ async def agent_call(
     # Depth guard — track nesting depth in the calling session
     calling_session = sessions.get(calling_client, {})
     agent_call_depth = calling_session.get("_agent_call_depth", 0)
-    if agent_call_depth >= MAX_AGENT_CALL_DEPTH:
+    _max_agent_call_depth = LIVE_LIMITS.get("max_agent_call_depth", 1)
+    if agent_call_depth >= _max_agent_call_depth:
         msg = (
-            f"[agent_call] Depth limit reached (max={MAX_AGENT_CALL_DEPTH}). "
+            f"[agent_call] Depth limit reached (max={_max_agent_call_depth}). "
             f"Call rejected to prevent recursion. Do NOT retry."
         )
         log.warning(f"agent_call depth limit: client={calling_client} depth={agent_call_depth}")
         return msg
+
+    # Outbound agent message filter
+    block_reason = _check_outbound_agent_message(message)
+    if block_reason:
+        log.warning(f"agent_call filter block: client={calling_client} reason={block_reason}")
+        return f"ERROR: {block_reason}\nMessage was NOT sent to the remote agent."
 
     # Session-level streaming override: !stream true|false takes precedence over
     # the LLM-supplied stream parameter so the human always has final control.
@@ -787,13 +891,14 @@ async def at_llm(model: str, prompt: str) -> str:
 
     # Depth guard — prevent unbounded recursive at_llm chains
     depth = session.get("_at_llm_depth", 0)
-    if depth >= MAX_AT_LLM_DEPTH:
+    _max_at_llm_depth = LIVE_LIMITS.get("max_at_llm_depth", 1)
+    if depth >= _max_at_llm_depth:
         msg = (
-            f"at_llm DEPTH LIMIT REACHED (max={MAX_AT_LLM_DEPTH}): "
+            f"at_llm DEPTH LIMIT REACHED (max={_max_at_llm_depth}): "
             f"Cannot call at_llm from within an at_llm context. "
             f"Do NOT retry. Return your answer directly without calling at_llm again."
         )
-        await push_tok(client_id, f"\n[at_llm ✗] depth limit reached (max={MAX_AT_LLM_DEPTH})\n")
+        await push_tok(client_id, f"\n[at_llm ✗] depth limit reached (max={_max_at_llm_depth})\n")
         log.warning(f"at_llm depth limit: client={client_id} depth={depth} model={model}")
         return msg
 
@@ -802,9 +907,9 @@ async def at_llm(model: str, prompt: str) -> str:
     # Append the new prompt as a user turn (not stored in session history)
     history.append({"role": "user", "content": prompt})
 
-    # Truncate to model's max_context
-    max_ctx = cfg.get("max_context", 50)
-    history = history[-max_ctx:]
+    # Run history chain for dispatch (does not modify session["history"])
+    from routes import _run_history_chain
+    history = _run_history_chain(history, session, cfg)
 
     await push_tok(client_id, f"\n[@{model} ▶] {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n")
 

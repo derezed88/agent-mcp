@@ -1,0 +1,69 @@
+{
+  "db": {
+    "*": {
+      "read": true,
+      "write": false
+    },
+    "__meta__": {
+      "read": true,
+      "write": false
+    }
+  },
+  "tools": {
+    "search_ddgs": {
+      "read": true
+    },
+    "search_google": {
+      "read": true
+    },
+    "search_tavily": {
+      "read": true
+    },
+    "search_xai": {
+      "read": true
+    },
+    "session": {
+      "read": true
+    },
+    "url_extract": {
+      "read": true
+    },
+    "google_drive": {
+      "read": true
+    },
+    "limit_depth_list": {
+      "read": true
+    },
+    "limit_depth_set": {
+      "write": false
+    },
+    "limit_rate_list": {
+      "read": true
+    },
+    "limit_rate_set": {
+      "write": false
+    },
+    "limit_max_iteration_list": {
+      "read": true
+    },
+    "limit_max_iteration_set": {
+      "write": false
+    },
+    "tmux": {
+      "write": false
+    },
+    "tmux_call_limit": {
+      "read": true,
+      "write": false
+    },
+    "gate_list": {
+      "read": true
+    },
+    "agent_call": {
+      "write": false
+    },
+    "at_llm": {
+      "write": true
+    }
+  }
+}

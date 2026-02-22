@@ -284,6 +284,23 @@ async def endpoint_api_delete_session(request: Request) -> JSONResponse:
     return JSONResponse({"status": "deleted", "client_id": target_id})
 
 
+async def endpoint_api_stop(request: Request) -> JSONResponse:
+    """Cancel the active LLM job for a client without starting a new one."""
+    if not _check_auth(request):
+        return _auth_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    client_id = payload.get("client_id", "").strip()
+    if not client_id:
+        return JSONResponse({"error": "Missing 'client_id'"}, status_code=400)
+    cancelled = await cancel_active_task(client_id)
+    if cancelled:
+        await push_done(client_id)
+    return JSONResponse({"status": "OK", "cancelled": cancelled})
+
+
 class ApiClientPlugin(BasePlugin):
     """Programmatic API client interface plugin."""
 
@@ -318,6 +335,7 @@ class ApiClientPlugin(BasePlugin):
             Route("/api/v1/submit", endpoint_api_submit, methods=["POST"]),
             Route("/api/v1/stream/{client_id}", endpoint_api_stream, methods=["GET"]),
             Route("/api/v1/gate/{gate_id}", endpoint_api_gate, methods=["POST"]),
+            Route("/api/v1/stop", endpoint_api_stop, methods=["POST"]),
             Route("/api/v1/sessions", endpoint_api_sessions, methods=["GET"]),
             Route("/api/v1/health", endpoint_api_health, methods=["GET"]),
             Route("/api/v1/session/{sid}", endpoint_api_delete_session, methods=["DELETE"]),

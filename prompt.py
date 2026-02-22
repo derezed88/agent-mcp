@@ -15,8 +15,9 @@ from config import log, SYSTEM_PROMPT_FILE, BASE_DIR, LLM_MODELS_FILE
 #   .system_prompt_behavior       ← leaf: body text
 #
 # Rules:
-# - A section file is either a LEAF (body text) or a CONTAINER ([SECTIONS] list).
-#   Not both. If [SECTIONS] is present, any text before it is ignored.
+# - A section file can have body text AND a [SECTIONS] list.
+#   Text before [SECTIONS] is used as the section's own body (preamble).
+#   Text after [SECTIONS] lists child sections to recurse into.
 # - All sections at all depths are registered in the flat _sections list.
 # - Duplicate section names across the tree are rejected (loop detection also
 #   catches cross-branch reuse of the same name).
@@ -30,7 +31,8 @@ from config import log, SYSTEM_PROMPT_FILE, BASE_DIR, LLM_MODELS_FILE
 # ---------------------------------------------------------------------------
 
 DEFAULT_MAIN_PROMPT = """\
-You are an AI assistant with persistent memory via a MySQL database (mymcp).
+You are Robot, an AI assistant with persistent memory via a MySQL database (mymcp).
+Your primary user and system architect is Mark.
 You are an autonomous agent. When you need information, you MUST use a tool call. Do not explain your steps. Do not provide Markdown code blocks. If you have a tool available for a task, use it immediately.
 
 [SECTIONS]
@@ -70,7 +72,8 @@ def _parse_sections_block(content: str) -> Tuple[Optional[List[Tuple[str, str]]]
 
     Returns:
       (section_list, body_text)
-      - If [SECTIONS] found: section_list = [(name, desc), ...], body_text = ""
+      - If [SECTIONS] found: section_list = [(name, desc), ...],
+        body_text = text before [SECTIONS] (may be non-empty)
       - If no [SECTIONS]: section_list = None, body_text = content
     """
     lines = content.split('\n')
@@ -83,6 +86,8 @@ def _parse_sections_block(content: str) -> Tuple[Optional[List[Tuple[str, str]]]
     if sections_idx == -1:
         return None, content
 
+    preamble = '\n'.join(lines[:sections_idx]).rstrip()
+
     section_list = []
     for line in lines[sections_idx + 1:]:
         line = line.strip()
@@ -94,7 +99,7 @@ def _parse_sections_block(content: str) -> Tuple[Optional[List[Tuple[str, str]]]
             description = parts[1].strip()
             section_list.append((short_name, description))
 
-    return section_list, ""
+    return section_list, preamble
 
 
 def _load_section_recursive(
@@ -187,12 +192,12 @@ def _load_section_recursive(
             'parent': parent,
         }]
     else:
-        # Container node — recurse into children
-        # The container itself gets an empty body; its content comes from children
+        # Container node — recurse into children.
+        # body holds any text written before [SECTIONS] in the file.
         result = [{
             'short-section-name': section_name,
             'description': description,
-            'body': "",
+            'body': body,
             'depth': depth,
             'parent': parent,
             'is_container': True,
@@ -404,17 +409,43 @@ def list_sections() -> List[Dict]:
 
 
 def _write_section_file(section_name: str, content: str, folder: Optional[str] = None) -> None:
-    """Write content to a section file, including the ## header."""
+    """Write content to a section file, including the ## header.
+
+    For container sections (those with a [SECTIONS] block on disk), only the
+    preamble (text before [SECTIONS]) is replaced; the [SECTIONS] block and
+    everything after it is preserved.
+    """
     file_path = _get_section_file_path(section_name, folder)
 
     description = ""
+    is_container = False
     for section in _sections:
         if section['short-section-name'] == section_name:
             description = section['description']
+            is_container = section.get('is_container', False)
             break
 
     header = f"## {section_name}: {description}\n"
-    full_content = header + content
+
+    if is_container and os.path.exists(file_path):
+        # Read existing file to recover the [SECTIONS] block
+        try:
+            with open(file_path, 'r', encoding='utf-8') as fh:
+                existing = fh.read()
+        except Exception:
+            existing = ""
+        # Strip leading ## header line if present
+        stripped = existing.split('\n', 1)[1] if existing.startswith('## ') else existing
+        # Find [SECTIONS] marker and keep everything from it onwards
+        idx = stripped.find('\n[SECTIONS]')
+        if idx == -1:
+            # Fallback: no marker found, just write normally
+            sections_tail = ""
+        else:
+            sections_tail = stripped[idx:]  # includes the \n[SECTIONS]\n... lines
+        full_content = header + content + sections_tail
+    else:
+        full_content = header + content
 
     try:
         with open(file_path, 'w', encoding='utf-8') as fh:
@@ -453,10 +484,11 @@ def apply_prompt_operation(
             f"Available sections: {available}"
         )
 
-    # Prevent edits to container sections (they have no body — only [SECTIONS])
-    if _sections[section_idx].get('is_container'):
+    # Container sections are editable when they have a preamble body.
+    # Only block if it's a container with no body at all.
+    if _sections[section_idx].get('is_container') and not _sections[section_idx].get('body'):
         raise ValueError(
-            f"Section '{section_name}' is a container (has sub-sections) and has no editable body. "
+            f"Section '{section_name}' is a container (has sub-sections) with no body text. "
             f"Edit its child sections instead."
         )
 

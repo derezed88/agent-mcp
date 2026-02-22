@@ -1,0 +1,8 @@
+## tool-tool-preview-length: tool_preview_length tool definition
+
+### tool_preview_length(action: str, value: int = None) → str
+Control how many characters of tool output are shown in the chat UI.
+The full result is always sent to the LLM regardless of this setting.
+- action="get" — show the current limit.
+- action="set" — change the limit (value=0 means unlimited, default=500).
+Always allowed — no gate required.

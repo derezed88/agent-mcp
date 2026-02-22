@@ -35,7 +35,7 @@ None beyond base requirements.
 ## Enable
 
 ```bash
-python plugin-manager.py enable plugin_proxy_llama
+python agentctl.py enable plugin_proxy_llama
 ```
 
 ## Configuration

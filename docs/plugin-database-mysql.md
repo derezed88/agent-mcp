@@ -37,5 +37,5 @@ Database name is `mymcp` on `localhost` (hardcoded default; change in `config.py
 ## Enable
 
 ```bash
-python plugin-manager.py enable plugin_database_mysql
+python agentctl.py enable plugin_database_mysql
 ```

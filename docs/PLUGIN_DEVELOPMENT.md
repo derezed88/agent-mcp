@@ -45,13 +45,13 @@ the plugin system:
 | File | Role | Who edits it |
 |------|------|--------------|
 | `plugin-manifest.json` | **Static registry** — declares that a plugin *exists*: its file, type, dependencies, required env vars, and load priority. Never read at agent startup for enable/disable decisions — only for validation metadata. | Plugin author (once, when adding the plugin) |
-| `plugins-enabled.json` | **Runtime config** — which plugins to actually load, per-plugin config overrides (port, host, `enabled` flag), default model, and rate limits. This is the operator control panel. | `plugin-manager.py` or direct edit |
+| `plugins-enabled.json` | **Runtime config** — which plugins to actually load, per-plugin config overrides (port, host, `enabled` flag), default model, and rate limits. This is the operator control panel. | `agentctl.py` or direct edit |
 
 **When you add a new plugin you touch both files:**
 1. Add an entry to `plugin-manifest.json` so the system knows the plugin exists and can validate its dependencies.
 2. Add the plugin name to the `enabled_plugins` list in `plugins-enabled.json` so the loader picks it up.  Add a `plugin_config` block only if you need non-default settings (port, host, or to start it disabled with `"enabled": false`).
 
-**The `enabled: false` pattern** lets you keep a plugin in `enabled_plugins` (so its config is preserved) without actually starting it.  This is how `plugin_proxy_llama` and `plugin_client_slack` ship — configured but off until the operator flips the flag.  Use `python plugin-manager.py enable <plugin>` or set it directly in `plugins-enabled.json`.
+**The `enabled: false` pattern** lets you keep a plugin in `enabled_plugins` (so its config is preserved) without actually starting it.  This is how `plugin_proxy_llama` and `plugin_client_slack` ship — configured but off until the operator flips the flag.  Use `python agentctl.py enable <plugin>` or set it directly in `plugins-enabled.json`.
 
 ---
 
@@ -75,7 +75,7 @@ Every plugin must have an entry in `plugin-manifest.json`:
 **Fields:**
 - `type` — `"data_tool"` or `"client_interface"`
 - `file` — filename relative to the mymcp working directory
-- `description` — shown in `python plugin-manager.py list`
+- `description` — shown in `python agentctl.py list`
 - `dependencies` — pip package names (validated at startup; use `>=` for minimum version)
 - `env_vars` — environment variable names required from `.env`; validated at startup
 - `config_files` — additional files that must exist (e.g., `credentials.json`)
@@ -276,22 +276,30 @@ def get_config(self) -> dict:
 ## `get_commands()` — Optional (either plugin type)
 
 Plugins may contribute `!command` handlers. Return a dict of command name →
-async handler. The handler signature must be `async def handler(client_id: str, arg: str)`.
+async handler. The handler signature is `async def handler(args: str) -> str`.
+The dispatcher in `routes.py` calls the handler and pushes the returned string
+to the client — the plugin does not call `push_tok` directly.
 
 ```python
 def get_commands(self) -> Dict[str, Any]:
-    async def my_cmd(client_id: str, arg: str):
-        from state import push_tok
-        from routes import conditional_push_done
-        await push_tok(client_id, f"mycommand received: {arg}")
-        await conditional_push_done(client_id)
+    async def my_cmd(args: str) -> str:
+        return f"mycommand received: {args}"
 
     return {"mycommand": my_cmd}
 ```
 
-> **Note:** `get_commands()` is defined on `BasePlugin` but is not yet
-> auto-wired by `agent-mcp.py`. Commands must currently be added manually
-> to `routes.py`. This is a planned improvement.
+Pair with `get_help()` to add a section to `!help`:
+
+```python
+def get_help(self) -> str:
+    return (
+        "My Plugin:\n"
+        "  !mycommand <args>   - do something\n"
+    )
+```
+
+Commands are auto-registered at startup by `agent-mcp.py` via `register_plugin_commands()`
+and dispatched generically by `cmd_plugin_command()` in `routes.py`.
 
 ---
 
@@ -373,7 +381,7 @@ and `llm_clean_tool`.
    or to ship it disabled (`"enabled": false`) until credentials are ready.
 4. **Add env vars** to `.env` if required.
 5. **Restart** `python agent-mcp.py`.
-6. **Verify** with `python plugin-manager.py list` — plugin should show `✓` (green,
+6. **Verify** with `python agentctl.py list` — plugin should show `✓` (green,
    all deps and env vars present) or `–` (yellow, if you shipped it with `enabled: false`).
 7. **Test** with `!help` in the client — new tool should appear automatically
    in the AI tools section if `get_gate_tools()` is implemented.
@@ -522,6 +530,6 @@ def get_tools(self) -> Dict[str, Any]:
 | `agents.py`              | `agentic_lc()` loop; `_build_lc_llm()`; `execute_tool()`; `_content_to_str()` |
 | `gate.py`                | Human approval logic; uses gate registry dynamically          |
 | `routes.py`              | `!autogate`, `!help` — both driven by gate registry           |
-| `plugin-manager.py`      | CLI tool for enabling/disabling plugins and managing models   |
+| `agentctl.py`      | CLI tool for system administration (plugins, models, config)  |
 | `.env`                   | API keys and credentials                                      |
 | `.system_prompt_tools`   | LLM-facing tool documentation (update manually for new tools) |

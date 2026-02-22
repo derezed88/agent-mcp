@@ -102,8 +102,18 @@ class BasePlugin(ABC):
             {
                 "mycommand": async_handler_function
             }
+        Handler signature: async (args: str) -> str
         """
         return {}
+
+    def get_help(self) -> str:
+        """
+        Return the !help section string for this plugin's commands.
+
+        The string is appended to the help output from cmd_help().
+        Return an empty string if the plugin has no user commands.
+        """
+        return ""
 
 
 class PluginLoader:
