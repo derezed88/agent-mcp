@@ -805,8 +805,36 @@ async def input_loop(stdscr):
             # line (two consecutive newlines) or the preceding char is a space.
             normalized = text.replace('\r\n', '\n').replace('\r', '\n')
 
-            # Join soft-wrapped lines: \n preceded by non-space → replace with space
-            joined = re.sub(r'(?<=[^\s])\n(?=[^\n])', ' ', normalized)
+            # Join soft-wrapped lines: line ends mid-word (non-space) AND next
+            # line starts with a lowercase letter — classic terminal soft-wrap.
+            # Exclude: any line in the block that starts with '!' (commands),
+            # because a command like "!sleep_gate_read\nfalse" must stay split.
+            def _join_soft_wraps(text: str) -> str:
+                lines = text.split('\n')
+                out = []
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
+                    # While next line looks like a soft-wrap continuation:
+                    # - current line ends with non-space
+                    # - next line starts with a lowercase letter
+                    # - neither line starts with '!' (command boundary)
+                    while (
+                        i + 1 < len(lines)
+                        and line
+                        and not line[-1].isspace()
+                        and lines[i + 1]
+                        and lines[i + 1][0].islower()
+                        and not line.lstrip().startswith('!')
+                        and not lines[i + 1].lstrip().startswith('!')
+                    ):
+                        i += 1
+                        line = line + ' ' + lines[i]
+                    out.append(line)
+                    i += 1
+                return '\n'.join(out)
+
+            joined = _join_soft_wraps(normalized)
 
             # Now split on blank lines (paragraph breaks) for multi-paragraph input
             paragraphs = re.split(r'\n{2,}', joined)
