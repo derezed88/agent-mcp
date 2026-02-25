@@ -500,8 +500,8 @@ class _VscodeSessionsListArgs(BaseModel):
 
 class _VscodeSessionsReadArgs(BaseModel):
     session_ids: str = Field(description="Comma-separated session UUIDs or 8-char prefixes (from vscode_sessions_list).")
-    mode: Optional[str] = Field(default="full", description="'full' — verbatim text. 'summary' — LLM-summarized by the current model.")
-    model: Optional[str] = Field(default="", description="agent-mcp model key to use for summarization. Leave empty to use the current session model.")
+    mode: Optional[str] = Field(default="full", description="'full' (default/preferred) — return verbatim text; you summarize it yourself. 'summary' — pre-summarize via a second llm_call before returning (costs an extra API call; only use if the session is too large to fit in context).")
+    model: Optional[str] = Field(default="", description="Only used with mode='summary'. agent-mcp model key for pre-summarization. Empty = current session model.")
 
 
 async def _vscode_sessions_list_executor(date: str = "", project: str = "") -> str:
@@ -641,8 +641,8 @@ class VscodeSessionsPlugin(BasePlugin):
                     description=(
                         "Read one or more local Claude Code sessions into context. "
                         "Pass comma-separated session IDs or 8-char prefixes from vscode_sessions_list. "
-                        "mode='full' returns verbatim user+assistant text. "
-                        "mode='summary' summarizes using the current model (or specify model= to delegate). "
+                        "Use mode='full' (default) to get verbatim text and summarize it yourself. "
+                        "Use mode='summary' only if the session is too large for context — it adds a second API call. "
                         "Use this to bring past VSCode session context into the current conversation."
                     ),
                     args_schema=_VscodeSessionsReadArgs,
