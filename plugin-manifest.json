@@ -171,6 +171,15 @@
         "url_extract"
       ]
     },
+    "plugin_client_vscode_sessions": {
+      "type": "client_interface",
+      "file": "plugin_client_vscode_sessions.py",
+      "description": "Local Claude Code session listing and content retrieval API (no Drive dependency)",
+      "dependencies": [],
+      "env_vars": [],
+      "config_files": [],
+      "priority": 25
+    },
     "plugin_tmux": {
       "type": "data_tool",
       "file": "plugin_tmux.py",

@@ -554,9 +554,7 @@ class PluginManager:
                 api_key_status = self._check_model_api_key(config)
                 status_symbol = f"{Colors.GREEN}✓{Colors.RESET}" if api_key_status else f"{Colors.YELLOW}⚠{Colors.RESET}"
 
-                tc_avail = config.get('tool_call_available', False)
-                tc_marker = f" {Colors.GREEN}[TC]{Colors.RESET}" if tc_avail else ""
-                print(f"  {status_symbol} {Colors.BOLD}{name}{Colors.RESET}{default_marker}{tc_marker}")
+                print(f"  {status_symbol} {Colors.BOLD}{name}{Colors.RESET}{default_marker}")
                 print(f"     Type: {config.get('type')} | Model: {config.get('model_id')} | Timeout: {config.get('llm_call_timeout', 60)}s")
 
                 if config.get('description'):
@@ -576,7 +574,6 @@ class PluginManager:
         print(f"  {Colors.GREEN}✓{Colors.RESET} Ready - API key configured")
         print(f"  {Colors.YELLOW}⚠{Colors.RESET} Missing API key")
         print(f"  {Colors.GRAY}○{Colors.RESET} Disabled")
-        print(f"  {Colors.GREEN}[TC]{Colors.RESET} tool_call_available=true (callable by LLM via llm_call_clean)")
         print()
 
     def _check_model_api_key(self, model_config: dict) -> bool:
@@ -606,10 +603,6 @@ class PluginManager:
         print(f"Model ID:         {model.get('model_id')}")
         print(f"Host:             {model.get('host') or 'Default'}")
         print(f"Max Context:      {model.get('max_context')} messages")
-
-        tc_avail = model.get('tool_call_available', False)
-        tc_color = Colors.GREEN if tc_avail else Colors.YELLOW
-        print(f"Tool Call Avail:  {tc_color}{'Yes' if tc_avail else 'No'}{Colors.RESET}")
         print(f"LLM Call Timeout: {model.get('llm_call_timeout', 60)}s")
 
         if model.get('description'):
@@ -657,75 +650,6 @@ class PluginManager:
             return True
         return False
 
-    def remove_model(self, name: str):
-        """Remove a model from the registry."""
-        models = self.models.get('models', {})
-
-        if name not in models:
-            print(f"{Colors.RED}Model '{name}' not found{Colors.RESET}")
-            return False
-
-        # Prevent removing default model
-        if name == self.config.get('default_model'):
-            print(f"{Colors.RED}Cannot remove default model. Set a different default first.{Colors.RESET}")
-            return False
-
-        del models[name]
-        self.models['models'] = models
-
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ Removed model: {name}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
-    def enable_model(self, name: str):
-        """Enable a model."""
-        models = self.models.get('models', {})
-
-        if name not in models:
-            print(f"{Colors.RED}Model '{name}' not found{Colors.RESET}")
-            return False
-
-        if models[name].get('enabled', True):
-            print(f"{Colors.YELLOW}Model '{name}' is already enabled{Colors.RESET}")
-            return True
-
-        models[name]['enabled'] = True
-        self.models['models'] = models
-
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ Enabled model: {name}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
-    def disable_model(self, name: str):
-        """Disable a model."""
-        models = self.models.get('models', {})
-
-        if name not in models:
-            print(f"{Colors.RED}Model '{name}' not found{Colors.RESET}")
-            return False
-
-        # Prevent disabling default model
-        if name == self.config.get('default_model'):
-            print(f"{Colors.RED}Cannot disable default model. Set a different default first.{Colors.RESET}")
-            return False
-
-        if not models[name].get('enabled', True):
-            print(f"{Colors.YELLOW}Model '{name}' is already disabled{Colors.RESET}")
-            return True
-
-        models[name]['enabled'] = False
-        self.models['models'] = models
-
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ Disabled model: {name}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
     def set_default_model(self, model_key: str):
         """Set the default LLM model."""
         models = self.models.get('models', {})
@@ -749,151 +673,6 @@ class PluginManager:
             return True
         return False
 
-    def set_max_context(self, model_name: str, max_context: int):
-        """Set max_context (max history size) for a model."""
-        models = self.models.get('models', {})
-
-        if model_name not in models:
-            print(f"{Colors.RED}Model '{model_name}' not found{Colors.RESET}")
-            print(f"\nAvailable models:")
-            for key in models.keys():
-                print(f"  - {key}")
-            return False
-
-        # Validate max_context
-        if max_context < 1:
-            print(f"{Colors.RED}max_context must be at least 1{Colors.RESET}")
-            return False
-
-        if max_context > 100000:
-            print(f"{Colors.YELLOW}Warning: max_context={max_context} is very large!{Colors.RESET}")
-            print(f"{Colors.YELLOW}This may exceed the model's actual context window.{Colors.RESET}")
-            try:
-                confirm = input(f"Continue? (y/n): ").strip().lower()
-                if confirm != 'y':
-                    print("Cancelled")
-                    return False
-            except (KeyboardInterrupt, EOFError):
-                print("\nCancelled")
-                return False
-
-        old_value = models[model_name].get('max_context', 50)
-        models[model_name]['max_context'] = max_context
-        self.models['models'] = models
-
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ Updated max_context for {model_name}{Colors.RESET}")
-            print(f"  Old: {old_value} messages")
-            print(f"  New: {max_context} messages")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
-    def rename_model(self, old_name: str, new_name: str):
-        """Rename a model (change the user-facing key, preserve backend model_id)."""
-        models = self.models.get('models', {})
-
-        if old_name not in models:
-            print(f"{Colors.RED}Model '{old_name}' not found{Colors.RESET}")
-            print(f"\nAvailable models:")
-            for key in models.keys():
-                print(f"  - {key}")
-            return False
-
-        if new_name in models:
-            print(f"{Colors.RED}Model name '{new_name}' already exists{Colors.RESET}")
-            return False
-
-        # Validate new name (no spaces, reasonable length)
-        if not new_name or ' ' in new_name or len(new_name) > 50:
-            print(f"{Colors.RED}Invalid model name. Must be non-empty, no spaces, max 50 chars{Colors.RESET}")
-            return False
-
-        # Copy model data to new key
-        models[new_name] = models[old_name]
-
-        # Update default model if needed
-        if self.config.get('default_model') == old_name:
-            self.config['default_model'] = new_name
-            print(f"{Colors.CYAN}Updated default model reference to: {new_name}{Colors.RESET}")
-
-        # Remove old key
-        del models[old_name]
-        self.models['models'] = models
-
-        if self.save_models() and self.save_config():
-            print(f"{Colors.GREEN}✓ Renamed model: {old_name} → {new_name}{Colors.RESET}")
-            print(f"  Backend model_id: {models[new_name].get('model_id', 'N/A')}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
-    def set_tool_call_available(self, model_name: str, value: bool):
-        """Set tool_call_available for a model."""
-        models = self.models.get('models', {})
-
-        if model_name not in models:
-            print(f"{Colors.RED}Model '{model_name}' not found{Colors.RESET}")
-            return False
-
-        if not models[model_name].get('enabled', True):
-            print(f"{Colors.RED}Model '{model_name}' is disabled. Enable it before setting tool_call_available.{Colors.RESET}")
-            return False
-
-        models[model_name]['tool_call_available'] = value
-        self.models['models'] = models
-
-        if self.save_models():
-            status = "enabled" if value else "disabled"
-            color = Colors.GREEN if value else Colors.YELLOW
-            print(f"{Colors.GREEN}✓{Colors.RESET} tool_call_available={color}{status}{Colors.RESET} for model '{model_name}'")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
-    def set_tool_call_available_all(self, value: bool):
-        """Set tool_call_available for all ENABLED models."""
-        models = self.models.get('models', {})
-        changed = []
-
-        for name, cfg in models.items():
-            if cfg.get('enabled', True):
-                cfg['tool_call_available'] = value
-                changed.append(name)
-
-        self.models['models'] = models
-
-        if self.save_models():
-            status = "enabled" if value else "disabled"
-            color = Colors.GREEN if value else Colors.YELLOW
-            print(f"{Colors.GREEN}✓{Colors.RESET} tool_call_available={color}{status}{Colors.RESET} set for all enabled models:")
-            for name in changed:
-                print(f"    - {name}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
-    def set_llm_call_timeout(self, model_name: str, timeout: int):
-        """Set llm_call_timeout for a model (seconds)."""
-        models = self.models.get('models', {})
-
-        if model_name not in models:
-            print(f"{Colors.RED}Model '{model_name}' not found{Colors.RESET}")
-            return False
-
-        if timeout < 1:
-            print(f"{Colors.RED}Timeout must be at least 1 second{Colors.RESET}")
-            return False
-
-        old = models[model_name].get('llm_call_timeout', 60)
-        models[model_name]['llm_call_timeout'] = timeout
-        self.models['models'] = models
-
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ llm_call_timeout for '{model_name}': {old}s → {timeout}s{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
 
     def _require_model(self, model_name: str) -> dict | None:
         """Return model entry from models dict, printing an error if not found."""
@@ -904,93 +683,6 @@ class PluginManager:
             print(f"  Available: {available}")
             return None
         return models[model_name]
-
-    def model_token_selection(self, model_name: str, value: str):
-        """Set token_selection_setting for a model ('default' or 'custom')."""
-        entry = self._require_model(model_name)
-        if entry is None:
-            return False
-        value = value.strip().lower()
-        if value not in ("default", "custom"):
-            print(f"{Colors.RED}✗ token_selection_setting must be 'default' or 'custom'{Colors.RESET}")
-            return False
-        old = entry.get('token_selection_setting', 'default')
-        entry['token_selection_setting'] = value
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ token_selection_setting for '{model_name}': {old} → {value}{Colors.RESET}")
-            print(f"{Colors.CYAN}Takes effect on the next LLM call (no restart needed).{Colors.RESET}")
-            return True
-        return False
-
-    def model_temperature(self, model_name: str, value: float):
-        """Set temperature for a model (0.0–2.0)."""
-        entry = self._require_model(model_name)
-        if entry is None:
-            return False
-        if not (0.0 <= value <= 2.0):
-            print(f"{Colors.RED}✗ temperature must be in [0.0, 2.0], got {value}{Colors.RESET}")
-            return False
-        old = entry.get('temperature', 1.0)
-        entry['temperature'] = value
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ temperature for '{model_name}': {old} → {value}{Colors.RESET}")
-            print(f"{Colors.CYAN}Takes effect on the next LLM call (no restart needed).{Colors.RESET}")
-            return True
-        return False
-
-    def model_top_p(self, model_name: str, value: float):
-        """Set top_p for a model (0.0–1.0)."""
-        entry = self._require_model(model_name)
-        if entry is None:
-            return False
-        if not (0.0 <= value <= 1.0):
-            print(f"{Colors.RED}✗ top_p must be in [0.0, 1.0], got {value}{Colors.RESET}")
-            return False
-        old = entry.get('top_p', 1.0)
-        entry['top_p'] = value
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ top_p for '{model_name}': {old} → {value}{Colors.RESET}")
-            print(f"{Colors.CYAN}Takes effect on the next LLM call (no restart needed).{Colors.RESET}")
-            return True
-        return False
-
-    def model_top_k(self, model_name: str, value: int):
-        """Set top_k for a GEMINI model (int >= 1)."""
-        entry = self._require_model(model_name)
-        if entry is None:
-            return False
-        if entry.get('type') != 'GEMINI':
-            print(f"{Colors.RED}✗ top_k is only supported for GEMINI-type models. '{model_name}' is {entry.get('type')}.{Colors.RESET}")
-            return False
-        if value < 1:
-            print(f"{Colors.RED}✗ top_k must be >= 1, got {value}{Colors.RESET}")
-            return False
-        old = entry.get('top_k', 40)
-        entry['top_k'] = value
-        if self.save_models():
-            print(f"{Colors.GREEN}✓ top_k for '{model_name}': {old} → {value}{Colors.RESET}")
-            print(f"{Colors.CYAN}Takes effect on the next LLM call (no restart needed).{Colors.RESET}")
-            return True
-        return False
-
-    def model_token_selection_list(self):
-        """List token selection settings for all models."""
-        models = self.models.get('models', {})
-        if not models:
-            print(f"{Colors.YELLOW}No models configured.{Colors.RESET}")
-            return
-        print(f"{Colors.BOLD}Token selection settings:{Colors.RESET}")
-        print(f"  {'Model':<16} {'Type':<6} {'Mode':<8}  {'Temp':>5}  {'top_p':>6}  {'top_k':>6}")
-        print(f"  {'-'*16} {'-'*6} {'-'*8}  {'-'*5}  {'-'*6}  {'-'*6}")
-        for name in sorted(models.keys()):
-            m = models[name]
-            mtype = m.get('type', '?')
-            setting = m.get('token_selection_setting', 'default')
-            temp = m.get('temperature', 1.0)
-            top_p = m.get('top_p', 1.0)
-            top_k = m.get('top_k', 'N/A') if mtype == 'GEMINI' else 'N/A'
-            enabled = '' if m.get('enabled', True) else f" {Colors.YELLOW}[disabled]{Colors.RESET}"
-            print(f"  {name:<16} {mtype:<6} {setting:<8}  {str(temp):>5}  {str(top_p):>6}  {str(top_k):>6}{enabled}")
 
     def set_model_description(self, model_name: str, description: str):
         """Set description for a model."""
@@ -1054,85 +746,6 @@ class PluginManager:
             return True
         return False
 
-    def ratelimit_list(self):
-        """List all rate limit configurations from plugins-enabled.json."""
-        rate_limits = self.config.get('rate_limits', {})
-        if not rate_limits:
-            print(f"{Colors.YELLOW}No rate limits configured (using defaults){Colors.RESET}")
-            return
-
-        print(f"\n{Colors.BOLD}Rate Limit Configuration{Colors.RESET}")
-        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
-        print(f"{'Tool Type':<12}  {'Calls':>6}  {'Window':>8}  {'Auto-Disable'}")
-        print(f"{'-'*12}  {'-'*6}  {'-'*8}  {'-'*12}")
-
-        for tool_type, cfg in sorted(rate_limits.items()):
-            calls = cfg.get('calls', 0)
-            window = cfg.get('window_seconds', 0)
-            auto_dis = cfg.get('auto_disable', False)
-
-            calls_str = "unlimited" if calls == 0 else str(calls)
-            window_str = "n/a" if window == 0 else f"{window}s"
-            auto_str = f"{Colors.YELLOW}YES{Colors.RESET}" if auto_dis else "no"
-            print(f"{tool_type:<12}  {calls_str:>6}  {window_str:>8}  {auto_str}")
-        print()
-
-    def ratelimit_set(self, tool_type: str, calls: int, window_seconds: int):
-        """Set rate limit for a tool type in plugins-enabled.json."""
-        valid_types = {"llm_call", "search", "extract", "drive", "db", "system", "agent_call", "tmux"}
-        if tool_type not in valid_types:
-            print(f"{Colors.RED}Unknown tool type '{tool_type}'{Colors.RESET}")
-            print(f"Valid types: {', '.join(sorted(valid_types))}")
-            return False
-
-        if calls < 0:
-            print(f"{Colors.RED}calls must be >= 0 (0 = unlimited){Colors.RESET}")
-            return False
-        if window_seconds < 0:
-            print(f"{Colors.RED}window_seconds must be >= 0 (0 = unlimited){Colors.RESET}")
-            return False
-
-        if 'rate_limits' not in self.config:
-            self.config['rate_limits'] = {}
-        if tool_type not in self.config['rate_limits']:
-            self.config['rate_limits'][tool_type] = {}
-
-        old_calls = self.config['rate_limits'][tool_type].get('calls', '?')
-        old_window = self.config['rate_limits'][tool_type].get('window_seconds', '?')
-        self.config['rate_limits'][tool_type]['calls'] = calls
-        self.config['rate_limits'][tool_type]['window_seconds'] = window_seconds
-
-        if self.save_config():
-            calls_str = "unlimited" if calls == 0 else f"{calls} calls"
-            window_str = "n/a" if window_seconds == 0 else f"/ {window_seconds}s"
-            print(f"{Colors.GREEN}✓ Rate limit for '{tool_type}': {calls_str} {window_str}{Colors.RESET}")
-            print(f"  Old: {old_calls} calls / {old_window}s")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
-    def ratelimit_auto_disable(self, tool_type: str, value: bool):
-        """Set auto_disable flag for a tool type rate limit."""
-        valid_types = {"llm_call", "search", "extract", "drive", "db", "system", "agent_call", "tmux"}
-        if tool_type not in valid_types:
-            print(f"{Colors.RED}Unknown tool type '{tool_type}'{Colors.RESET}")
-            print(f"Valid types: {', '.join(sorted(valid_types))}")
-            return False
-
-        if 'rate_limits' not in self.config:
-            self.config['rate_limits'] = {}
-        if tool_type not in self.config['rate_limits']:
-            self.config['rate_limits'][tool_type] = {}
-
-        self.config['rate_limits'][tool_type]['auto_disable'] = value
-
-        if self.save_config():
-            status = f"{Colors.YELLOW}ENABLED{Colors.RESET}" if value else f"{Colors.GREEN}disabled{Colors.RESET}"
-            print(f"{Colors.GREEN}✓{Colors.RESET} auto_disable for '{tool_type}': {status}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
-
     # ------------------------------------------------------------------
     # Tmux plugin configuration
     # ------------------------------------------------------------------
@@ -1155,332 +768,292 @@ class PluginManager:
         return False
 
     # ------------------------------------------------------------------
-    # Gate defaults management
+    # Unified resource commands for agentctl
     # ------------------------------------------------------------------
 
-    # Core gate-able tools and the permission types they support.
-    # Plugin gate tools are loaded at runtime from plugin-manifest.json gate_tools sections.
-    # db_query is handled separately (per-table keys in the "db" section).
-    _CORE_GATE_TOOLS: dict[str, list[str]] = {
-        "at_llm":          ["write"],
-        "gate_list":            ["read"],
-        "limit_depth_list":     ["read"],
-        "limit_depth_set":      ["write"],
-        "limit_rate_list":          ["read"],
-        "limit_rate_set":           ["write"],
-        "limit_max_iteration_list": ["read"],
-        "limit_max_iteration_set":  ["write"],
-        "search_ddgs":     ["read"],
-        "search_google":   ["read"],
-        "search_tavily":   ["read"],
-        "search_xai":      ["read"],
-        "url_extract":     ["read"],
-        "google_drive":    ["read", "write"],
-        "sysprompt_write": ["write"],
-        "session":         ["read", "write"],
-        "model":           ["write"],
-        "model_copy":      ["write"],
-        "model_delete":    ["write"],
-        "model_enable":    ["write"],
-        "model_disable":   ["write"],
-        "reset":           ["write"],
-        "sleep":           ["read"],
-    }
-
-    def _load_plugin_gate_tools(self) -> dict[str, list[str]]:
-        """
-        Load gate_tools metadata from self.manifest for all enabled plugins.
-        Returns a dict of tool_name -> list[str] (operations), merged from all plugins.
-        """
-        result: dict[str, list[str]] = {}
-        enabled = set(self.config.get("enabled_plugins", []))
-        for plugin_name, plugin_meta in self.manifest.get("plugins", {}).items():
-            if plugin_name not in enabled:
-                continue
-            for tool_name, gate_meta in plugin_meta.get("gate_tools", {}).items():
-                result[tool_name] = gate_meta.get("operations", ["write"])
-        return result
-
-    @property
-    def _GATE_TOOLS(self) -> dict[str, list[str]]:
-        """Combined gate tools: core + plugin manifest entries."""
-        merged = dict(self._CORE_GATE_TOOLS)
-        merged.update(self._load_plugin_gate_tools())
-        return merged
-
-    def _load_gate_defaults(self) -> dict:
-        """Load gate-defaults.json, returning empty structure if not present."""
+    def _load_llm_tools(self) -> dict:
+        """Load llm-tools.json."""
         try:
-            with open("gate-defaults.json", "r") as f:
+            with open("llm-tools.json", "r") as f:
                 return json.load(f)
-        except FileNotFoundError:
-            return {"db": {}, "tools": {}}
-        except json.JSONDecodeError as e:
-            print(f"{Colors.RED}Error reading gate-defaults.json: {e}{Colors.RESET}")
-            return {"db": {}, "tools": {}}
-
-    def _save_gate_defaults(self, data: dict) -> bool:
-        """Save gate-defaults.json."""
-        try:
-            with open("gate-defaults.json", "w") as f:
-                json.dump(data, f, indent=2)
-            return True
-        except Exception as e:
-            print(f"{Colors.RED}Error saving gate-defaults.json: {e}{Colors.RESET}")
-            return False
-
-    def gate_list(self):
-        """List all gate settings from gate-defaults.json."""
-        data = self._load_gate_defaults()
-        db_section = data.get("db", {})
-        tool_section = data.get("tools", {})
-
-        def perm_str(is_auto: bool, perm: str) -> str:
-            """Format one permission: gate=ON/OFF then effect."""
-            if is_auto:
-                return f"gate=OFF ({perm}=auto-allow)"
-            else:
-                return f"{Colors.YELLOW}gate=ON{Colors.RESET}  ({perm}={Colors.YELLOW}gated{Colors.RESET})"
-
-        print(f"\n{Colors.BOLD}Gate Defaults{Colors.RESET}  (gate=ON → requires approval; gate=OFF → auto-allow)")
-        print(f"  Runtime toggle: !<tool>_gate_read/write true=gate-ON  false=gate-OFF")
-        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}")
-
-        # DB gates
-        print(f"\n{Colors.BOLD}db_query (per-table):{Colors.RESET}")
-        if not db_section:
-            print(f"  {Colors.GRAY}(all tables gated by default){Colors.RESET}")
-        else:
-            for table in sorted(db_section.keys()):
-                perms = db_section[table]
-                label = "(default *)" if table == "*" else ("(metadata)" if table == "__meta__" else table)
-                r = perms.get("read", False)
-                w = perms.get("write", False)
-                print(f"  {label:<20} read: {perm_str(r, 'read')}  write: {perm_str(w, 'write')}")
-
-        # Tool gates
-        print(f"\n{Colors.BOLD}Tool gates:{Colors.RESET}")
-        for tool, supported_perms in sorted(self._GATE_TOOLS.items()):
-            perms = tool_section.get(tool, {})
-            parts = []
-            for perm in supported_perms:
-                val = perms.get(perm, False)
-                parts.append(f"{perm}: {perm_str(val, perm)}")
-            print(f"  {tool:<22} {' '.join(parts)}")
-
-        print()
-        print(f"  Set:   {Colors.BOLD}llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}  (true=auto-allow/gate-OFF, false=gated/gate-ON)")
-        print(f"         {Colors.BOLD}llm-allow <tool> <read|write> <true|false>{Colors.RESET}")
-        print(f"  Reset: {Colors.BOLD}gate-reset{Colors.RESET}  (sets all to gated/gate-ON)")
-        print(f"\n  {Colors.CYAN}Changes take effect after restarting agent-mcp.py{Colors.RESET}")
-        print()
-
-    def llm_allow(self, args: list[str]) -> bool:
-        """
-        Set a gate default (true=auto-allow/gate-OFF, false=gated/gate-ON).
-        Usage:
-          llm-allow db <table|*> <read|write> <true|false>
-          llm-allow <tool> <read|write> <true|false>
-        """
-        BOOL_TRUE = {"true", "1", "yes", "on"}
-        BOOL_FALSE = {"false", "0", "no", "off"}
-
-        def parse_bool(s: str) -> bool | None:
-            s = s.lower()
-            if s in BOOL_TRUE:
-                return True
-            if s in BOOL_FALSE:
-                return False
-            return None
-
-        if not args:
-            print(f"{Colors.RED}Usage: llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}")
-            print(f"       llm-allow <tool> <read|write> <true|false>")
-            return False
-
-        data = self._load_gate_defaults()
-
-        if args[0].lower() == "db":
-            # llm-allow db <table> <read|write> <true|false>
-            if len(args) != 4:
-                print(f"{Colors.RED}Usage: llm-allow db <table|*> <read|write> <true|false>{Colors.RESET}")
-                return False
-            table, perm, flag_str = args[1], args[2].lower(), args[3]
-            if perm not in ("read", "write"):
-                print(f"{Colors.RED}Permission must be 'read' or 'write'{Colors.RESET}")
-                return False
-            val = parse_bool(flag_str)
-            if val is None:
-                print(f"{Colors.RED}Value must be true or false{Colors.RESET}")
-                return False
-
-            db_section = data.setdefault("db", {})
-            db_section.setdefault(table, {"read": False, "write": False})[perm] = val
-            # Wildcard also applies to __meta__
-            if table == "*":
-                db_section.setdefault("__meta__", {"read": False, "write": False})[perm] = val
-
-            if self._save_gate_defaults(data):
-                gate_str = f"{Colors.GREEN}gate=OFF (auto-allow){Colors.RESET}" if val else f"{Colors.YELLOW}gate=ON (gated){Colors.RESET}"
-                label = "default (*)" if table == "*" else table
-                print(f"{Colors.GREEN}✓{Colors.RESET} db_query [{label}] {perm}: {gate_str}")
-                print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-                return True
-            return False
-
-        else:
-            # llm-allow <tool> <read|write> <true|false>
-            if len(args) != 3:
-                print(f"{Colors.RED}Usage: llm-allow <tool> <read|write> <true|false>{Colors.RESET}")
-                print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
-                return False
-            tool, perm, flag_str = args[0].lower(), args[1].lower(), args[2]
-            if tool not in self._GATE_TOOLS:
-                print(f"{Colors.RED}Unknown tool '{tool}'{Colors.RESET}")
-                print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
-                return False
-            if perm not in ("read", "write"):
-                print(f"{Colors.RED}Permission must be 'read' or 'write'{Colors.RESET}")
-                return False
-            if perm not in self._GATE_TOOLS[tool]:
-                print(f"{Colors.RED}Tool '{tool}' does not support '{perm}' gate (supports: {self._GATE_TOOLS[tool]}){Colors.RESET}")
-                return False
-            val = parse_bool(flag_str)
-            if val is None:
-                print(f"{Colors.RED}Value must be true or false{Colors.RESET}")
-                return False
-
-            tool_section = data.setdefault("tools", {})
-            tool_section.setdefault(tool, {})[perm] = val
-
-            if self._save_gate_defaults(data):
-                gate_str = f"{Colors.GREEN}gate=OFF (auto-allow){Colors.RESET}" if val else f"{Colors.YELLOW}gate=ON (gated){Colors.RESET}"
-                print(f"{Colors.GREEN}✓{Colors.RESET} {tool} {perm}: {gate_str}")
-                print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-                return True
-            return False
-
-    # ------------------------------------------------------------------
-    # Depth limit management
-    # ------------------------------------------------------------------
-
-    _LIMIT_KEYS: dict[str, str] = {
-        "max_at_llm_depth":     "Max nested at_llm hops before rejection (1 = no recursion)",
-        "max_agent_call_depth": "Max nested agent_call hops before rejection (1 = no recursion)",
-    }
-
-    _ITER_KEY = "max_tool_iterations"
-    _ITER_DEFAULT = 10
-    _ITER_DESC = "Max LLM<->tool round-trips per request before [Max iterations] is emitted"
-
-    def _load_limits(self) -> dict:
-        """Load limits section from llm-models.json."""
-        try:
-            with open(self.models_path, "r") as f:
-                data = json.load(f)
-            return data.get("limits", {})
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"{Colors.RED}Error loading llm-tools.json: {e}{Colors.RESET}")
             return {}
 
-    def _save_limit(self, key: str, value: int) -> bool:
-        """Persist a single limit key to llm-models.json."""
+    def _save_llm_tools(self, data: dict) -> bool:
         try:
-            with open(self.models_path, "r") as f:
-                data = json.load(f)
-            data.setdefault("limits", {})[key] = value
-            with open(self.models_path, "w") as f:
+            with open("llm-tools.json", "w") as f:
                 json.dump(data, f, indent=2)
             return True
         except Exception as e:
-            print(f"{Colors.RED}Error saving limit: {e}{Colors.RESET}")
+            print(f"{Colors.RED}Error saving llm-tools.json: {e}{Colors.RESET}")
             return False
 
-    def limit_depth_list(self):
-        """List all depth/iteration limits from llm-models.json."""
-        limits = self._load_limits()
+    def llm_tools_cmd(self, args: list):
+        """Handle: agentctl llm-tools <action> [name] [tools]"""
+        action = args[0] if args else "list"
+        name = args[1] if len(args) > 1 else ""
+        tools_str = args[2] if len(args) > 2 else ""
 
-        print(f"\n{Colors.BOLD}Depth / Iteration Limits{Colors.RESET}")
-        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
-        print(f"  {'Key':<26} {'Value':>6}  Description")
-        print(f"  {'-'*26} {'-'*6}  {'-'*40}")
+        data = self._load_llm_tools()
+        if not data:
+            return
 
-        for key, desc in sorted(self._LIMIT_KEYS.items()):
-            val = limits.get(key, "(not set — using default: 1)")
-            print(f"  {key:<26} {str(val):>6}  {Colors.GRAY}{desc}{Colors.RESET}")
+        toolsets = data.get("toolsets", {})
 
-        print()
-        print(f"  Set: {Colors.BOLD}limit-depth-set <key> <value>{Colors.RESET}")
-        print(f"  {Colors.CYAN}Persists to llm-models.json; runtime !limit_depth_set takes effect immediately{Colors.RESET}")
-        print()
+        if action == "list":
+            print(f"\n{Colors.BOLD}Toolsets (llm-tools.json):{Colors.RESET}")
+            for ts_name in sorted(toolsets.keys()):
+                tool_list = toolsets[ts_name]
+                print(f"  {ts_name}: {', '.join(tool_list)} ({len(tool_list)} tools)")
+            print(f"\n{Colors.BOLD}Model → toolsets:{Colors.RESET}")
+            for model_name in sorted(self.models.get("models", {}).keys()):
+                ts = self.models["models"][model_name].get("llm_tools", [])
+                enabled = self.models["models"][model_name].get("enabled", True)
+                status = "" if enabled else f" {Colors.GRAY}(disabled){Colors.RESET}"
+                print(f"  {model_name}: {', '.join(ts) if ts else '(none)'}{status}")
 
-    def limit_depth_set(self, key: str, value: int) -> bool:
-        """Set a depth limit in llm-models.json (persists across restarts)."""
-        if key not in self._LIMIT_KEYS:
-            print(f"{Colors.RED}Unknown limit key '{key}'{Colors.RESET}")
-            print(f"  Valid keys: {', '.join(sorted(self._LIMIT_KEYS.keys()))}")
-            return False
+        elif action == "read":
+            if not name:
+                print(f"{Colors.RED}✗ Name required: agentctl llm-tools read <name>{Colors.RESET}")
+                return
+            ts = toolsets.get(name)
+            if ts is None:
+                print(f"{Colors.RED}✗ Toolset '{name}' not found{Colors.RESET}")
+                return
+            print(f"{name}: {', '.join(ts)} ({len(ts)} tools)")
 
-        if value < 0:
-            print(f"{Colors.RED}Value must be >= 0{Colors.RESET}")
-            return False
+        elif action == "write":
+            if not name or not tools_str:
+                print(f"{Colors.RED}✗ Usage: agentctl llm-tools write <name> <tool1,tool2,...>{Colors.RESET}")
+                return
+            tool_list = [t.strip() for t in tools_str.split(",") if t.strip()]
+            toolsets[name] = tool_list
+            if self._save_llm_tools(data):
+                print(f"{Colors.GREEN}✓{Colors.RESET} Toolset '{name}' written: {', '.join(tool_list)}")
 
-        limits = self._load_limits()
-        old = limits.get(key, 1)
+        elif action == "delete":
+            if not name:
+                print(f"{Colors.RED}✗ Name required: agentctl llm-tools delete <name>{Colors.RESET}")
+                return
+            if name not in toolsets:
+                print(f"{Colors.RED}✗ Toolset '{name}' not found{Colors.RESET}")
+                return
+            del toolsets[name]
+            if self._save_llm_tools(data):
+                print(f"{Colors.GREEN}✓{Colors.RESET} Toolset '{name}' deleted")
 
-        if self._save_limit(key, value):
-            print(f"{Colors.GREEN}✓ {key}: {old} → {value}{Colors.RESET}")
-            print(f"{Colors.CYAN}Persisted to llm-models.json (restart agent-mcp.py or use !limit_depth_set for runtime effect){Colors.RESET}")
-            return True
-        return False
+        elif action == "add":
+            if not name or not tools_str:
+                print(f"{Colors.RED}✗ Usage: agentctl llm-tools add <name> <tool1,tool2,...>{Colors.RESET}")
+                return
+            existing = toolsets.get(name, [])
+            new_tools = [t.strip() for t in tools_str.split(",") if t.strip()]
+            merged = list(dict.fromkeys(existing + new_tools))
+            toolsets[name] = merged
+            if self._save_llm_tools(data):
+                added = [t for t in new_tools if t not in existing]
+                print(f"{Colors.GREEN}✓{Colors.RESET} Toolset '{name}': added {', '.join(added) if added else '(no new)'}. Now {len(merged)} tools.")
 
-    def limit_max_iteration_list(self):
-        """Show the current max_tool_iterations limit from llm-models.json."""
-        limits = self._load_limits()
-        val = limits.get(self._ITER_KEY, f"(not set — using default: {self._ITER_DEFAULT})")
+        else:
+            print(f"{Colors.RED}✗ Unknown action '{action}'. Valid: list, read, write, delete, add{Colors.RESET}")
 
-        print(f"\n{Colors.BOLD}Max Tool Iterations{Colors.RESET}")
-        print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
-        print(f"  {'Key':<26} {'Value':>6}  Description")
-        print(f"  {'-'*26} {'-'*6}  {'-'*50}")
-        print(f"  {self._ITER_KEY:<26} {str(val):>6}  {Colors.GRAY}{self._ITER_DESC}{Colors.RESET}")
-        print()
-        print(f"  Set: {Colors.BOLD}limit-max-iteration-set <value>{Colors.RESET}")
-        print(f"  {Colors.CYAN}Persists to llm-models.json; runtime !limit_max_iteration_set takes effect immediately{Colors.RESET}")
-        print()
+    def model_cfg_cmd(self, args: list):
+        """Handle: agentctl model-cfg <action> [name] [field] [value]"""
+        action = args[0] if args else "list"
+        name = args[1] if len(args) > 1 else ""
+        field = args[2] if len(args) > 2 else ""
+        value = " ".join(args[3:]) if len(args) > 3 else ""
 
-    def limit_max_iteration_set(self, value: int) -> bool:
-        """Set max_tool_iterations in llm-models.json (persists across restarts)."""
-        if value < 1:
-            print(f"{Colors.RED}Value must be >= 1{Colors.RESET}")
-            return False
+        models = self.models.get("models", {})
 
-        limits = self._load_limits()
-        old = limits.get(self._ITER_KEY, self._ITER_DEFAULT)
+        if action == "list":
+            print(f"\n{Colors.BOLD}Models:{Colors.RESET}")
+            default = self.models.get("default_model", "")
+            for key in sorted(models.keys()):
+                cfg = models[key]
+                enabled = cfg.get("enabled", True)
+                ts = cfg.get("llm_tools", [])
+                marker = f" {Colors.GREEN}(default){Colors.RESET}" if key == default else ""
+                status = f" {Colors.GRAY}(disabled){Colors.RESET}" if not enabled else ""
+                print(f"  {key:<16} {cfg.get('model_id',''):<30} tools=[{','.join(ts)}]{marker}{status}")
 
-        if self._save_limit(self._ITER_KEY, value):
-            print(f"{Colors.GREEN}\u2713 {self._ITER_KEY}: {old} \u2192 {value}{Colors.RESET}")
-            print(f"{Colors.CYAN}Persisted to llm-models.json (restart agent-mcp.py or use !limit_max_iteration_set for runtime effect){Colors.RESET}")
-            return True
-        return False
+        elif action == "read":
+            if not name or name not in models:
+                print(f"{Colors.RED}✗ Model '{name}' not found{Colors.RESET}" if name else f"{Colors.RED}✗ Name required{Colors.RESET}")
+                return
+            cfg = models[name]
+            print(f"\n{Colors.BOLD}Model: {name}{Colors.RESET}")
+            for k, v in sorted(cfg.items()):
+                if k == "env_key":
+                    val_display = f"{v} ({'set' if os.getenv(v or '') else 'unset'})" if v else "(none)"
+                    print(f"  {k}: {val_display}")
+                else:
+                    print(f"  {k}: {v}")
 
-    def gate_reset(self) -> bool:
-        """Reset all gate defaults to gated (false) — delete gate-defaults.json."""
-        if self._save_gate_defaults({"db": {}, "tools": {}}):
-            print(f"{Colors.GREEN}✓ All gate defaults reset — everything will be gated on next restart{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
+        elif action == "write":
+            if not name or not field:
+                print(f"{Colors.RED}✗ Usage: agentctl model-cfg write <name> <field> <value>{Colors.RESET}")
+                return
+            if name not in models:
+                print(f"{Colors.RED}✗ Model '{name}' not found{Colors.RESET}")
+                return
+            # Type coercion
+            if field == "llm_tools":
+                coerced = [t.strip() for t in value.split(",") if t.strip()]
+            elif field == "enabled":
+                coerced = value.lower() in ("true", "1", "yes")
+            elif field in ("llm_call_timeout", "max_context"):
+                coerced = int(value)
+            elif field in ("temperature", "top_p"):
+                coerced = float(value)
+            elif field == "top_k":
+                coerced = None if value.lower() in ("null", "none") else int(value)
+            else:
+                coerced = value
 
-    def sleep_gate_allow(self, value: bool) -> bool:
-        """Set the sleep gate default. true=auto-allow (gate OFF), false=gated (gate ON)."""
-        data = self._load_gate_defaults()
-        data.setdefault("tools", {}).setdefault("sleep", {})["read"] = value
-        if self._save_gate_defaults(data):
-            gate_str = f"{Colors.GREEN}gate=OFF (auto-allow){Colors.RESET}" if value else f"{Colors.YELLOW}gate=ON (gated){Colors.RESET}"
-            print(f"{Colors.GREEN}✓{Colors.RESET} sleep read: {gate_str}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
-            return True
-        return False
+            old = models[name].get(field, "(unset)")
+            models[name][field] = coerced
+            with open(self.models_path, "w") as f:
+                json.dump(self.models, f, indent=2)
+            print(f"{Colors.GREEN}✓{Colors.RESET} {name}.{field}: {old} → {coerced}")
+
+        elif action in ("copy", "delete", "enable", "disable"):
+            # Delegate to existing methods
+            if action == "copy":
+                if not name or not field:
+                    print(f"{Colors.RED}✗ Usage: agentctl model-cfg copy <source> <new_name>{Colors.RESET}")
+                    return
+                # Use field as new_name for copy
+                if name not in models:
+                    print(f"{Colors.RED}✗ Source model '{name}' not found{Colors.RESET}")
+                    return
+                if field in models:
+                    print(f"{Colors.RED}✗ Model '{field}' already exists{Colors.RESET}")
+                    return
+                import copy as _copy
+                models[field] = _copy.deepcopy(models[name])
+                with open(self.models_path, "w") as f:
+                    json.dump(self.models, f, indent=2)
+                print(f"{Colors.GREEN}✓{Colors.RESET} Copied '{name}' → '{field}'")
+            elif action == "delete":
+                if not name or name not in models:
+                    print(f"{Colors.RED}✗ Model '{name}' not found{Colors.RESET}")
+                    return
+                del models[name]
+                with open(self.models_path, "w") as f:
+                    json.dump(self.models, f, indent=2)
+                print(f"{Colors.GREEN}✓{Colors.RESET} Deleted '{name}'")
+            elif action == "enable":
+                if not name:
+                    print(f"{Colors.RED}✗ Name required{Colors.RESET}")
+                elif name not in models:
+                    print(f"{Colors.RED}✗ Model '{name}' not found{Colors.RESET}")
+                else:
+                    models[name]["enabled"] = True
+                    with open(self.models_path, "w") as f:
+                        json.dump(self.models, f, indent=2)
+                    print(f"{Colors.GREEN}✓{Colors.RESET} Enabled '{name}'")
+            elif action == "disable":
+                if not name:
+                    print(f"{Colors.RED}✗ Name required{Colors.RESET}")
+                elif name not in models:
+                    print(f"{Colors.RED}✗ Model '{name}' not found{Colors.RESET}")
+                else:
+                    models[name]["enabled"] = False
+                    with open(self.models_path, "w") as f:
+                        json.dump(self.models, f, indent=2)
+                    print(f"{Colors.GREEN}✓{Colors.RESET} Disabled '{name}'")
+        else:
+            print(f"{Colors.RED}✗ Unknown action '{action}'. Valid: list, read, write, copy, delete, enable, disable{Colors.RESET}")
+
+    def limits_cfg_cmd(self, args: list):
+        """Handle: agentctl limits <action> [key] [value]"""
+        action = args[0] if args else "list"
+        key = args[1] if len(args) > 1 else ""
+        value = args[2] if len(args) > 2 else ""
+
+        limits = self.models.get("limits", {})
+
+        if action == "list":
+            print(f"\n{Colors.BOLD}Depth / iteration limits (llm-models.json):{Colors.RESET}")
+            for k in sorted(limits.keys()):
+                print(f"  {k}: {limits[k]}")
+            # Session / system limits from plugins-enabled.json
+            timeout = self.config.get("session_idle_timeout_minutes", 60)
+            max_users = self.config.get("max_users", 50)
+            print(f"\n{Colors.BOLD}Session limits (plugins-enabled.json):{Colors.RESET}")
+            timeout_str = f"{timeout} minutes" if timeout > 0 else "disabled"
+            print(f"  session_idle_timeout_minutes: {timeout_str}")
+            print(f"  max_users: {max_users}")
+            # Rate limits from plugins-enabled.json
+            rl = self.config.get("rate_limits", {})
+            if rl:
+                print(f"\n{Colors.BOLD}Rate limits (plugins-enabled.json):{Colors.RESET}")
+                for tool_type in sorted(rl.keys()):
+                    cfg = rl[tool_type]
+                    print(f"  {tool_type}: {cfg.get('calls',0)} calls / {cfg.get('window_seconds',0)}s"
+                          f"{'  (auto-disable)' if cfg.get('auto_disable') else ''}")
+
+        elif action == "read":
+            if not key:
+                print(f"{Colors.RED}✗ Key required: agentctl limits read <key>{Colors.RESET}")
+                return
+            if key in limits:
+                print(f"{key}: {limits[key]}")
+            elif key in ("session_idle_timeout_minutes", "max_users"):
+                print(f"{key}: {self.config.get(key, '(not set)')}")
+            elif key.startswith("rate_"):
+                parts = key.split("_")
+                if len(parts) >= 3:
+                    tool_type = "_".join(parts[1:-1])
+                    field = parts[-1] if parts[-1] == "calls" else "window_seconds"
+                    rl = self.config.get("rate_limits", {}).get(tool_type, {})
+                    print(f"{key}: {rl.get(field, 0)}")
+                else:
+                    print(f"{Colors.RED}✗ Unknown key '{key}'{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}✗ Unknown key '{key}'{Colors.RESET}")
+
+        elif action == "write":
+            if not key or not value:
+                print(f"{Colors.RED}✗ Usage: agentctl limits write <key> <value>{Colors.RESET}")
+                return
+            try:
+                int_val = int(value)
+            except ValueError:
+                print(f"{Colors.RED}✗ Value must be an integer{Colors.RESET}")
+                return
+
+            if key in ("max_at_llm_depth", "max_agent_call_depth", "max_tool_iterations"):
+                limits[key] = int_val
+                self.models["limits"] = limits
+                with open(self.models_path, "w") as f:
+                    json.dump(self.models, f, indent=2)
+                print(f"{Colors.GREEN}✓{Colors.RESET} {key}: → {int_val} (persisted)")
+            elif key in ("session_idle_timeout_minutes", "max_users"):
+                self.config[key] = int_val
+                self._save_plugins_enabled()
+                extra = ""
+                if key == "session_idle_timeout_minutes":
+                    extra = " (takes effect at next reaper cycle)" if int_val > 0 else " (reaper disabled)"
+                print(f"{Colors.GREEN}✓{Colors.RESET} {key}: → {int_val}{extra}")
+            elif key.startswith("rate_"):
+                parts = key.split("_")
+                if len(parts) >= 3 and parts[-1] in ("calls", "window"):
+                    tool_type = "_".join(parts[1:-1])
+                    field = parts[-1] if parts[-1] == "calls" else "window_seconds"
+                    rl = self.config.setdefault("rate_limits", {})
+                    rl.setdefault(tool_type, {})[field] = int_val
+                    with open(self.config_path, "w") as f:
+                        json.dump(self.config, f, indent=2)
+                    print(f"{Colors.GREEN}✓{Colors.RESET} {key}: → {int_val} (persisted)")
+                else:
+                    print(f"{Colors.RED}✗ Unknown rate key '{key}'{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}✗ Unknown key '{key}'{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}✗ Unknown action '{action}'. Valid: list, read, write{Colors.RESET}")
 
     def show_help(self):
         """Print all available commands."""
@@ -1493,62 +1066,21 @@ class PluginManager:
         print("  models                            - List all models")
         print("  model-info <name>                 - Show model details")
         print("  model-add                         - Add a new model (interactive)")
-        print("  model-remove <name>               - Remove a model")
-        print("  model-enable <name>               - Enable a model")
-        print("  model-disable <name>              - Disable a model")
-        print("  model-context <name> <n>          - Set max history size (messages)")
-        print("  model-rename <old> <new>          - Rename a model")
-        print("  model-desc <name> <desc>          - Set model description")
-        print("  model-host <name> <url>           - Set model host URL")
         print("  model <name>                      - Set default model")
-        print("  model-llmcall <name> <true|false> - Set tool_call_available for model")
-        print("  model-llmcall-all <true|false>    - Set tool_call_available for all enabled models")
-        print("  model-timeout <name> <secs>       - Set llm_call_timeout for model")
-        print(f"\n{Colors.BOLD}Token Selection Commands:{Colors.RESET}")
-        print("  model-token-selection-list                - List temperature/top_p/top_k/mode for all models")
-        print("  model-token-selection <name> <default|custom> - Set token_selection_setting (persists)")
-        print("  model-temperature <name> <value>          - Set temperature (float 0.0–2.0, persists)")
-        print("  model-top-p <name> <value>                - Set top_p (float 0.0–1.0, persists)")
-        print("  model-top-k <name> <value>                - Set top_k (int >= 1, GEMINI only, persists)")
-        print(f"  Note: Changes take effect on the next LLM call (no restart needed).")
         print(f"\n{Colors.BOLD}Port Configuration:{Colors.RESET}")
         print("  port-list                         - Show listening ports for all client plugins")
         print("  port-set <plugin> <port>          - Set listening port for a plugin")
-        print(f"\n{Colors.BOLD}Rate Limit Commands:{Colors.RESET}")
-        print("  ratelimit-list                            - Show all rate limit settings (from plugins-enabled.json)")
-        print("  ratelimit-set <type> <calls> <window>     - Set rate limit and persist (calls=0 = unlimited)")
-        print("  ratelimit-autodisable <type> <true|false> - Set auto_disable flag")
-        print(f"  Valid types: llm_call, search, extract, drive, db, system, agent_call, tmux")
-        print(f"  Note: !limit_rate_set in the running agent applies immediately (runtime only)")
         print(f"\n{Colors.BOLD}Tmux Plugin Commands:{Colors.RESET}")
         print("  tmux-exec-timeout <seconds>               - Set exec read timeout (default 10)")
-        print(f"\n{Colors.BOLD}Depth Limit Commands:{Colors.RESET}")
-        print("  limit-depth-list                  - Show depth/iteration limits (from llm-models.json)")
-        print("  limit-depth-set <key> <value>     - Set a depth limit (persists to llm-models.json)")
-        print(f"  Valid keys: {', '.join(sorted(PluginManager._LIMIT_KEYS.keys()))}")
-        print(f"\n{Colors.BOLD}Max Iterations Commands:{Colors.RESET}")
-        print("  limit-max-iteration-list          - Show max_tool_iterations (from llm-models.json)")
-        print("  limit-max-iteration-set <value>   - Set max_tool_iterations (persists to llm-models.json)")
-        print(f"  Default: {PluginManager._ITER_DEFAULT}  |  Runtime: !limit_max_iteration_set <value>")
-        print(f"\n{Colors.BOLD}Gate Default Commands:{Colors.RESET}")
-        print("  gate-list                                         - Show all gate defaults")
-        print("  llm-allow db <table|*> <read|write> <true|false>  - Set DB gate default (true=auto-allow)")
-        print("  llm-allow <tool> <read|write> <true|false>         - Set tool gate default (true=auto-allow)")
-        print("  gate-reset                                        - Reset all gates to gated (false)")
-        print(f"  Valid tools: {', '.join(sorted(self._GATE_TOOLS.keys()))}")
-        print(f"\n{Colors.BOLD}Sleep Gate Command:{Colors.RESET}")
-        print("  sleep-gate-allow <true|false>             - Set sleep gate default (true=auto-allow, false=gated)")
         print(f"\n{Colors.BOLD}History Management Commands:{Colors.RESET}")
         print("  history-list                              - Show history config and chain")
         print("  history-chain-add <plugin_name>          - Add plugin_history_*.py to chain")
         print("  history-chain-remove <plugin_name>       - Remove plugin from chain")
         print("  history-chain-move <plugin_name> <pos>   - Move plugin to position in chain")
-        print("  history-maxctx <n>                       - Set agent-wide max history messages")
-        print(f"\n{Colors.BOLD}Session Configuration:{Colors.RESET}")
-        print("  max-users <n>                            - Set max simultaneous sessions")
-        print("  session-timeout <minutes>                - Set session idle timeout (0=disabled)")
-        print("  tool-preview-length <n>                  - Set default tool preview length (-1=unlimited, 0=tags only, >0=chars)")
-        print("  tool-suppress <true|false>               - Set default tool suppress (no tags/previews when true)")
+        print(f"\n{Colors.BOLD}Unified Resource Commands:{Colors.RESET}")
+        print("  llm-tools list|read|write|delete|add [name] [tools]")
+        print("  model-cfg list|read|write|copy|delete|enable|disable [name] [field] [value]")
+        print("  limits list|read|write [key] [value]")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
         print("  quit                              - Exit plugin manager")
@@ -1606,106 +1138,6 @@ class PluginManager:
                     self.show_model_info(arg)
             elif action == "model-add":
                 self._interactive_add_model()
-            elif action == "model-remove":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-remove <model_name>{Colors.RESET}")
-                else:
-                    self.remove_model(arg)
-            elif action == "model-enable":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-enable <model_name>{Colors.RESET}")
-                else:
-                    self.enable_model(arg)
-            elif action == "model-disable":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-disable <model_name>{Colors.RESET}")
-                else:
-                    self.disable_model(arg)
-            elif action == "model-context":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-context <model_name> <max_context>{Colors.RESET}")
-                else:
-                    args = arg.split(maxsplit=1)
-                    if len(args) != 2:
-                        print(f"{Colors.RED}Usage: model-context <model_name> <max_context>{Colors.RESET}")
-                    else:
-                        try:
-                            max_ctx = int(args[1])
-                            self.set_max_context(args[0], max_ctx)
-                        except ValueError:
-                            print(f"{Colors.RED}max_context must be a number{Colors.RESET}")
-            elif action == "model-rename":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-rename <old_name> <new_name>{Colors.RESET}")
-                else:
-                    args = arg.split(maxsplit=1)
-                    if len(args) != 2:
-                        print(f"{Colors.RED}Usage: model-rename <old_name> <new_name>{Colors.RESET}")
-                    else:
-                        self.rename_model(args[0], args[1])
-            elif action == "model-desc":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-desc <model_name> <description>{Colors.RESET}")
-                else:
-                    args = arg.split(maxsplit=1)
-                    if len(args) != 2:
-                        print(f"{Colors.RED}Usage: model-desc <model_name> <description>{Colors.RESET}")
-                    else:
-                        self.set_model_description(args[0], args[1])
-            elif action == "model-host":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-host <model_name> <host_url>{Colors.RESET}")
-                else:
-                    args = arg.split(maxsplit=1)
-                    if len(args) != 2:
-                        print(f"{Colors.RED}Usage: model-host <model_name> <host_url>{Colors.RESET}")
-                    else:
-                        self.set_model_host(args[0], args[1])
-            elif action == "model-llmcall":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-llmcall <model_name> <true|false>{Colors.RESET}")
-                else:
-                    args = arg.split(maxsplit=1)
-                    if len(args) != 2 or args[1].lower() not in ("true", "false", "1", "0", "yes", "no"):
-                        print(f"{Colors.RED}Usage: model-llmcall <model_name> <true|false>{Colors.RESET}")
-                    else:
-                        self.set_tool_call_available(args[0], args[1].lower() in ("true", "1", "yes"))
-            elif action == "model-llmcall-all":
-                if not arg or arg.lower() not in ("true", "false", "1", "0", "yes", "no"):
-                    print(f"{Colors.RED}Usage: model-llmcall-all <true|false>{Colors.RESET}")
-                else:
-                    self.set_tool_call_available_all(arg.lower() in ("true", "1", "yes"))
-            elif action == "model-timeout":
-                if not arg:
-                    print(f"{Colors.RED}Usage: model-timeout <model_name> <seconds>{Colors.RESET}")
-                else:
-                    args = arg.split(maxsplit=1)
-                    if len(args) != 2:
-                        print(f"{Colors.RED}Usage: model-timeout <model_name> <seconds>{Colors.RESET}")
-                    else:
-                        try:
-                            self.set_llm_call_timeout(args[0], int(args[1]))
-                        except ValueError:
-                            print(f"{Colors.RED}Timeout must be a number (seconds){Colors.RESET}")
-            elif action == "ratelimit-list":
-                self.ratelimit_list()
-            elif action == "ratelimit-set":
-                args = arg.split()
-                if len(args) != 3:
-                    print(f"{Colors.RED}Usage: ratelimit-set <type> <calls> <window_seconds>{Colors.RESET}")
-                    print(f"  Example: ratelimit-set llm_call 3 20")
-                    print(f"  Use calls=0 for unlimited")
-                else:
-                    try:
-                        self.ratelimit_set(args[0], int(args[1]), int(args[2]))
-                    except ValueError:
-                        print(f"{Colors.RED}calls and window_seconds must be integers{Colors.RESET}")
-            elif action == "ratelimit-autodisable":
-                args = arg.split()
-                if len(args) != 2 or args[1].lower() not in ("true", "false", "1", "0", "yes", "no"):
-                    print(f"{Colors.RED}Usage: ratelimit-autodisable <type> <true|false>{Colors.RESET}")
-                else:
-                    self.ratelimit_auto_disable(args[0], args[1].lower() in ("true", "1", "yes"))
             elif action == "tmux-exec-timeout":
                 if not arg:
                     print(f"{Colors.RED}Usage: tmux-exec-timeout <seconds>{Colors.RESET}")
@@ -1725,28 +1157,6 @@ class PluginManager:
                         self.port_set(args[0], int(args[1]))
                     except ValueError:
                         print(f"{Colors.RED}Port must be an integer{Colors.RESET}")
-            elif action == "limit-depth-list":
-                self.limit_depth_list()
-            elif action == "limit-depth-set":
-                args = arg.split()
-                if len(args) != 2:
-                    print(f"{Colors.RED}Usage: limit-depth-set <key> <value>{Colors.RESET}")
-                    print(f"  Valid keys: {', '.join(sorted(self._LIMIT_KEYS.keys()))}")
-                else:
-                    try:
-                        self.limit_depth_set(args[0], int(args[1]))
-                    except ValueError:
-                        print(f"{Colors.RED}Value must be an integer{Colors.RESET}")
-            elif action == "limit-max-iteration-list":
-                self.limit_max_iteration_list()
-            elif action == "limit-max-iteration-set":
-                if not arg:
-                    print(f"{Colors.RED}Usage: limit-max-iteration-set <value>{Colors.RESET}")
-                else:
-                    try:
-                        self.limit_max_iteration_set(int(arg))
-                    except ValueError:
-                        print(f"{Colors.RED}Value must be an integer{Colors.RESET}")
             elif action == "history-list":
                 self.history_list()
             elif action == "history-chain-add":
@@ -1768,89 +1178,12 @@ class PluginManager:
                         self.history_chain_move(args2[0], int(args2[1]))
                     except ValueError:
                         print(f"{Colors.RED}Position must be an integer{Colors.RESET}")
-            elif action == "history-maxctx":
-                if not arg:
-                    print(f"{Colors.RED}Usage: history-maxctx <n>{Colors.RESET}")
-                else:
-                    try:
-                        self.history_maxctx(int(arg))
-                    except ValueError:
-                        print(f"{Colors.RED}Must be an integer{Colors.RESET}")
-            elif action == "max-users":
-                if not arg:
-                    print(f"{Colors.RED}Usage: max-users <n>{Colors.RESET}")
-                else:
-                    try:
-                        self.set_max_users(int(arg))
-                    except ValueError:
-                        print(f"{Colors.RED}Must be an integer{Colors.RESET}")
-            elif action == "session-timeout":
-                if not arg:
-                    print(f"{Colors.RED}Usage: session-timeout <minutes>{Colors.RESET}")
-                else:
-                    try:
-                        self.set_session_timeout(int(arg))
-                    except ValueError:
-                        print(f"{Colors.RED}Must be an integer (minutes){Colors.RESET}")
-            elif action == "tool-preview-length":
-                if not arg:
-                    print(f"{Colors.RED}Usage: tool-preview-length <n>  (-1=unlimited, 0=tags only, >0=truncate){Colors.RESET}")
-                else:
-                    try:
-                        self.set_tool_preview_length(int(arg))
-                    except ValueError:
-                        print(f"{Colors.RED}Must be an integer{Colors.RESET}")
-            elif action == "tool-suppress":
-                if not arg or arg.lower() not in ("true", "false", "1", "0", "yes", "no"):
-                    print(f"{Colors.RED}Usage: tool-suppress <true|false>{Colors.RESET}")
-                else:
-                    self.set_tool_suppress(arg.lower() in ("true", "1", "yes"))
-            elif action == "gate-list":
-                self.gate_list()
-            elif action == "llm-allow":
-                self.llm_allow(arg.split())
-            elif action == "gate-reset":
-                self.gate_reset()
-            elif action == "sleep-gate-allow":
-                if not arg or arg.lower() not in ("true", "false", "1", "0", "yes", "no"):
-                    print(f"{Colors.RED}Usage: sleep-gate-allow <true|false>{Colors.RESET}")
-                else:
-                    self.sleep_gate_allow(arg.lower() in ("true", "1", "yes"))
-            elif action == "model-token-selection-list":
-                self.model_token_selection_list()
-            elif action == "model-token-selection":
-                sub = arg.split()
-                if len(sub) < 2:
-                    print(f"{Colors.RED}Usage: model-token-selection <model> <default|custom>{Colors.RESET}")
-                else:
-                    self.model_token_selection(sub[0], sub[1])
-            elif action == "model-temperature":
-                sub = arg.split()
-                if len(sub) < 2:
-                    print(f"{Colors.RED}Usage: model-temperature <model> <value>{Colors.RESET}")
-                else:
-                    try:
-                        self.model_temperature(sub[0], float(sub[1]))
-                    except ValueError:
-                        print(f"{Colors.RED}✗ temperature must be a float (0.0–2.0){Colors.RESET}")
-            elif action == "model-top-p":
-                sub = arg.split()
-                if len(sub) < 2:
-                    print(f"{Colors.RED}Usage: model-top-p <model> <value>{Colors.RESET}")
-                else:
-                    try:
-                        self.model_top_p(sub[0], float(sub[1]))
-                    except ValueError:
-                        print(f"{Colors.RED}✗ top_p must be a float (0.0–1.0){Colors.RESET}")
-            elif action == "model-top-k":
-                sub = arg.split()
-                if len(sub) < 2:
-                    print(f"{Colors.RED}Usage: model-top-k <model> <value>{Colors.RESET}")
-                else:
-                    try:
-                        self.model_top_k(sub[0], int(sub[1]))
-                    except ValueError:
-                        print(f"{Colors.RED}✗ top_k must be an integer >= 1{Colors.RESET}")
+            elif action == "llm-tools":
+                self.llm_tools_cmd(arg.split() if arg else [])
+            elif action == "model-cfg":
+                self.model_cfg_cmd(arg.split() if arg else [])
+            elif action == "limits":
+                self.limits_cfg_cmd(arg.split() if arg else [])
             else:
                 print(f"{Colors.RED}Unknown command: {action}{Colors.RESET}")
 
@@ -1961,7 +1294,11 @@ class PluginManager:
             print(f"  {name}  ({status})")
 
     def history_chain_add(self, plugin_name: str) -> bool:
-        """Append a history plugin to the chain."""
+        """Append a history plugin to the chain.
+
+        If the plugin module defines DEFAULT_CONFIG (dict), scaffold it into
+        plugin_config under the plugin's name (only if no entry exists yet).
+        """
         available = self._discover_history_plugins()
         if plugin_name not in available:
             print(f"{Colors.RED}✗ '{plugin_name}' not found. Available: {available}{Colors.RESET}")
@@ -1973,6 +1310,24 @@ class PluginManager:
             return True
         chain.append(plugin_name)
         cfg["chain"] = chain
+
+        # Scaffold default config if plugin provides DEFAULT_CONFIG
+        plugin_cfg = self.config.setdefault("plugin_config", {})
+        if plugin_name not in plugin_cfg:
+            try:
+                import importlib
+                mod = importlib.import_module(plugin_name)
+                defaults = getattr(mod, "DEFAULT_CONFIG", None)
+                if defaults and isinstance(defaults, dict):
+                    plugin_cfg[plugin_name] = dict(defaults)
+                    print(f"{Colors.GREEN}✓ Scaffolded default config for '{plugin_name}'.{Colors.RESET}")
+            except Exception as e:
+                print(f"{Colors.YELLOW}⚠ Could not load defaults from '{plugin_name}': {e}{Colors.RESET}")
+
+        # Ensure enabled flag is set
+        if plugin_name in plugin_cfg:
+            plugin_cfg[plugin_name]["enabled"] = True
+
         if self._save_plugins_enabled():
             print(f"{Colors.GREEN}✓ Added '{plugin_name}' to history chain (position {len(chain)-1}).{Colors.RESET}")
             return True
@@ -1990,6 +1345,12 @@ class PluginManager:
             return False
         chain.remove(plugin_name)
         cfg["chain"] = chain
+
+        # Set enabled=false in plugin config
+        plugin_cfg = self.config.get("plugin_config", {})
+        if plugin_name in plugin_cfg:
+            plugin_cfg[plugin_name]["enabled"] = False
+
         if self._save_plugins_enabled():
             print(f"{Colors.GREEN}✓ Removed '{plugin_name}' from history chain.{Colors.RESET}")
             return True
@@ -2013,75 +1374,6 @@ class PluginManager:
         cfg["chain"] = chain
         if self._save_plugins_enabled():
             print(f"{Colors.GREEN}✓ Moved '{plugin_name}' to position {new_pos}.{Colors.RESET}")
-            return True
-        return False
-
-    def history_maxctx(self, value: int) -> bool:
-        """Set agent_max_ctx in plugins-enabled.json."""
-        if value < 1:
-            print(f"{Colors.RED}✗ agent_max_ctx must be at least 1.{Colors.RESET}")
-            return False
-        if value > 100000:
-            print(f"{Colors.YELLOW}Warning: agent_max_ctx={value} is very large.{Colors.RESET}")
-        cfg = self._get_history_cfg()
-        old = cfg.get("agent_max_ctx", 200)
-        cfg["agent_max_ctx"] = value
-        if self._save_plugins_enabled():
-            print(f"{Colors.GREEN}✓ agent_max_ctx: {old} → {value}{Colors.RESET}")
-            return True
-        return False
-
-    def set_max_users(self, value: int) -> bool:
-        """Set max_users in plugins-enabled.json."""
-        if value < 1:
-            print(f"{Colors.RED}✗ max_users must be at least 1.{Colors.RESET}")
-            return False
-        old = self.config.get("max_users", 50)
-        self.config["max_users"] = value
-        if self._save_plugins_enabled():
-            print(f"{Colors.GREEN}✓ max_users: {old} → {value}{Colors.RESET}")
-            return True
-        return False
-
-    def set_session_timeout(self, minutes: int) -> bool:
-        """Set session_idle_timeout_minutes in plugins-enabled.json."""
-        if minutes < 0:
-            print(f"{Colors.RED}✗ Timeout must be 0 (disabled) or positive minutes.{Colors.RESET}")
-            return False
-        old = self.config.get("session_idle_timeout_minutes", 60)
-        self.config["session_idle_timeout_minutes"] = minutes
-        if self._save_plugins_enabled():
-            status = f"{minutes} minutes" if minutes > 0 else "disabled"
-            print(f"{Colors.GREEN}✓ session_idle_timeout: {old} → {status}{Colors.RESET}")
-            return True
-        return False
-
-    def set_tool_preview_length(self, value: int) -> bool:
-        """Set default tool_preview_length in plugins-enabled.json.
-        -1 = unlimited, 0 = tags only (no content), >0 = truncate to N chars."""
-        if value < -1:
-            print(f"{Colors.RED}✗ tool_preview_length must be -1 (unlimited), 0 (tags only), or >= 1.{Colors.RESET}")
-            return False
-        old = self.config.get("tool_preview_length", 500)
-        self.config["tool_preview_length"] = value
-        if self._save_plugins_enabled():
-            if value == -1:
-                label = "unlimited"
-            elif value == 0:
-                label = "tags only (no content)"
-            else:
-                label = f"{value} chars"
-            print(f"{Colors.GREEN}✓ tool_preview_length: {old} → {label}{Colors.RESET}")
-            return True
-        return False
-
-    def set_tool_suppress(self, value: bool) -> bool:
-        """Set default tool_suppress in plugins-enabled.json."""
-        old = self.config.get("tool_suppress", False)
-        self.config["tool_suppress"] = value
-        if self._save_plugins_enabled():
-            status = "enabled" if value else "disabled"
-            print(f"{Colors.GREEN}✓ tool_suppress: {old} → {status}{Colors.RESET}")
             return True
         return False
 
@@ -2119,47 +1411,9 @@ def main():
             manager.show_model_info(sys.argv[2])
         elif cmd == "model-add":
             manager._interactive_add_model()
-        elif cmd == "model-remove" and len(sys.argv) > 2:
-            manager.remove_model(sys.argv[2])
-        elif cmd == "model-enable" and len(sys.argv) > 2:
-            manager.enable_model(sys.argv[2])
-        elif cmd == "model-disable" and len(sys.argv) > 2:
-            manager.disable_model(sys.argv[2])
         elif cmd == "model" and len(sys.argv) > 2:
             manager.set_default_model(sys.argv[2])
-        elif cmd == "model-context" and len(sys.argv) > 3:
-            try:
-                max_ctx = int(sys.argv[3])
-                manager.set_max_context(sys.argv[2], max_ctx)
-            except ValueError:
-                print(f"{Colors.RED}✗ max_context must be a number{Colors.RESET}")
-                return 1
-        elif cmd == "model-rename" and len(sys.argv) > 3:
-            manager.rename_model(sys.argv[2], sys.argv[3])
-        elif cmd == "model-desc" and len(sys.argv) > 3:
-            # Join all remaining args as description (allows spaces)
-            description = " ".join(sys.argv[3:])
-            manager.set_model_description(sys.argv[2], description)
-        elif cmd == "model-host" and len(sys.argv) > 3:
-            manager.set_model_host(sys.argv[2], sys.argv[3])
-        elif cmd == "model-llmcall" and len(sys.argv) > 3:
-            val = sys.argv[3].lower()
-            if val not in ("true", "false", "1", "0", "yes", "no"):
-                print(f"{Colors.RED}✗ Value must be true or false{Colors.RESET}")
-                return 1
-            manager.set_tool_call_available(sys.argv[2], val in ("true", "1", "yes"))
-        elif cmd == "model-llmcall-all" and len(sys.argv) > 2:
-            val = sys.argv[2].lower()
-            if val not in ("true", "false", "1", "0", "yes", "no"):
-                print(f"{Colors.RED}✗ Value must be true or false{Colors.RESET}")
-                return 1
-            manager.set_tool_call_available_all(val in ("true", "1", "yes"))
-        elif cmd == "model-timeout" and len(sys.argv) > 3:
-            try:
-                manager.set_llm_call_timeout(sys.argv[2], int(sys.argv[3]))
-            except ValueError:
-                print(f"{Colors.RED}✗ Timeout must be a number (seconds){Colors.RESET}")
-                return 1
+
         elif cmd == "port-list":
             manager.port_list()
         elif cmd == "port-set" and len(sys.argv) > 3:
@@ -2169,21 +1423,6 @@ def main():
                 print(f"{Colors.RED}✗ Port must be an integer{Colors.RESET}")
                 return 1
 
-        elif cmd == "ratelimit-list":
-            manager.ratelimit_list()
-        elif cmd == "ratelimit-set" and len(sys.argv) > 4:
-            try:
-                manager.ratelimit_set(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
-            except ValueError:
-                print(f"{Colors.RED}✗ calls and window_seconds must be integers{Colors.RESET}")
-                return 1
-        elif cmd == "ratelimit-autodisable" and len(sys.argv) > 3:
-            val = sys.argv[3].lower()
-            if val not in ("true", "false", "1", "0", "yes", "no"):
-                print(f"{Colors.RED}✗ Value must be true or false{Colors.RESET}")
-                return 1
-            manager.ratelimit_auto_disable(sys.argv[2], val in ("true", "1", "yes"))
-
         # Tmux plugin commands
         elif cmd == "tmux-exec-timeout" and len(sys.argv) > 2:
             try:
@@ -2191,43 +1430,6 @@ def main():
             except ValueError:
                 print(f"{Colors.RED}✗ Timeout must be a number (seconds){Colors.RESET}")
                 return 1
-
-        # Depth limit commands
-        elif cmd == "limit-depth-list":
-            manager.limit_depth_list()
-        elif cmd == "limit-depth-set" and len(sys.argv) > 3:
-            try:
-                manager.limit_depth_set(sys.argv[2], int(sys.argv[3]))
-            except ValueError:
-                print(f"{Colors.RED}✗ Value must be an integer{Colors.RESET}")
-                return 1
-
-        # Max iterations commands
-        elif cmd == "limit-max-iteration-list":
-            manager.limit_max_iteration_list()
-        elif cmd == "limit-max-iteration-set" and len(sys.argv) > 2:
-            try:
-                manager.limit_max_iteration_set(int(sys.argv[2]))
-            except ValueError:
-                print(f"{Colors.RED}✗ Value must be an integer{Colors.RESET}")
-                return 1
-
-        # Gate commands
-        elif cmd == "gate-list":
-            manager.gate_list()
-        elif cmd == "llm-allow":
-            # llm-allow db <table> <read|write> <true|false>
-            # llm-allow <tool> <read|write> <true|false>
-            if not manager.llm_allow(sys.argv[2:]):
-                return 1
-        elif cmd == "gate-reset":
-            manager.gate_reset()
-        elif cmd == "sleep-gate-allow" and len(sys.argv) > 2:
-            val = sys.argv[2].lower()
-            if val not in ("true", "false", "1", "0", "yes", "no"):
-                print(f"{Colors.RED}✗ Value must be true or false{Colors.RESET}")
-                return 1
-            manager.sleep_gate_allow(val in ("true", "1", "yes"))
 
         # History management commands
         elif cmd == "history-list":
@@ -2244,72 +1446,14 @@ def main():
             except ValueError:
                 print(f"{Colors.RED}✗ Position must be an integer{Colors.RESET}")
                 return 1
-        elif cmd == "history-maxctx" and len(sys.argv) > 2:
-            try:
-                if not manager.history_maxctx(int(sys.argv[2])):
-                    return 1
-            except ValueError:
-                print(f"{Colors.RED}✗ agent_max_ctx must be an integer{Colors.RESET}")
-                return 1
-        elif cmd == "max-users" and len(sys.argv) > 2:
-            try:
-                if not manager.set_max_users(int(sys.argv[2])):
-                    return 1
-            except ValueError:
-                print(f"{Colors.RED}✗ max_users must be an integer{Colors.RESET}")
-                return 1
-        elif cmd == "session-timeout" and len(sys.argv) > 2:
-            try:
-                if not manager.set_session_timeout(int(sys.argv[2])):
-                    return 1
-            except ValueError:
-                print(f"{Colors.RED}✗ Timeout must be an integer (minutes){Colors.RESET}")
-                return 1
-        elif cmd == "tool-preview-length" and len(sys.argv) > 2:
-            try:
-                if not manager.set_tool_preview_length(int(sys.argv[2])):
-                    return 1
-            except ValueError:
-                print(f"{Colors.RED}✗ tool_preview_length must be an integer{Colors.RESET}")
-                return 1
-        elif cmd == "tool-suppress" and len(sys.argv) > 2:
-            val_str = sys.argv[2].lower()
-            if val_str in ("true", "1", "yes", "on"):
-                if not manager.set_tool_suppress(True):
-                    return 1
-            elif val_str in ("false", "0", "no", "off"):
-                if not manager.set_tool_suppress(False):
-                    return 1
-            else:
-                print(f"{Colors.RED}✗ tool-suppress value must be true/false{Colors.RESET}")
-                return 1
 
-        # Token selection commands
-        elif cmd == "model-token-selection-list":
-            manager.model_token_selection_list()
-        elif cmd == "model-token-selection" and len(sys.argv) > 3:
-            manager.model_token_selection(sys.argv[2], sys.argv[3])
-        elif cmd == "model-temperature" and len(sys.argv) > 3:
-            try:
-                if not manager.model_temperature(sys.argv[2], float(sys.argv[3])):
-                    return 1
-            except ValueError:
-                print(f"{Colors.RED}✗ temperature must be a float (0.0–2.0){Colors.RESET}")
-                return 1
-        elif cmd == "model-top-p" and len(sys.argv) > 3:
-            try:
-                if not manager.model_top_p(sys.argv[2], float(sys.argv[3])):
-                    return 1
-            except ValueError:
-                print(f"{Colors.RED}✗ top_p must be a float (0.0–1.0){Colors.RESET}")
-                return 1
-        elif cmd == "model-top-k" and len(sys.argv) > 3:
-            try:
-                if not manager.model_top_k(sys.argv[2], int(sys.argv[3])):
-                    return 1
-            except ValueError:
-                print(f"{Colors.RED}✗ top_k must be an integer >= 1{Colors.RESET}")
-                return 1
+        # Unified resource commands
+        elif cmd == "llm-tools":
+            manager.llm_tools_cmd(sys.argv[2:])
+        elif cmd == "model-cfg":
+            manager.model_cfg_cmd(sys.argv[2:])
+        elif cmd == "limits":
+            manager.limits_cfg_cmd(sys.argv[2:])
 
         else:
             print(f"{Colors.RED}Unknown command: {cmd}{Colors.RESET}")
