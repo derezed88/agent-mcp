@@ -12,7 +12,7 @@ must be pre-approved via !autogate or !autoAIdb, otherwise the call will auto-re
 The target model synthesizes the tool result into a final text response, which is returned to you.
 
 Parameters:
-  model:     Model key name (e.g., "Win11Local"). Must have tool_call_available=YES.
+  model:     Model key name (e.g., "localModel"). Must have tool_call_available=YES.
              Use llm_list() to check. Local/free models are the primary use case.
   tool:      Exact tool name to delegate (e.g., "url_extract", "db_query", "ddgs_search").
   arguments: The request to pass to the target model. Be specific — include the URL, query,
@@ -29,19 +29,19 @@ Constraints:
 - Returns a descriptive error string on failure (gate rejection, timeout, unknown tool/model).
 
 When to use:
-- You want a free/local model (Win11Local) to perform an extraction or search,
+- You want a free/local model (localModel) to perform an extraction or search,
   saving token cost on the current paid session model.
 - You want the tool result synthesized by the target model before it reaches your context,
   reducing noise in your conversation history.
 
 Examples:
-  llm_clean_tool(model="Win11Local", tool="url_extract",
+  llm_clean_tool(model="localModel", tool="url_extract",
                  arguments="Extract https://www.foxnews.com/world with query: world news today")
 
-  llm_clean_tool(model="Win11Local", tool="ddgs_search",
+  llm_clean_tool(model="localModel", tool="ddgs_search",
                  arguments="Search for: latest AI model releases February 2026")
 
-  llm_clean_tool(model="Win11Local", tool="db_query",
+  llm_clean_tool(model="localModel", tool="db_query",
                  arguments="Query the sales table for total revenue by month in 2026")
 
 Contrast with llm_clean_text:
