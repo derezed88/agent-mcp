@@ -38,3 +38,6 @@ sprompt_backup/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local test utilities (not for public repo)
+mock_airs_server.py

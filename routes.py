@@ -632,7 +632,7 @@ async def cmd_limits_cfg(client_id: str, arg: str):
 
 async def cmd_vscode(client_id: str, arg: str):
     """!vscode list|read — browse and pull local Claude Code sessions into chat context."""
-    from plugin_client_vscode_sessions import _cmd_vscode
+    from plugin_claude_vscode_sessions import _cmd_vscode
     from state import current_client_id
     token = current_client_id.set(client_id)
     try:

@@ -584,7 +584,7 @@ async def _vscode_sessions_read_executor(session_ids: str, mode: str = "full", m
 class VscodeSessionsPlugin(BasePlugin):
     """Expose local Claude Code JSONL session data via HTTP API."""
 
-    PLUGIN_NAME    = "plugin_client_vscode_sessions"
+    PLUGIN_NAME    = "plugin_claude_vscode_sessions"
     PLUGIN_VERSION = "1.0.0"
     PLUGIN_TYPE    = "client_interface"
     DESCRIPTION    = "Local Claude Code session listing and content retrieval API"
@@ -597,12 +597,12 @@ class VscodeSessionsPlugin(BasePlugin):
     def init(self, config: dict) -> bool:
         if not os.path.isdir(CLAUDE_PROJECTS_DIR):
             log.warning(
-                "plugin_client_vscode_sessions: ~/.claude/projects not found "
+                "plugin_claude_vscode_sessions: ~/.claude/projects not found "
                 "— Claude Code not installed on this machine?"
             )
             return False
         self.enabled = True
-        log.info("plugin_client_vscode_sessions: initialized OK")
+        log.info("plugin_claude_vscode_sessions: initialized OK")
         return True
 
     def shutdown(self) -> None:

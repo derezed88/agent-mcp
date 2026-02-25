@@ -171,9 +171,9 @@
         "url_extract"
       ]
     },
-    "plugin_client_vscode_sessions": {
+    "plugin_claude_vscode_sessions": {
       "type": "client_interface",
-      "file": "plugin_client_vscode_sessions.py",
+      "file": "plugin_claude_vscode_sessions.py",
       "description": "Local Claude Code session listing and content retrieval API (no Drive dependency)",
       "dependencies": [],
       "env_vars": [],

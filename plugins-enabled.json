@@ -13,7 +13,7 @@
     "plugin_client_slack",
     "plugin_urlextract_tavily",
     "plugin_tmux",
-    "plugin_client_vscode_sessions"
+    "plugin_claude_vscode_sessions"
   ],
   "plugin_config": {
     "plugin_history_default": {
@@ -63,7 +63,7 @@
       "block_on_violation": true,
       "violation_log": "airs-violations.log"
     },
-    "plugin_client_vscode_sessions": {
+    "plugin_claude_vscode_sessions": {
       "enabled": true
     },
     "plugin_tmux": {
