@@ -257,14 +257,23 @@ async def endpoint_sessions_read(request: Request) -> JSONResponse:
         all_sessions = await asyncio.to_thread(_list_all_sessions)
         session_map = {s["session_id"]: s for s in all_sessions}
 
+        # Support 8-char prefix matching (IDs shown truncated in list output)
+        def _resolve(sid: str):
+            if sid in session_map:
+                return sid
+            matches = [k for k in session_map if k.startswith(sid)]
+            return matches[0] if len(matches) == 1 else None
+
         sections = []
         missing = []
 
         for sid in session_ids:
-            meta = session_map.get(sid)
+            full_id = _resolve(sid)
+            meta = session_map.get(full_id) if full_id else None
             if not meta:
                 missing.append(sid)
                 continue
+            sid = full_id  # use canonical ID for logging
 
             header = (
                 f"{'='*70}\n"
