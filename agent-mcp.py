@@ -9,7 +9,6 @@ Core features (always enabled):
 - System prompt read/write (read_system_prompt, update_system_prompt tools)
 - Session management (!session, !reset commands)
 - LLM model management (!model command)
-- Gate management (!autoAIdb, !autogate, !autoAISysPrompt)
 
 Pluggable features:
 - Client interfaces (shell.py, llama proxy)
@@ -37,7 +36,8 @@ from plugin_loader import PluginLoader
 from tools import get_core_tools
 import tools as tools_module
 import agents as agents_module
-from tools import register_gate_tools, register_plugin_commands
+from tools import register_plugin_commands
+import plugin_sec_airs_cmd  # registers !airs command at import time
 
 
 def _check_port_available(host: str, port: int) -> bool:
@@ -82,15 +82,19 @@ async def run_agent(host: str = "0.0.0.0"):
             all_routes.extend(routes)
             client_plugins.append(plugin)
             log.info(f"  + {plugin_name}: {len(routes)} routes")
+            # client_interface plugins may also expose tools and commands
+            tool_defs = plugin.get_tools()
+            if tool_defs.get('lc'):
+                tools_module.register_plugin_tools(plugin_name, tool_defs)
+                log.info(f"    {plugin_name}: +{len(tool_defs.get('lc', []))} tools")
+            commands = plugin.get_commands()
+            if commands:
+                register_plugin_commands(plugin_name, commands, plugin.get_help())
         elif plugin.PLUGIN_TYPE == "data_tool":
             tool_defs = plugin.get_tools()
             # Register tools dynamically
             tools_module.register_plugin_tools(plugin_name, tool_defs)
             log.info(f"  + {plugin_name}: {len(tool_defs.get('lc', []))} tools")
-            # Register gate tools (tools needing human approval)
-            gate_tools = plugin.get_gate_tools()
-            if gate_tools:
-                register_gate_tools(plugin_name, gate_tools)
             # Register !command handlers
             commands = plugin.get_commands()
             if commands:
@@ -99,7 +103,13 @@ async def run_agent(host: str = "0.0.0.0"):
     # Update agents module with dynamic tools
     agents_module.update_tool_definitions()
 
-    # Create Starlette app with all routes
+    # Create Starlette app with all routes.
+    # Sort so specific paths come before wildcard catch-alls (e.g. llama's /{path:path}),
+    # otherwise the wildcard swallows requests meant for specific routes.
+    def _route_specificity(route):
+        path = getattr(route, 'path', '')
+        return (1 if '{' in path else 0, path)
+    all_routes.sort(key=_route_specificity)
     app = Starlette(routes=all_routes)
 
     # Determine which servers to run
@@ -113,6 +123,9 @@ async def run_agent(host: str = "0.0.0.0"):
         port = plugin_config.get('port')
         host = plugin_config.get('host', '0.0.0.0')
         name = plugin_config.get('name', 'unknown')
+
+        if port is None:
+            continue  # routes-only plugin, no port to bind
 
         if port in seen_ports:
             port_conflicts.append(
@@ -146,6 +159,10 @@ async def run_agent(host: str = "0.0.0.0"):
         host = plugin_config.get('host', '0.0.0.0')
         name = plugin_config.get('name', 'unknown')
 
+        if port is None:
+            log.info(f"  + {plugin.PLUGIN_NAME}: routes-only (no dedicated port)")
+            continue
+
         log.info(f"Starting {name} on {host}:{port}")
         log.info(f"  - Plugin: {plugin.PLUGIN_NAME}")
 
@@ -167,7 +184,10 @@ async def run_agent(host: str = "0.0.0.0"):
         port = plugin_config.get('port')
         host = plugin_config.get('host', '0.0.0.0')
         name = plugin_config.get('name', 'unknown')
-        log.info(f"  {name}: http://{host}:{port}")
+        if port is None:
+            log.info(f"  {name}: routes-only (shared server)")
+        else:
+            log.info(f"  {name}: http://{host}:{port}")
 
     log.info("="*70)
     log.info("")
