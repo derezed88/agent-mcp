@@ -29,6 +29,28 @@ from starlette.responses import JSONResponse
 from plugin_loader import BasePlugin
 from config import log
 
+
+def _resolve_summary_model(requested: str) -> str | None:
+    """
+    Return the model key to use for LLM summarization.
+
+    Priority:
+      1. Explicitly requested model (non-empty string).
+      2. The calling session's currently selected model (via current_client_id).
+      3. None — llm_call will return an error, caller falls back to full text.
+    """
+    if requested:
+        return requested
+    try:
+        from state import current_client_id, sessions
+        client_id = current_client_id.get("")
+        if client_id:
+            return sessions.get(client_id, {}).get("model") or None
+    except Exception:
+        pass
+    return None
+
+
 _API_KEY: str = os.getenv("API_KEY", "")
 
 CLAUDE_PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
@@ -401,7 +423,7 @@ async def _cmd_vscode(args: str) -> str:
 
         session_ids = [s.strip() for s in raw_ids.split(",") if s.strip()]
         mode  = opts.get("mode", "full").lower()
-        model = opts.get("model", "").strip() or None
+        model = _resolve_summary_model(opts.get("model", "").strip())
 
         all_sessions = await asyncio.to_thread(_list_all_sessions)
         session_map = {s["session_id"]: s for s in all_sessions}
@@ -478,8 +500,8 @@ class _VscodeSessionsListArgs(BaseModel):
 
 class _VscodeSessionsReadArgs(BaseModel):
     session_ids: str = Field(description="Comma-separated session UUIDs or 8-char prefixes (from vscode_sessions_list).")
-    mode: Optional[str] = Field(default="full", description="'full' — verbatim text. 'summary' — LLM-summarized (uses model param).")
-    model: Optional[str] = Field(default="", description="agent-mcp model key for summarization e.g. 'nuc11Local', 'gemini25fl'. Empty = default model.")
+    mode: Optional[str] = Field(default="full", description="'full' — verbatim text. 'summary' — LLM-summarized by the current model.")
+    model: Optional[str] = Field(default="", description="agent-mcp model key to use for summarization. Leave empty to use the current session model.")
 
 
 async def _vscode_sessions_list_executor(date: str = "", project: str = "") -> str:
@@ -510,7 +532,7 @@ async def _vscode_sessions_read_executor(session_ids: str, mode: str = "full", m
         matches = [k for k in session_map if k.startswith(sid)]
         return matches[0] if len(matches) == 1 else None
 
-    resolved_model = model.strip() or None
+    resolved_model = _resolve_summary_model(model.strip())
     sections = []
     missing  = []
 
@@ -620,7 +642,7 @@ class VscodeSessionsPlugin(BasePlugin):
                         "Read one or more local Claude Code sessions into context. "
                         "Pass comma-separated session IDs or 8-char prefixes from vscode_sessions_list. "
                         "mode='full' returns verbatim user+assistant text. "
-                        "mode='summary' uses an LLM to summarize (specify model= key e.g. 'nuc11Local'). "
+                        "mode='summary' summarizes using the current model (or specify model= to delegate). "
                         "Use this to bring past VSCode session context into the current conversation."
                     ),
                     args_schema=_VscodeSessionsReadArgs,
