@@ -11,6 +11,7 @@ SYSTEM_PROMPT_FILE = os.path.join(BASE_DIR, ".system_prompt")
 DRIVE_TOKEN_FILE = os.path.join(BASE_DIR, "token.json")
 DRIVE_CREDS_FILE = os.path.join(BASE_DIR, "credentials.json")
 LLM_MODELS_FILE = os.path.join(BASE_DIR, "llm-models.json")
+LLM_TOOLS_FILE = os.path.join(BASE_DIR, "llm-tools.json")
 PLUGINS_ENABLED_FILE = os.path.join(BASE_DIR, "plugins-enabled.json")
 
 # Google Drive
@@ -86,6 +87,8 @@ def load_llm_registry():
                 "top_p":       config.get('top_p',        1.0 if _is_openai else 0.95),
                 "top_k":       config.get('top_k',        None if _is_openai else 40),
                 "token_selection_setting": config.get('token_selection_setting', 'default'),
+                "llm_tools": config.get('llm_tools', []),
+                "llm_tools_gates": config.get('llm_tools_gates', []),
             }
 
         return registry
@@ -210,6 +213,51 @@ def save_llm_model_field(model_name: str, field: str, value) -> bool:
         return False
 
 
+def load_llm_tools() -> dict:
+    """Load named toolsets from llm-tools.json. Returns {name: [tool_names]}."""
+    try:
+        with open(LLM_TOOLS_FILE, 'r') as f:
+            data = json.load(f)
+        return data.get('toolsets', {})
+    except FileNotFoundError:
+        log.error("llm-tools.json not found — no toolsets available.")
+        return {}
+    except Exception as e:
+        log.error(f"Error loading llm-tools.json: {e}")
+        return {}
+
+
+def save_llm_toolset(name: str, tools: list[str]) -> bool:
+    """Persist a single toolset to llm-tools.json. Returns True on success."""
+    try:
+        with open(LLM_TOOLS_FILE, 'r') as f:
+            data = json.load(f)
+        data.setdefault('toolsets', {})[name] = tools
+        with open(LLM_TOOLS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception as e:
+        log.error(f"save_llm_toolset({name}): {e}")
+        return False
+
+
+def delete_llm_toolset(name: str) -> tuple[bool, str]:
+    """Delete a toolset from llm-tools.json. Returns (success, message)."""
+    try:
+        with open(LLM_TOOLS_FILE, 'r') as f:
+            data = json.load(f)
+        toolsets = data.get('toolsets', {})
+        if name not in toolsets:
+            return False, f"Toolset '{name}' not found."
+        del toolsets[name]
+        with open(LLM_TOOLS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True, f"Toolset '{name}' deleted."
+    except Exception as e:
+        log.error(f"delete_llm_toolset({name}): {e}")
+        return False, f"ERROR: {e}"
+
+
 def load_rate_limits() -> dict:
     """Load rate_limits section from plugins-enabled.json."""
     defaults = {
@@ -297,6 +345,9 @@ LIVE_LIMITS: dict = {
     "max_agent_call_depth":  MAX_AGENT_CALL_DEPTH,
     "max_tool_iterations":   int(_limits.get("max_tool_iterations", MAX_TOOL_ITERATIONS)),
 }
+
+# Named toolsets — loaded from llm-tools.json
+LLM_TOOLSETS = load_llm_tools()
 
 # Rate limits by tool type — loaded from plugins-enabled.json
 RATE_LIMITS = load_rate_limits()

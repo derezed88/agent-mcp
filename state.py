@@ -1,7 +1,51 @@
 import asyncio
 import json
+import logging
 import os
+import re
 from contextvars import ContextVar
+
+_log = logging.getLogger("agent")
+
+# Directory for persisted session histories (relative to this file)
+SESSION_HISTORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-history")
+
+
+def _safe_filename(session_id: str) -> str:
+    """Convert a session_id to a safe filename component."""
+    # Replace any character that isn't alphanumeric, hyphen, underscore, or dot
+    return re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+
+
+def save_history(session_id: str, history: list) -> None:
+    """Persist a session's history to disk before reaping."""
+    if not history:
+        return
+    try:
+        os.makedirs(SESSION_HISTORY_DIR, exist_ok=True)
+        path = os.path.join(SESSION_HISTORY_DIR, f"{_safe_filename(session_id)}.history")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False)
+        _log.info(f"Session history saved ({len(history)} messages): {path}")
+    except Exception as e:
+        _log.warning(f"Failed to save session history for {session_id}: {e}")
+
+
+def load_history(session_id: str) -> list:
+    """Load a session's persisted history from disk, if it exists."""
+    path = os.path.join(SESSION_HISTORY_DIR, f"{_safe_filename(session_id)}.history")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            history = json.load(f)
+        if isinstance(history, list):
+            _log.info(f"Session history loaded ({len(history)} messages): {path}")
+            return history
+    except Exception as e:
+        _log.warning(f"Failed to load session history for {session_id}: {e}")
+    return []
+
 
 # Current client ID context variable — set in execute_tool() so executors can
 # read it without needing it as an explicit parameter.
@@ -129,6 +173,49 @@ def clear_client_gate(client_id: str):
 
 async def push_model(client_id: str, model_key: str):
     (await get_queue(client_id)).put_nowait({"t": "model", "d": model_key})
+
+# ---------------------------------------------------------------------------
+# Legacy gate API (asyncio.Future-based) — used by agents.py for inline gate checks.
+# The newer gate system uses push_gate()/clear_client_gate() above.
+# ---------------------------------------------------------------------------
+_gate_futures: dict[str, asyncio.Future] = {}
+
+
+def has_pending_gate(client_id: str) -> bool:
+    """True if there is an unanswered gate request for this client."""
+    return client_id in _gate_futures
+
+
+async def wait_for_gate(client_id: str, timeout: float = 120.0) -> bool:
+    """
+    Create a Future for the given client and wait up to `timeout` seconds
+    for the user to answer Y/N via resolve_gate().
+
+    Returns True (allow) or False (deny). Auto-denies on timeout.
+    """
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    _gate_futures[client_id] = fut
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        _gate_futures.pop(client_id, None)
+
+
+def resolve_gate(client_id: str, approved: bool) -> bool:
+    """
+    Answer the pending gate Future for the given client.
+
+    Returns True if a pending gate was resolved, False if there was none.
+    """
+    fut = _gate_futures.get(client_id)
+    if fut is None or fut.done():
+        return False
+    fut.set_result(approved)
+    return True
+
 
 async def cancel_active_task(client_id: str) -> bool:
     """

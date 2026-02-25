@@ -23,8 +23,8 @@ from langchain_core.messages import (
 
 import time
 
-from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, LIVE_LIMITS, save_llm_model_field
-from state import push_tok, push_done, push_err, current_client_id, sessions
+from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, LIVE_LIMITS, LLM_TOOLSETS, save_llm_model_field
+from state import push_tok, push_done, push_err, current_client_id, sessions, wait_for_gate, resolve_gate, has_pending_gate
 from prompt import get_current_prompt, load_prompt_for_folder
 from gate import check_human_gate
 from database import execute_sql
@@ -248,6 +248,36 @@ def update_tool_definitions():
     _tools_module.CORE_LC_TOOLS = _tools_module._make_core_lc_tools()
     _CURRENT_LC_TOOLS = get_all_lc_tools()
     _CURRENT_OPENAI_TOOLS = get_all_openai_tools()
+
+
+def _resolve_model_tools(model_key: str) -> list:
+    """
+    Resolve a model's llm_tools list into StructuredTool objects.
+
+    Each entry in llm_tools is either:
+      - A group name (key in LLM_TOOLSETS, e.g. "core", "admin") → expanded to all tools in that group
+      - A literal tool name (e.g. "sysprompt_cfg") → included directly
+
+    Deduplicates, then filters _CURRENT_LC_TOOLS to only matching tools.
+    Returns [] if the model has no llm_tools configured (no tools bound).
+    """
+    cfg = LLM_REGISTRY.get(model_key, {})
+    toolset_names = cfg.get("llm_tools", [])
+    if not toolset_names:
+        return []
+
+    # Expand toolset names to individual tool names.
+    # Each entry is either a group name (key in LLM_TOOLSETS) or a literal tool name.
+    allowed_names: set[str] = set()
+    for ts_name in toolset_names:
+        if ts_name in LLM_TOOLSETS:
+            allowed_names.update(LLM_TOOLSETS[ts_name])
+        else:
+            # Treat as a literal tool name; warn if it doesn't exist at bind time
+            allowed_names.add(ts_name)
+
+    # Filter the global tool list to only allowed tools
+    return [t for t in _CURRENT_LC_TOOLS if t.name in allowed_names]
 
 
 # --- Universal Rate Limiter ---
@@ -548,9 +578,11 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
     try:
         llm = _build_lc_llm(model_key)
 
-        # Bind all registered tools so the model knows what it can call.
-        # StructuredTool objects carry full schema + coroutine reference.
-        llm_with_tools = llm.bind_tools(_CURRENT_LC_TOOLS)
+        # Bind per-model tools so only the model's configured toolsets are sent.
+        # This keeps tool count under provider limits (e.g. Gemini 2.5 Flash ~35).
+        _model_tools = _resolve_model_tools(model_key)
+        llm_with_tools = llm.bind_tools(_model_tools) if _model_tools else llm
+        log.info(f"agentic_lc: model={model_key} bound {len(_model_tools)} tools")
 
         # Load per-model system prompt (stateless; falls back to global if not configured)
         model_cfg = LLM_REGISTRY.get(model_key, {})
@@ -562,7 +594,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         else:
             system_prompt = get_current_prompt()
 
-        # Per-model timeout for ainvoke (same setting used by llm_clean_text/tool).
+        # Per-model timeout for ainvoke (same setting used by llm_call).
         # Prevents indefinite stalls when the LLM API hangs or thinks too long.
         invoke_timeout = model_cfg.get("llm_call_timeout", 120)
 
@@ -570,6 +602,11 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         ctx: list[BaseMessage] = _to_lc_messages(system_prompt, messages)
 
         _suppress = sessions.get(client_id, {}).get("tool_suppress", False)
+        # Gemini 2.5 Flash (and other thinking models) silently return empty content
+        # with no tool calls when bound to many tools (>~35).  Track the initial ctx
+        # length so we can detect first-turn failures and retry with tool_choice='any'.
+        _initial_ctx_len = len(ctx)
+        _is_gemini = (LLM_REGISTRY.get(model_key, {}).get("type") == "GEMINI")
         for _ in range(LIVE_LIMITS.get("max_tool_iterations", MAX_TOOL_ITERATIONS)):
             if not _suppress:
                 await push_tok(client_id, "\n[thinking…]\n")
@@ -605,14 +642,55 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 if final:
                     await push_tok(client_id, final)
                 else:
-                    log.warning(
-                        f"agentic_lc: empty response from model={model_key} "
-                        f"client={client_id} ctx_len={len(ctx)} "
-                        f"raw_content={repr(ai_msg.content)} "
-                        f"metadata={getattr(ai_msg, 'response_metadata', {})}"
-                    )
-                await push_done(client_id)
-                return final
+                    # Gemini 2.5 Flash returns empty content + no tool calls when
+                    # too many tools are bound (>~35). On first turn only, retry
+                    # with tool_choice='any' to force a response.
+                    if _is_gemini and len(ctx) == _initial_ctx_len + 1:
+                        log.warning(
+                            f"agentic_lc: empty first-turn from {model_key}, retrying with tool_choice='any'"
+                        )
+                        ctx.pop()  # remove the empty ai_msg
+                        try:
+                            llm_forced = llm.bind_tools(_model_tools, tool_choice="any") if _model_tools else llm
+                            ai_msg = await asyncio.wait_for(
+                                llm_forced.ainvoke(ctx),
+                                timeout=invoke_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            await push_tok(client_id, f"\n[LLM timeout after {invoke_timeout}s — aborting turn]\n")
+                            await push_done(client_id)
+                            return ""
+                        ctx.append(ai_msg)
+                        if ai_msg.tool_calls:
+                            # Tool calls generated — fall through to execute them below
+                            pass
+                        else:
+                            final = _content_to_str(ai_msg.content)
+                            if final:
+                                await push_tok(client_id, final)
+                            else:
+                                log.warning(
+                                    f"agentic_lc: empty response after retry from model={model_key} "
+                                    f"client={client_id} ctx_len={len(ctx)} "
+                                    f"raw_content={repr(ai_msg.content)} "
+                                    f"metadata={getattr(ai_msg, 'response_metadata', {})}"
+                                )
+                                await push_tok(client_id, "[empty string]")
+                            await push_done(client_id)
+                            return final
+                    else:
+                        log.warning(
+                            f"agentic_lc: empty response from model={model_key} "
+                            f"client={client_id} ctx_len={len(ctx)} "
+                            f"raw_content={repr(ai_msg.content)} "
+                            f"metadata={getattr(ai_msg, 'response_metadata', {})}"
+                        )
+                        await push_tok(client_id, "[empty string]")
+                        await push_done(client_id)
+                        return final
+                if not ai_msg.tool_calls:
+                    await push_done(client_id)
+                    return final
 
             # Execute all tool calls in this turn
             has_non_agent_call_output = False
@@ -647,85 +725,36 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         await push_err(client_id, str(exc))
         return ""
 
-async def llm_clean_text(model: str, prompt: str) -> str:
+async def llm_call(
+    model: str,
+    prompt: str,
+    mode: str = "text",
+    sys_prompt: str = "none",
+    history: str = "none",
+    tool: str = "",
+) -> str:
     """
-    Call a target LLM with a single prompt and no context.
+    Unified LLM-to-LLM call.
 
-    No system prompt, no chat history, no tools are sent to the target model.
-    The prompt is the only input. Returns the raw text response.
-
-    client_id is read from the current_client_id ContextVar (set by execute_tool).
-    """
-    client_id = current_client_id.get("")
-
-    cfg = LLM_REGISTRY.get(model)
-    if not cfg:
-        return f"ERROR: Unknown model '{model}'. Use llm_list() to see available models."
-
-    if not cfg.get("tool_call_available", False):
-        return (
-            f"ERROR: Model '{model}' is not available for tool calls "
-            f"(tool_call_available=false). Use !llm_call {model} true to enable it."
-        )
-
-    timeout = cfg.get("llm_call_timeout", 60)
-
-    if not sessions.get(client_id, {}).get("tool_suppress", False):
-        await push_tok(client_id, f"\n[llm_clean_text ▶] {model}: {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n")
-
-    try:
-        llm = _build_lc_llm(model)
-        response = await asyncio.wait_for(
-            llm.ainvoke([HumanMessage(content=prompt)]),
-            timeout=timeout,
-        )
-        result = _content_to_str(response.content)
-
-        _sess = sessions.get(client_id, {})
-        _suppress = _sess.get("tool_suppress", False)
-        if not _suppress:
-            preview_len = _sess.get("tool_preview_length", 500)
-            if preview_len == 0:
-                await push_tok(client_id, f"[llm_clean_text ◀] {model}:\n")
-            elif preview_len == -1 or len(result) <= preview_len:
-                await push_tok(client_id, f"[llm_clean_text ◀] {model}:\n{result}\n")
-            else:
-                await push_tok(client_id, f"[llm_clean_text ◀] {model}:\n{result[:preview_len]}\n…(truncated)\n")
-        return result
-
-    except asyncio.TimeoutError:
-        msg = f"ERROR: llm_clean_text timed out after {timeout}s waiting for model '{model}'."
-        await push_tok(client_id, f"[llm_clean_text ✗] {model}: timeout after {timeout}s\n")
-        log.warning(f"llm_clean_text timeout: model={model} client={client_id}")
-        return msg
-    except Exception as exc:
-        msg = f"ERROR: llm_clean_text failed for model '{model}': {exc}"
-        await push_tok(client_id, f"[llm_clean_text ✗] {model}: {exc}\n")
-        log.error(f"llm_clean_text error: model={model} client={client_id} exc={exc}")
-        return msg
-
-
-
-async def llm_clean_tool(model: str, tool: str, arguments: str) -> str:
-    """
-    Delegate a single tool call to a target LLM with no session context.
-
-    The target model receives only:
-    - A system prompt containing the tool's own definition (from .system_prompt_tool-<name>)
-    - The arguments string as the user message
-
-    The server executes the tool call if the model makes one (normal gates apply).
-    Returns the target model's final text synthesis of the tool result.
-
-    Uses LangChain bind_tools() so the same two-turn exchange works for both
-    OpenAI-compatible and Gemini backends without separate branches.
+    Parameters
+    ----------
+    model      : Target model key (must have tool_call_available=true).
+    prompt     : The prompt / user message to send.
+    mode       : "text" — return raw text response.
+                 "tool" — delegate a single tool call; requires `tool` argument.
+    sys_prompt : "none"   — no system prompt sent to target.
+                 "caller" — use the calling session's assembled system prompt.
+                 "target" — load the target model's own system_prompt_folder.
+    history    : "none"   — no history; clean single-turn call.
+                 "caller" — prepend the calling session's full chat history.
+    tool       : Tool name (required when mode="tool").
 
     client_id is read from the current_client_id ContextVar (set by execute_tool).
     """
     from tools import get_tool_executor, get_section_for_tool, get_openai_tool_schema
     client_id = current_client_id.get("")
 
-    # Validate model
+    # ---- Validate model ----
     cfg = LLM_REGISTRY.get(model)
     if not cfg:
         return f"ERROR: Unknown model '{model}'. Use llm_list() to see available models."
@@ -735,79 +764,195 @@ async def llm_clean_tool(model: str, tool: str, arguments: str) -> str:
             f"Use !llm_call {model} true to enable it."
         )
 
-    # Validate tool
-    executor = get_tool_executor(tool)
-    if not executor:
-        return f"ERROR: Unknown tool '{tool}'. Check llm_list() or !help for available tools."
+    # ---- Validate mode ----
+    if mode not in ("text", "tool"):
+        return f"ERROR: mode must be 'text' or 'tool', got '{mode}'."
+    if sys_prompt not in ("none", "caller", "target"):
+        return f"ERROR: sys_prompt must be 'none', 'caller', or 'target', got '{sys_prompt}'."
+    if history not in ("none", "caller"):
+        return f"ERROR: history must be 'none' or 'caller', got '{history}'."
 
-    # Get the tool's section definition to use as system prompt
-    tool_system_prompt = get_section_for_tool(tool)
-    if not tool_system_prompt:
-        tool_system_prompt = f"You have access to one tool: {tool}. Use it to answer the user's request."
-
-    # Build a minimal StructuredTool from the existing OpenAI schema so LangChain
-    # can bind it to the model — no need to rewrite tool definitions yet.
-    tool_schema = get_openai_tool_schema(tool)
-    if not tool_schema:
-        return f"ERROR: No schema found for tool '{tool}'. Cannot delegate to target model."
-
+    session = sessions.get(client_id, {})
     timeout = cfg.get("llm_call_timeout", 60)
 
-    await push_tok(client_id, f"\n[llm_clean_tool ▶] {model}/{tool}: {arguments[:60]}{'…' if len(arguments) > 60 else ''}\n")
+    # ---- Resolve system prompt string ----
+    resolved_sys: str = ""
+    if sys_prompt == "caller":
+        resolved_sys = get_current_prompt()
+    elif sys_prompt == "target":
+        sp_folder_rel = cfg.get("system_prompt_folder", "")
+        if sp_folder_rel and sp_folder_rel.lower() != "none":
+            sp_folder_abs = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), sp_folder_rel
+            )
+            resolved_sys = load_prompt_for_folder(sp_folder_abs)
+        else:
+            resolved_sys = get_current_prompt()  # fallback same as at_llm
+
+    # ---- Depth guard (only when passing caller history, risk of recursion) ----
+    if history == "caller":
+        depth = session.get("_at_llm_depth", 0)
+        _max_depth = LIVE_LIMITS.get("max_at_llm_depth", 1)
+        if depth >= _max_depth:
+            msg = (
+                f"llm_call DEPTH LIMIT REACHED (max={_max_depth}): "
+                f"Cannot call llm_call with history=caller from within an llm_call context. "
+                f"Do NOT retry. Return your answer directly."
+            )
+            await push_tok(client_id, f"\n[llm_call ✗] depth limit reached (max={_max_depth})\n")
+            log.warning(f"llm_call depth limit: client={client_id} depth={depth} model={model}")
+            return msg
+
+    # ---- Build message list ----
+    messages: list = []
+
+    if resolved_sys:
+        messages.append(SystemMessage(content=resolved_sys))
+
+    if history == "caller":
+        for msg in session.get("history", []):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "assistant":
+                messages.append(AIMessage(content=content))
+            elif role == "user":
+                messages.append(HumanMessage(content=content))
+            # skip system turns already in history
+
+    messages.append(HumanMessage(content=prompt))
+
+    # ---- Display tag ----
+    tag_mode = f"{mode}/{tool}" if mode == "tool" and tool else mode
+    tag_sp = f"sp={sys_prompt}"
+    tag_h = f"hist={history}"
+    if not session.get("tool_suppress", False):
+        await push_tok(
+            client_id,
+            f"\n[llm_call ▶] {model} [{tag_mode} {tag_sp} {tag_h}]:"
+            f" {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n"
+        )
+
+    # ---- Gate bypass flag for history=caller (mirrors at_llm behavior) ----
+    prev_temp = session.get("_temp_model_active", False)
+    if history == "caller":
+        session["_at_llm_depth"] = session.get("_at_llm_depth", 0) + 1
+        session["_temp_model_active"] = True
 
     try:
-        async def _run():
-            from langchain_core.tools import StructuredTool
+        # ================================================================
+        # TEXT MODE
+        # ================================================================
+        if mode == "text":
+            try:
+                llm = _build_lc_llm(model)
+                response = await asyncio.wait_for(
+                    llm.ainvoke(messages),
+                    timeout=timeout,
+                )
+                result = _content_to_str(response.content)
 
-            # Build a LangChain tool wrapper around the existing executor
-            lc_tool = StructuredTool.from_function(
-                coroutine=executor,
-                name=tool_schema["function"]["name"],
-                description=tool_schema["function"].get("description", ""),
-            )
+                _sess = sessions.get(client_id, {})
+                if not _sess.get("tool_suppress", False):
+                    preview_len = _sess.get("tool_preview_length", 500)
+                    if preview_len == 0:
+                        await push_tok(client_id, f"[llm_call ◀] {model}:\n")
+                    elif preview_len == -1 or len(result) <= preview_len:
+                        await push_tok(client_id, f"[llm_call ◀] {model}:\n{result}\n")
+                    else:
+                        await push_tok(client_id, f"[llm_call ◀] {model}:\n{result[:preview_len]}\n…(truncated)\n")
+                return result
 
-            llm = _build_lc_llm(model)
-            llm_with_tool = llm.bind_tools([lc_tool])
+            except asyncio.TimeoutError:
+                msg = f"ERROR: llm_call timed out after {timeout}s waiting for model '{model}'."
+                await push_tok(client_id, f"[llm_call ✗] {model}: timeout after {timeout}s\n")
+                log.warning(f"llm_call timeout: model={model} client={client_id}")
+                return msg
+            except Exception as exc:
+                msg = f"ERROR: llm_call failed for model '{model}': {exc}"
+                await push_tok(client_id, f"[llm_call ✗] {model}: {exc}\n")
+                log.error(f"llm_call error: model={model} client={client_id} exc={exc}")
+                return msg
 
-            # Turn 1: model decides whether to call the tool
-            turn1_msgs = [
-                SystemMessage(content=tool_system_prompt),
-                HumanMessage(content=arguments),
-            ]
-            ai_msg: AIMessage = await llm_with_tool.ainvoke(turn1_msgs)
+        # ================================================================
+        # TOOL MODE
+        # ================================================================
+        else:
+            if not tool:
+                return "ERROR: mode='tool' requires a tool name in the 'tool' argument."
 
-            # If model replied with text directly (no tool call), return it
-            if not ai_msg.tool_calls:
-                return _content_to_str(ai_msg.content)
+            executor = get_tool_executor(tool)
+            if not executor:
+                return f"ERROR: Unknown tool '{tool}'. Use !help for available tools."
 
-            # Execute the first tool call (single call enforcement)
-            tc = ai_msg.tool_calls[0]
-            tool_result = await execute_tool(client_id, tc["name"], tc["args"])
+            # Determine the tool's system prompt section to use as the leading system message
+            # ONLY when no system prompt was already resolved (none or target without folder)
+            tool_sys = get_section_for_tool(tool)
+            if not tool_sys:
+                tool_sys = f"You have access to one tool: {tool}. Use it to answer the user's request."
 
-            # Turn 2: send result back for synthesis
-            turn2_msgs = turn1_msgs + [
-                ai_msg,
-                ToolMessage(content=str(tool_result), tool_call_id=tc["id"]),
-            ]
-            final_msg: AIMessage = await llm.ainvoke(turn2_msgs)
-            return _content_to_str(final_msg.content) or str(tool_result)
+            # If the caller didn't request a sys_prompt, inject the tool-specific section
+            if sys_prompt == "none":
+                # Replace the system messages with the tool-specific prompt
+                # (messages so far = just HumanMessage(prompt), possibly with history)
+                messages = (
+                    [SystemMessage(content=tool_sys)]
+                    + [m for m in messages if not isinstance(m, SystemMessage)]
+                )
 
-        result = await asyncio.wait_for(_run(), timeout=timeout)
+            tool_schema = get_openai_tool_schema(tool)
+            if not tool_schema:
+                return f"ERROR: No schema found for tool '{tool}'. Cannot delegate."
 
-        preview_len = sessions.get(client_id, {}).get("tool_preview_length", 500)
-        preview = result if (preview_len == 0 or len(result) <= preview_len) else result[:preview_len] + "\n…(truncated)"
-        await push_tok(client_id, f"[llm_clean_tool ◀] {model}/{tool}:\n{preview}\n")
-        return result
+            try:
+                async def _run_tool():
+                    from langchain_core.tools import StructuredTool as _ST
+                    lc_tool = _ST.from_function(
+                        coroutine=executor,
+                        name=tool_schema["function"]["name"],
+                        description=tool_schema["function"].get("description", ""),
+                    )
+                    llm = _build_lc_llm(model)
+                    llm_with_tool = llm.bind_tools([lc_tool])
 
-    except asyncio.TimeoutError:
-        msg = f"ERROR: llm_clean_tool timed out after {timeout}s for model '{model}'."
-        await push_tok(client_id, f"[llm_clean_tool ✗] {model}/{tool}: timeout after {timeout}s\n")
-        return msg
-    except Exception as exc:
-        msg = f"ERROR: llm_clean_tool failed for model '{model}', tool '{tool}': {exc}"
-        await push_tok(client_id, f"[llm_clean_tool ✗] {model}/{tool}: {exc}\n")
-        log.error(f"llm_clean_tool error: model={model} tool={tool} client={client_id} exc={exc}")
-        return msg
+                    ai_msg: AIMessage = await llm_with_tool.ainvoke(messages)
+
+                    if not ai_msg.tool_calls:
+                        return _content_to_str(ai_msg.content)
+
+                    tc = ai_msg.tool_calls[0]
+                    tool_result = await execute_tool(client_id, tc["name"], tc["args"])
+
+                    turn2_msgs = messages + [
+                        ai_msg,
+                        ToolMessage(content=str(tool_result), tool_call_id=tc["id"]),
+                    ]
+                    final_msg: AIMessage = await llm.ainvoke(turn2_msgs)
+                    return _content_to_str(final_msg.content) or str(tool_result)
+
+                result = await asyncio.wait_for(_run_tool(), timeout=timeout)
+
+                preview_len = sessions.get(client_id, {}).get("tool_preview_length", 500)
+                preview = (
+                    result if (preview_len == 0 or len(result) <= preview_len)
+                    else result[:preview_len] + "\n…(truncated)"
+                )
+                await push_tok(client_id, f"[llm_call ◀] {model}/{tool}:\n{preview}\n")
+                return result
+
+            except asyncio.TimeoutError:
+                msg = f"ERROR: llm_call timed out after {timeout}s for model '{model}'."
+                await push_tok(client_id, f"[llm_call ✗] {model}/{tool}: timeout after {timeout}s\n")
+                return msg
+            except Exception as exc:
+                msg = f"ERROR: llm_call failed for model '{model}', tool '{tool}': {exc}"
+                await push_tok(client_id, f"[llm_call ✗] {model}/{tool}: {exc}\n")
+                log.error(f"llm_call error: model={model} tool={tool} client={client_id} exc={exc}")
+                return msg
+
+    finally:
+        if history == "caller":
+            session["_at_llm_depth"] = max(0, session.get("_at_llm_depth", 1) - 1)
+            session["_temp_model_active"] = prev_temp
 
 
 async def llm_list() -> str:
@@ -819,6 +964,7 @@ async def llm_list() -> str:
     for name, cfg in sorted(LLM_REGISTRY.items()):
         available = "YES" if cfg.get("tool_call_available", False) else "NO"
         host = cfg.get("host") or "default"
+        toolsets = cfg.get("llm_tools", [])
         lines.append(
             f"  {name}\n"
             f"    type             : {cfg.get('type')}\n"
@@ -826,6 +972,7 @@ async def llm_list() -> str:
             f"    host             : {host}\n"
             f"    max_context      : {cfg.get('max_context')}\n"
             f"    tool_call_avail  : {available}\n"
+            f"    llm_tools        : {', '.join(toolsets) if toolsets else '(none)'}\n"
             f"    llm_call_timeout : {cfg.get('llm_call_timeout', 60)}s\n"
             f"    description      : {cfg.get('description', '')}\n"
         )
@@ -937,65 +1084,6 @@ async def agent_call(
     finally:
         calling_session["_agent_call_depth"] = agent_call_depth
 
-
-async def at_llm(model: str, prompt: str) -> str:
-    """
-    Call a named LLM with the FULL current session context (system prompt + chat history).
-
-    Equivalent to the @<model> prefix syntax but invocable as a tool call.
-    The named model receives the assembled system prompt, the complete chat history,
-    and the given prompt as the new user turn.
-
-    The result is NOT added to the session history (same behaviour as @<model>).
-    All tool gates are bypassed for this call (same as @<model> temp switch).
-
-    client_id is read from current_client_id ContextVar (set by execute_tool).
-    """
-    client_id = current_client_id.get("")
-
-    cfg = LLM_REGISTRY.get(model)
-    if not cfg:
-        available = ", ".join(LLM_REGISTRY.keys())
-        return f"ERROR: Unknown model '{model}'. Available: {available}"
-
-    session = sessions.get(client_id, {})
-
-    # Depth guard — prevent unbounded recursive at_llm chains
-    depth = session.get("_at_llm_depth", 0)
-    _max_at_llm_depth = LIVE_LIMITS.get("max_at_llm_depth", 1)
-    if depth >= _max_at_llm_depth:
-        msg = (
-            f"at_llm DEPTH LIMIT REACHED (max={_max_at_llm_depth}): "
-            f"Cannot call at_llm from within an at_llm context. "
-            f"Do NOT retry. Return your answer directly without calling at_llm again."
-        )
-        await push_tok(client_id, f"\n[at_llm ✗] depth limit reached (max={_max_at_llm_depth})\n")
-        log.warning(f"at_llm depth limit: client={client_id} depth={depth} model={model}")
-        return msg
-
-    history = list(session.get("history", []))
-
-    # Append the new prompt as a user turn (not stored in session history)
-    history.append({"role": "user", "content": prompt})
-
-    # Run history chain for dispatch (does not modify session["history"])
-    from routes import _run_history_chain
-    history = _run_history_chain(history, session, cfg)
-
-    await push_tok(client_id, f"\n[@{model} ▶] {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n")
-
-    # Increment depth counter and set gate bypass flag for this call
-    prev_temp = session.get("_temp_model_active", False)
-    session["_at_llm_depth"] = depth + 1
-    session["_temp_model_active"] = True
-
-    try:
-        result = await agentic_lc(model, history, client_id)
-    finally:
-        session["_at_llm_depth"] = depth
-        session["_temp_model_active"] = prev_temp
-
-    return result or ""
 
 
 async def dispatch_llm(model_key: str, messages: list[dict], client_id: str) -> str:

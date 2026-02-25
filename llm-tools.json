@@ -1,0 +1,58 @@
+{
+  "version": "1.0.0",
+  "toolsets": {
+    "core": [
+      "get_system_info",
+      "help",
+      "llm_list",
+      "llm_call",
+      "sleep",
+      "reset",
+      "session"
+    ],
+    "admin": [
+      "model",
+      "llm_tools",
+      "model_cfg",
+      "sysprompt_cfg",
+      "config_cfg",
+      "limits_cfg"
+    ],
+    "db": [
+      "db_query"
+    ],
+    "search": [
+      "search_ddgs",
+      "search_google",
+      "search_tavily",
+      "search_xai"
+    ],
+    "drive": [
+      "google_drive"
+    ],
+    "vscode": [
+      "vscode_sessions_list",
+      "vscode_sessions_read"
+    ],
+    "extract": [
+      "url_extract"
+    ],
+    "agent": [
+      "agent_call"
+    ],
+    "tmux": [
+      "tmux_new",
+      "tmux_exec",
+      "tmux_ls",
+      "tmux_kill_session",
+      "tmux_kill_server",
+      "tmux_history",
+      "tmux_history_limit",
+      "tmux_call_limit"
+    ]
+  },
+  "metadata": {
+    "last_modified": "2026-02-24",
+    "notes": "Named toolsets for per-model tool binding. Each model references toolset names in its llm_tools array."
+  }
+}
