@@ -13,20 +13,11 @@ from langchain_core.messages import (
 #from .config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY
 #from .state import push_tok, push_done, push_err
 #from .prompt import get_current_prompt
-#from .gate import check_human_gate
-#from .database import execute_sql
-#from .tools import (
-#    db_query, update_system_prompt, get_system_info, 
-#    google_search, google_drive,
-#    OPENAI_TOOL_DEFS, GEMINI_TOOL
-#)
-
 import time
 
 from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, LIVE_LIMITS, LLM_TOOLSETS, save_llm_model_field
 from state import push_tok, push_done, push_flush, push_err, current_client_id, sessions, wait_for_gate, resolve_gate, has_pending_gate
 from prompt import get_current_prompt, load_prompt_for_folder
-from gate import check_human_gate
 from database import execute_sql
 from tools import (
     get_system_info,
@@ -147,7 +138,11 @@ def _build_lc_llm(model_key: str):
         if use_custom:
             kwargs["temperature"] = cfg.get("temperature", 1.0)
             kwargs["top_p"]       = cfg.get("top_p", 1.0)
-            # top_k is not passed for OPENAI (not supported by standard OpenAI API)
+            top_k = cfg.get("top_k")
+            if top_k is not None:
+                # Passed via model_kwargs so it's forwarded as an extra body field.
+                # Real OpenAI API ignores unknown fields; llama.cpp accepts top_k.
+                kwargs["model_kwargs"] = {"top_k": int(top_k)}
         return ChatOpenAI(**kwargs)
 
     if cfg["type"] == "GEMINI":
@@ -294,8 +289,7 @@ async def check_rate_limit(client_id: str, tool_name: str, tool_type: str) -> tu
     error_msg is empty when allowed=True.
 
     When auto_disable=True and the limit is breached for an llm_call tool,
-    tool_call_available is set to False in the live registry (not persisted —
-    user must re-enable with !llm_call <model> true).
+    the rate limit message is returned (but no model state is mutated).
     """
     cfg = RATE_LIMITS.get(tool_type, {})
     max_calls = cfg.get("calls", 0)
@@ -316,15 +310,7 @@ async def check_rate_limit(client_id: str, tool_name: str, tool_type: str) -> tu
         auto_disable_msg = ""
 
         if auto_disable and tool_type == "llm_call":
-            # Extract model name from tool_args stored in caller context
-            # We find it by scanning the tool name — llm_call_clean carries model in args,
-            # but at this level we only have tool_type. Auto-disable all tool_call_available
-            # models that are currently enabled to be safe.
-            for model_name, model_cfg in LLM_REGISTRY.items():
-                if model_cfg.get("tool_call_available", False):
-                    model_cfg["tool_call_available"] = False
-                    log.warning(f"Rate limit auto-disabled tool_call_available for model '{model_name}'")
-            auto_disable_msg = " All llm_call models have been auto-disabled. Use !llm_call <model> true to re-enable."
+            auto_disable_msg = " Rate limit auto-disable triggered for llm_call."
 
         error_msg = (
             f"RATE LIMIT EXCEEDED: {tool_name} ({tool_type}) — "
@@ -339,36 +325,133 @@ async def check_rate_limit(client_id: str, tool_name: str, tool_type: str) -> tu
     return True, ""
 
 
+# --- Gate helpers ---
+
+def _is_llama_client(client_id: str) -> bool:
+    """True for llama-proxy and OpenAI-proxy clients that cannot respond to gate prompts."""
+    return (
+        client_id.startswith("llama-")
+        or client_id.startswith("api-swarm-")
+    )
+
+
+def _is_slack_client(client_id: str) -> bool:
+    """True for Slack clients that cannot respond to gate prompts."""
+    return client_id.startswith("slack-")
+
+
+def _gate_matches(tool_name: str, tool_args: dict, gate_entry: str) -> bool:
+    """
+    Check whether a tool call matches a gate entry.
+
+    Gate entry syntax:
+      "<tool_name>"               — matches any call to that tool
+      "<tool_name> <subcommand>"  — matches only when tool's 'action' arg == subcommand
+
+    Examples:
+      "db_query"          matches db_query(sql="SELECT ...")
+      "model_cfg write"   matches model_cfg(action="write", ...)
+      "model_cfg read"    does NOT match model_cfg(action="write", ...)
+    """
+    parts = gate_entry.strip().split(None, 1)
+    if not parts:
+        return False
+    gate_tool = parts[0]
+    if gate_tool != tool_name:
+        return False
+    if len(parts) == 1:
+        return True  # tool name only — all calls match
+    gate_sub = parts[1].strip()
+    # Check 'action' field (unified tools) or first positional
+    actual_sub = tool_args.get("action") or tool_args.get("operation") or ""
+    return actual_sub == gate_sub
+
+
+async def check_gate(client_id: str, model_key: str, tool_name: str, tool_args: dict) -> tuple[bool, str]:
+    """
+    Check whether a tool call requires human gate approval.
+
+    Returns (allowed: bool, reason: str).
+    reason is empty when allowed=True.
+
+    Gate flow:
+    1. Look up llm_tools_gates for the session's current model.
+    2. If any gate entry matches the call, prompt the user.
+    3. For llama/slack/swarm clients — auto-deny (cannot interactively respond).
+    4. For shell.py clients — send a gate prompt event; wait up to 120s.
+    """
+    cfg = LLM_REGISTRY.get(model_key, {})
+    gates = cfg.get("llm_tools_gates", [])
+    if not gates:
+        return True, ""
+
+    # Check if any gate pattern matches this tool call
+    matched_gate = None
+    for entry in gates:
+        if _gate_matches(tool_name, tool_args, entry):
+            matched_gate = entry
+            break
+
+    if matched_gate is None:
+        return True, ""
+
+    # Auto-deny for non-interactive clients
+    if _is_llama_client(client_id) or _is_slack_client(client_id):
+        reason = (
+            f"GATE DENIED (auto): tool '{tool_name}' is gated for model '{model_key}' "
+            f"(gate='{matched_gate}'). This client cannot respond to gate requests. "
+            f"Use a shell.py session to approve gated tool calls. Do NOT retry."
+        )
+        log.info(f"Gate auto-denied: client={client_id} tool={tool_name} gate='{matched_gate}'")
+        return False, reason
+
+    # Send gate prompt to user via SSE "gate" event
+    args_preview = ", ".join(
+        f"{k}={repr(v)[:60]}" for k, v in list(tool_args.items())[:4]
+    )
+    gate_msg = (
+        f"[GATE] Model '{model_key}' wants to call: {tool_name}({args_preview})\n"
+        f"Gate rule: '{matched_gate}'\n"
+        f"Allow? (y/yes to allow, anything else to deny) [120s timeout]"
+    )
+    from state import sse_queues, get_queue
+    q = await get_queue(client_id)
+    q.put_nowait({"t": "gate", "d": gate_msg})
+
+    log.info(f"Gate pending: client={client_id} model={model_key} tool={tool_name} gate='{matched_gate}'")
+    approved = await wait_for_gate(client_id, timeout=120.0)
+
+    if approved:
+        log.info(f"Gate approved: client={client_id} tool={tool_name}")
+        return True, ""
+    else:
+        reason = (
+            f"GATE DENIED: tool call '{tool_name}' was denied by the user (or timed out). "
+            f"Do NOT retry the same call. Acknowledge the denial and continue without it."
+        )
+        log.info(f"Gate denied: client={client_id} tool={tool_name}")
+        return False, reason
+
+
 # --- Tool Execution ---
 
 async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
     # Set context var so executors can read client_id without it being a parameter
     current_client_id.set(client_id)
 
-    # Universal rate limit check (before gate — no point gating a rate-limited call)
+    # Universal rate limit check
     tool_type = get_tool_type(tool_name)
     rate_ok, rate_err = await check_rate_limit(client_id, tool_name, tool_type)
     if not rate_ok:
         await push_tok(client_id, f"\n[RATE LIMITED] {tool_name}: {rate_err}\n")
         return rate_err
 
-    allowed = await check_human_gate(client_id, tool_name, tool_args)
-    if not allowed:
-        # Provide clear, actionable feedback to the LLM about the rejection
-        rejection_msg = (
-            f"TOOL CALL REJECTED: The user rejected your {tool_name} request.\n\n"
-            f"IMPORTANT: Do NOT retry this tool call. Instead:\n"
-            f"1. Acknowledge the rejection to the user\n"
-            f"2. Explain what information you were trying to access\n"
-            f"3. Ask the user if they want to:\n"
-            f"   - Approve this specific request, or\n"
-            f"   - Provide the information manually, or\n"
-            f"   - Skip this step entirely\n\n"
-            f"Do NOT make the same tool call again without explicit user approval."
-        )
-        # Also show user-facing message about rejection
-        await push_tok(client_id, f"\n[REJECTED] {tool_name} call was denied by user.\n")
-        return rejection_msg
+    # Gate check — requires human approval if tool matches model's llm_tools_gates
+    sess_model = sessions.get(client_id, {}).get("model", "")
+    gate_ok, gate_err = await check_gate(client_id, sess_model, tool_name, tool_args)
+    if not gate_ok:
+        await push_tok(client_id, f"\n[GATE DENIED] {tool_name}\n")
+        return gate_err
 
     # Get executor function dynamically
     executor = get_tool_executor(tool_name)
@@ -490,7 +573,7 @@ def _try_parse_json_tool(raw: str) -> tuple[str, dict] | None:
     return None
 
 
-def try_force_tool_calls(text: str) -> list[tuple[str, dict, str]]:
+def try_force_tool_calls(text: str, valid_tool_names: set[str] | None = None) -> list[tuple[str, dict, str]]:
     """Extract all tool calls from model text output.
 
     Handles any format a model might use:
@@ -500,12 +583,15 @@ def try_force_tool_calls(text: str) -> list[tuple[str, dict, str]]:
       - bare {"name": ..., "arguments": ...} JSON anywhere in text
       - {{ }} brace-escaping (llama.cpp template artifact)
 
-    Tool names are validated against the live tool registry so plugin tools
-    work automatically without needing model-specific regex patterns.
+    Tool names are validated against valid_tool_names if provided, otherwise
+    against the full live tool registry. This ensures local models can only
+    invoke tools that are in their configured toolset.
     Falls back to SQL keyword heuristic as a last resort.
     """
-    from tools import get_all_openai_tools
-    valid_tools = {t["function"]["name"] for t in get_all_openai_tools()}
+    if valid_tool_names is None:
+        from tools import get_all_openai_tools
+        valid_tool_names = {t["function"]["name"] for t in get_all_openai_tools()}
+    valid_tools = valid_tool_names
 
     results = []
     seen_calls: set[str] = set()
@@ -630,7 +716,8 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
             if not ai_msg.tool_calls:
                 # Check for bare/XML tool calls from local models (Qwen, Hermes, etc.)
                 raw_text = _content_to_str(ai_msg.content)
-                forced_calls = try_force_tool_calls(raw_text)
+                _model_tool_names = {t.name for t in _model_tools} if _model_tools else None
+                forced_calls = try_force_tool_calls(raw_text, valid_tool_names=_model_tool_names)
                 if forced_calls:
                     tool_results = []
                     for tool_name, tool_args, _call_id in forced_calls:
@@ -783,7 +870,7 @@ async def llm_call(
 
     Parameters
     ----------
-    model      : Target model key (must have tool_call_available=true).
+    model      : Target model key (must exist in LLM_REGISTRY).
     prompt     : The prompt / user message to send.
     mode       : "text" — return raw text response.
                  "tool" — delegate a single tool call; requires `tool` argument.
@@ -803,11 +890,7 @@ async def llm_call(
     cfg = LLM_REGISTRY.get(model)
     if not cfg:
         return f"ERROR: Unknown model '{model}'. Use llm_list() to see available models."
-    if not cfg.get("tool_call_available", False):
-        return (
-            f"ERROR: Model '{model}' has tool_call_available=false. "
-            f"Use !llm_call {model} true to enable it."
-        )
+    # Permission = presence of llm_call tool in model's toolset (checked by caller)
 
     # ---- Validate mode ----
     if mode not in ("text", "tool"):
@@ -877,7 +960,7 @@ async def llm_call(
             f" {prompt[:80]}{'…' if len(prompt) > 80 else ''}\n"
         )
 
-    # ---- Gate bypass flag for history=caller (mirrors at_llm behavior) ----
+    # ---- Temp model flag for history=caller ----
     prev_temp = session.get("_temp_model_active", False)
     if history == "caller":
         session["_at_llm_depth"] = session.get("_at_llm_depth", 0) + 1
@@ -1007,7 +1090,6 @@ async def llm_list() -> str:
 
     lines = ["Available LLM models:\n"]
     for name, cfg in sorted(LLM_REGISTRY.items()):
-        available = "YES" if cfg.get("tool_call_available", False) else "NO"
         host = cfg.get("host") or "default"
         toolsets = cfg.get("llm_tools", [])
         lines.append(
@@ -1016,7 +1098,6 @@ async def llm_list() -> str:
             f"    model_id         : {cfg.get('model_id')}\n"
             f"    host             : {host}\n"
             f"    max_context      : {cfg.get('max_context')}\n"
-            f"    tool_call_avail  : {available}\n"
             f"    llm_tools        : {', '.join(toolsets) if toolsets else '(none)'}\n"
             f"    llm_call_timeout : {cfg.get('llm_call_timeout', 60)}s\n"
             f"    description      : {cfg.get('description', '')}\n"
@@ -1034,7 +1115,7 @@ async def agent_call(
     Call another agent-mcp instance (swarm/multi-agent coordination).
 
     Sends `message` to a remote agent at `agent_url` using the API client plugin.
-    The remote agent processes it through its full stack (LLM, tools, gates).
+    The remote agent processes it through its full stack (LLM, tools).
     Returns the complete text response.
 
     When stream=True (default), remote tokens are relayed via push_tok in real-time

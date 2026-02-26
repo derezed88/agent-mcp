@@ -3,7 +3,7 @@ model_settings.py — Typed getters and setters for per-model token-selection pa
 
 Getters return the live in-memory value from LLM_REGISTRY.
 Setters update LLM_REGISTRY in-place AND persist to llm-models.json via
-save_llm_model_field (same mechanism used by agentctl model commands).
+save_llm_model_field (same mechanism used by plugin-manager model commands).
 
 These functions are the single authoritative path for reading and writing
 temperature, top_p, top_k, and token_selection_setting.  Both routes.py
@@ -13,7 +13,8 @@ LLM_REGISTRY directly.
 Supported parameter ranges:
   temperature : float  0.0–2.0   (both OPENAI and GEMINI)
   top_p       : float  0.0–1.0   (both OPENAI and GEMINI)
-  top_k       : int    >= 1      (GEMINI only; raises ValueError for OPENAI)
+  top_k       : int    >= 1      (GEMINI native; also forwarded via model_kwargs for OPENAI-compatible
+                                  backends such as llama.cpp that accept it as an extra field)
   token_selection_setting : str  "default" or "custom"
 
 Plugin usage:
@@ -44,12 +45,8 @@ def _require_model(model_key: str) -> dict:
 
 
 def _require_gemini(model_key: str, cfg: dict, param: str):
-    """Raise ValueError if model is not GEMINI (top_k is GEMINI-only)."""
-    if cfg.get("type") != "GEMINI":
-        raise ValueError(
-            f"Parameter '{param}' is not supported for OPENAI-type model '{model_key}'. "
-            f"top_k is a Gemini-only parameter."
-        )
+    """No-op placeholder — top_k is now allowed for all model types."""
+    pass
 
 
 def _persist(model_key: str, field: str, value) -> None:
@@ -104,14 +101,14 @@ def set_model_top_p(model_key: str, value: float) -> None:
 
 
 # ---------------------------------------------------------------------------
-# top_k (GEMINI only)
+# top_k (GEMINI native; forwarded via model_kwargs for OPENAI-compatible backends)
 # ---------------------------------------------------------------------------
 
-def get_model_top_k(model_key: str) -> int:
-    """Return the stored top_k for model_key. Raises ValueError if model is OPENAI type."""
+def get_model_top_k(model_key: str) -> int | None:
+    """Return the stored top_k for model_key, or None if unset."""
     cfg = _require_model(model_key)
-    _require_gemini(model_key, cfg, "top_k")
-    return int(cfg.get("top_k", 40))
+    v = cfg.get("top_k")
+    return int(v) if v is not None else None
 
 
 def set_model_top_k(model_key: str, value: int) -> None:
