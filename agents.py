@@ -140,9 +140,9 @@ def _build_lc_llm(model_key: str):
             kwargs["top_p"]       = cfg.get("top_p", 1.0)
             top_k = cfg.get("top_k")
             if top_k is not None:
-                # Passed via model_kwargs so it's forwarded as an extra body field.
-                # Real OpenAI API ignores unknown fields; llama.cpp accepts top_k.
-                kwargs["model_kwargs"] = {"top_k": int(top_k)}
+                # extra_body forwards top_k as a top-level JSON field in the request.
+                # llama.cpp accepts it; real OpenAI API ignores unknown extra_body fields.
+                kwargs["extra_body"] = {"top_k": int(top_k)}
         return ChatOpenAI(**kwargs)
 
     if cfg["type"] == "GEMINI":
