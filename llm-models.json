@@ -201,6 +201,48 @@
       "top_k": 40,
       "token_selection_setting": "default",
       "llm_tools_gates": []
+    },
+    "summarizer-gemini": {
+      "model_id": "gemini-2.5-flash",
+      "type": "GEMINI",
+      "host": null,
+      "env_key": "GEMINI_API_KEY",
+      "max_context": 100000,
+      "enabled": true,
+      "description": "Google gemini-2.5-flash (summarizer role)",
+      "llm_call_timeout": 120,
+      "llm_tools": [
+        "get_system_info",
+        "drive",
+        "vscode"
+      ],
+      "system_prompt_folder": "system_prompt/003_claudeVSCode",
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 40,
+      "token_selection_setting": "default",
+      "llm_tools_gates": []
+    },
+    "summarizer-anthropic": {
+      "model_id": "claude-haiku-4-5-20251001",
+      "type": "OPENAI",
+      "host": "https://api.anthropic.com/v1",
+      "env_key": "ANTHROPIC_API_KEY",
+      "max_context": 100000,
+      "enabled": true,
+      "description": "Anthropic claude-haiku-4-5 (summarizer role)",
+      "llm_call_timeout": 120,
+      "llm_tools": [
+        "get_system_info",
+        "drive",
+        "vscode"
+      ],
+      "system_prompt_folder": "system_prompt/003_claudeVSCode",
+      "temperature": 1.0,
+      "top_p": null,
+      "top_k": null,
+      "token_selection_setting": "default",
+      "llm_tools_gates": []
     }
   },
   "limits": {
