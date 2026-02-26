@@ -159,6 +159,12 @@ async def push_tok(client_id: str, text: str):
 async def push_done(client_id: str):
     (await get_queue(client_id)).put_nowait({"t": "done"})
 
+async def push_flush(client_id: str):
+    """Intermediate flush: shell.py treats this like a soft done (clears reply buffer);
+    api_client ignores it and keeps streaming.  Use for tool-result round trips that
+    are followed by more LLM turns."""
+    (await get_queue(client_id)).put_nowait({"t": "flush"})
+
 async def push_err(client_id: str, msg: str):
     (await get_queue(client_id)).put_nowait({"t": "err", "d": msg})
     (await get_queue(client_id)).put_nowait({"t": "done"})

@@ -24,7 +24,7 @@ from langchain_core.messages import (
 import time
 
 from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, LIVE_LIMITS, LLM_TOOLSETS, save_llm_model_field
-from state import push_tok, push_done, push_err, current_client_id, sessions, wait_for_gate, resolve_gate, has_pending_gate
+from state import push_tok, push_done, push_flush, push_err, current_client_id, sessions, wait_for_gate, resolve_gate, has_pending_gate
 from prompt import get_current_prompt, load_prompt_for_folder
 from gate import check_human_gate
 from database import execute_sql
@@ -607,6 +607,12 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         # length so we can detect first-turn failures and retry with tool_choice='any'.
         _initial_ctx_len = len(ctx)
         _is_gemini = (LLM_REGISTRY.get(model_key, {}).get("type") == "GEMINI")
+        # Tool-call loop detection: track the last N consecutive tool-call fingerprints.
+        # If the same set of tool+args repeats >= _TOOL_LOOP_THRESHOLD times in a row,
+        # the model is stuck in a deterministic loop (Qwen3, Hermes, etc.).
+        _TOOL_LOOP_THRESHOLD = 2
+        _last_tc_fingerprint: str = ""
+        _tc_repeat_count: int = 0
         for _ in range(LIVE_LIMITS.get("max_tool_iterations", MAX_TOOL_ITERATIONS)):
             if not _suppress:
                 await push_tok(client_id, "\n[thinking…]\n")
@@ -693,6 +699,45 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                     return final
 
             # Execute all tool calls in this turn
+            # --- Loop detection ---
+            _tc_fp = "|".join(
+                sorted(f"{tc['name']}:{json.dumps(tc.get('args', {}), sort_keys=True)}"
+                       for tc in ai_msg.tool_calls)
+            )
+            if _tc_fp == _last_tc_fingerprint:
+                _tc_repeat_count += 1
+            else:
+                _last_tc_fingerprint = _tc_fp
+                _tc_repeat_count = 1
+            if _tc_repeat_count >= _TOOL_LOOP_THRESHOLD:
+                log.warning(
+                    f"agentic_lc: tool-call loop detected for model={model_key} "
+                    f"(repeated {_tc_repeat_count}x): {_tc_fp[:120]}"
+                )
+                await push_tok(client_id, "\n[tool-loop detected — asking model to respond in text]\n")
+                ctx.append(HumanMessage(
+                    content="You have already called the same tool(s) with the same arguments multiple times "
+                            "and received the results. Do NOT call any more tools. "
+                            "Provide your final answer as plain text now."
+                ))
+                # Ask model one more time without tools to force a text response
+                final = ""
+                try:
+                    llm_no_tools = llm  # unbound — no tools
+                    ai_final: AIMessage = await asyncio.wait_for(
+                        llm_no_tools.ainvoke(ctx),
+                        timeout=invoke_timeout,
+                    )
+                    final = _content_to_str(ai_final.content)
+                    if final:
+                        await push_tok(client_id, final)
+                    else:
+                        await push_tok(client_id, "[no response after loop break]")
+                except asyncio.TimeoutError:
+                    await push_tok(client_id, f"\n[LLM timeout after {invoke_timeout}s — aborting turn]\n")
+                await push_done(client_id)
+                return final
+            # ---------------------
             has_non_agent_call_output = False
             for tc in ai_msg.tool_calls:
                 is_streaming_agent_call = (
@@ -711,11 +756,11 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 # block — the batch behaviour observed in Test 6 (5-turn).
                 if is_streaming_agent_call:
                     await push_done(client_id)
-            # Signal end of this tool-call round trip for any non-agent_call tools
-            # (db_query, google_drive, etc.) so streaming clients see intermediate
-            # results before the LLM's next thinking step.
+            # Signal end of this tool-call round trip for non-agent_call tools.
+            # push_flush (not push_done) keeps api_client connected across tool
+            # round trips while still letting shell.py display intermediate results.
             if has_non_agent_call_output:
-                await push_done(client_id)
+                await push_flush(client_id)
 
         await push_tok(client_id, "\n[Max iterations]\n")
         await push_done(client_id)

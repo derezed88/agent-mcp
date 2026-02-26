@@ -385,7 +385,7 @@ async def sse_listener():
                         if line.startswith("event:"):
                             ev = line[6:]
                             current_event = (ev[1:] if ev.startswith(" ") else ev).strip()
-                            if current_event == "done":
+                            if current_event in ("done", "flush"):
                                 if current_reply:
                                     await state.append_output("")
                                     current_reply.clear()
