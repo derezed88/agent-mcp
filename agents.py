@@ -772,6 +772,35 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                             await push_done(client_id)
                             return final
                     else:
+                        # Empty response after tool results — Gemini sometimes returns
+                        # empty content when the answer is trivially obvious from the
+                        # tool result. Retry unbound (no tools) to force a text reply.
+                        if _is_gemini:
+                            log.warning(
+                                f"agentic_lc: empty post-tool response from {model_key}, "
+                                f"retrying unbound to force text reply"
+                            )
+                            ctx.pop()  # remove the empty ai_msg
+                            try:
+                                llm_no_tools = llm  # unbound — no tools
+                                ai_msg = await asyncio.wait_for(
+                                    llm_no_tools.ainvoke(ctx),
+                                    timeout=invoke_timeout,
+                                )
+                            except asyncio.TimeoutError:
+                                await push_tok(client_id, f"\n[LLM timeout after {invoke_timeout}s — aborting turn]\n")
+                                await push_done(client_id)
+                                return ""
+                            final = _content_to_str(ai_msg.content)
+                            if final:
+                                await push_tok(client_id, final)
+                            else:
+                                log.warning(
+                                    f"agentic_lc: empty response after unbound retry from model={model_key}"
+                                )
+                                await push_tok(client_id, "[empty string]")
+                            await push_done(client_id)
+                            return final
                         log.warning(
                             f"agentic_lc: empty response from model={model_key} "
                             f"client={client_id} ctx_len={len(ctx)} "
