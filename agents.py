@@ -16,7 +16,7 @@ from langchain_core.messages import (
 import time
 
 from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, LIVE_LIMITS, LLM_TOOLSETS, save_llm_model_field
-from state import push_tok, push_done, push_flush, push_err, current_client_id, sessions, wait_for_gate, resolve_gate, has_pending_gate
+from state import push_tok, push_done, push_flush, push_err, current_client_id, sessions, wait_for_gate, resolve_gate, has_pending_gate, update_session_token_stats
 from prompt import get_current_prompt, load_prompt_for_folder
 from database import execute_sql
 from tools import (
@@ -466,10 +466,16 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
             if tool_name == "db_query":
                 sql = tool_args.get("sql", "")
                 await push_tok(client_id, f"\n[db ▶] {sql}\n")
-            elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
-                await push_tok(client_id, f"\n[sysprompt ▶] {tool_name}…\n")
-            elif tool_name in ("sysprompt_list", "sysprompt_read"):
-                await push_tok(client_id, "\n[sysprompt ▶] reading…\n")
+            elif tool_name == "sysprompt_cfg":
+                action = tool_args.get("action", "?")
+                model = tool_args.get("model", "")
+                file = tool_args.get("file", "")
+                label = f"{action}"
+                if model:
+                    label += f" model={model}"
+                if file:
+                    label += f" file={file}"
+                await push_tok(client_id, f"\n[sysprompt ▶] {label}…\n")
             elif tool_name == "get_system_info":
                 await push_tok(client_id, "\n[sysinfo ▶] fetching…\n")
             elif tool_name == "google_search":
@@ -510,11 +516,9 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
                     await push_tok(client_id, f"[db ◀]\n{preview}\n")
                 else:
                     await push_tok(client_id, "[db ◀]\n")
-            elif tool_name in ("sysprompt_write", "sysprompt_delete", "sysprompt_copy_dir", "sysprompt_set_dir"):
-                await push_tok(client_id, f"[sysprompt ◀] {result}\n")
-            elif tool_name in ("sysprompt_list", "sysprompt_read"):
+            elif tool_name == "sysprompt_cfg":
                 if preview:
-                    await push_tok(client_id, f"[sysprompt ◀]\n{preview}\n")
+                    await push_tok(client_id, f"[sysprompt ◀] {preview}\n")
                 else:
                     await push_tok(client_id, "[sysprompt ◀]\n")
             elif tool_name == "get_system_info":
@@ -711,6 +715,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 await push_tok(client_id, f"\n[LLM timeout after {invoke_timeout}s — aborting turn]\n")
                 await push_done(client_id)
                 return ""
+            update_session_token_stats(sessions.get(client_id, {}), getattr(ai_msg, "usage_metadata", None) or {})
             ctx.append(ai_msg)
 
             if not ai_msg.tool_calls:
@@ -753,6 +758,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                             await push_tok(client_id, f"\n[LLM timeout after {invoke_timeout}s — aborting turn]\n")
                             await push_done(client_id)
                             return ""
+                        update_session_token_stats(sessions.get(client_id, {}), getattr(ai_msg, "usage_metadata", None) or {})
                         ctx.append(ai_msg)
                         if ai_msg.tool_calls:
                             # Tool calls generated — fall through to execute them below
@@ -776,27 +782,33 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                         # empty content when the answer is trivially obvious from the
                         # tool result. Retry unbound (no tools) to force a text reply.
                         if _is_gemini:
+                            # Gemini returns empty content + STOP after a tool result when
+                            # context is large. Inject an explicit nudge and retry once.
                             log.warning(
                                 f"agentic_lc: empty post-tool response from {model_key}, "
-                                f"retrying unbound to force text reply"
+                                f"injecting nudge and retrying once — "
+                                f"finish_reason={getattr(ai_msg, 'response_metadata', {}).get('finish_reason')}"
                             )
                             ctx.pop()  # remove the empty ai_msg
+                            ctx.append(HumanMessage(content="Please provide your final answer now as plain text."))
                             try:
-                                llm_no_tools = llm  # unbound — no tools
                                 ai_msg = await asyncio.wait_for(
-                                    llm_no_tools.ainvoke(ctx),
+                                    llm_with_tools.ainvoke(ctx),
                                     timeout=invoke_timeout,
                                 )
                             except asyncio.TimeoutError:
                                 await push_tok(client_id, f"\n[LLM timeout after {invoke_timeout}s — aborting turn]\n")
                                 await push_done(client_id)
                                 return ""
+                            update_session_token_stats(sessions.get(client_id, {}), getattr(ai_msg, "usage_metadata", None) or {})
                             final = _content_to_str(ai_msg.content)
                             if final:
                                 await push_tok(client_id, final)
                             else:
                                 log.warning(
-                                    f"agentic_lc: empty response after unbound retry from model={model_key}"
+                                    f"agentic_lc: empty response after nudge from model={model_key} "
+                                    f"finish_reason={getattr(ai_msg, 'response_metadata', {}).get('finish_reason')} "
+                                    f"tool_calls={getattr(ai_msg, 'tool_calls', 'n/a')}"
                                 )
                                 await push_tok(client_id, "[empty string]")
                             await push_done(client_id)
@@ -844,6 +856,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                         llm_no_tools.ainvoke(ctx),
                         timeout=invoke_timeout,
                     )
+                    update_session_token_stats(sessions.get(client_id, {}), getattr(ai_final, "usage_metadata", None) or {})
                     final = _content_to_str(ai_final.content)
                     if final:
                         await push_tok(client_id, final)

@@ -47,6 +47,154 @@ def load_history(session_id: str) -> list:
     return []
 
 
+def delete_history(session_id: str) -> bool:
+    """Delete the persisted history file for a session, if it exists. Returns True if deleted."""
+    path = os.path.join(SESSION_HISTORY_DIR, f"{_safe_filename(session_id)}.history")
+    if not os.path.exists(path):
+        return False
+    try:
+        os.remove(path)
+        _log.info(f"Session history file deleted: {path}")
+        return True
+    except Exception as e:
+        _log.warning(f"Failed to delete session history for {session_id}: {e}")
+        return False
+
+
+# Keys from the session dict that are user-configurable via !config and should
+# survive a reap/reconnect cycle.
+SESSION_CONFIG_KEYS = ("agent_call_stream", "tool_preview_length", "tool_suppress")
+
+
+def save_session_config(session_id: str, session: dict) -> None:
+    """Persist user-configurable session settings to disk."""
+    cfg = {k: session[k] for k in SESSION_CONFIG_KEYS if k in session}
+    if not cfg:
+        return
+    try:
+        os.makedirs(SESSION_HISTORY_DIR, exist_ok=True)
+        path = os.path.join(SESSION_HISTORY_DIR, f"{_safe_filename(session_id)}.config")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False)
+        _log.info(f"Session config saved: {path}")
+    except Exception as e:
+        _log.warning(f"Failed to save session config for {session_id}: {e}")
+
+
+def load_session_config(session_id: str) -> dict:
+    """Load persisted session config from disk. Returns {} if none exists."""
+    path = os.path.join(SESSION_HISTORY_DIR, f"{_safe_filename(session_id)}.config")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if isinstance(cfg, dict):
+            _log.info(f"Session config loaded: {path}")
+            return cfg
+    except Exception as e:
+        _log.warning(f"Failed to load session config for {session_id}: {e}")
+    return {}
+
+# ---------------------------------------------------------------------------
+# History size estimation
+# ---------------------------------------------------------------------------
+
+def estimate_history_size(history: list) -> dict:
+    """
+    Estimate the byte/token footprint of a session history list.
+
+    Returns a dict with:
+      char_count  - raw character count across all message content strings
+      token_est   - rough token estimate (chars / 4, the widely-used rule of thumb)
+    """
+    chars = 0
+    for msg in history:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            chars += len(content)
+        elif isinstance(content, list):
+            # LangChain multi-part content blocks
+            for part in content:
+                if isinstance(part, dict):
+                    chars += len(part.get("text", ""))
+                elif isinstance(part, str):
+                    chars += len(part)
+    return {"char_count": chars, "token_est": chars // 4}
+
+
+def update_session_token_stats(session: dict, usage_metadata: dict) -> None:
+    """
+    Accumulate real token counts from a LangChain usage_metadata dict.
+
+    Expected keys (all optional — not every backend provides all of them):
+      input_tokens, output_tokens, total_tokens
+
+    Session keys updated:
+      tokens_in_total   — cumulative input tokens (lifetime of session)
+      tokens_out_total  — cumulative output tokens
+      tokens_in_last    — input tokens from most recent LLM call
+      tokens_out_last   — output tokens from most recent LLM call
+    """
+    if not usage_metadata:
+        return
+    inp = usage_metadata.get("input_tokens", 0) or 0
+    out = usage_metadata.get("output_tokens", 0) or 0
+    if inp == 0 and out == 0:
+        return
+    session["tokens_in_total"] = session.get("tokens_in_total", 0) + inp
+    session["tokens_out_total"] = session.get("tokens_out_total", 0) + out
+    session["tokens_in_last"] = inp
+    session["tokens_out_last"] = out
+
+
+def format_session_token_line(session: dict) -> str:
+    """
+    Return a one-line summary of token usage for display in !session.
+
+    Includes: last-call counts, cumulative totals, and per-hour rates
+    (computed from session creation time stored in 'created_at').
+    """
+    import time as _time
+
+    in_total = session.get("tokens_in_total", 0)
+    out_total = session.get("tokens_out_total", 0)
+    in_last = session.get("tokens_in_last")
+    out_last = session.get("tokens_out_last")
+
+    # Per-hour rate: use session creation time; fall back to last_active if absent
+    created = session.get("created_at") or session.get("last_active")
+    if created:
+        elapsed_hours = max((_time.time() - created) / 3600.0, 1 / 3600.0)
+        in_rate = int(in_total / elapsed_hours)
+        out_rate = int(out_total / elapsed_hours)
+        rate_str = f", rate: in={_fmt_k(in_rate)}/hr out={_fmt_k(out_rate)}/hr"
+    else:
+        rate_str = ""
+
+    if in_total == 0 and out_total == 0:
+        return "  tokens: no LLM calls yet (or provider doesn't report usage)"
+
+    last_str = ""
+    if in_last is not None:
+        last_str = f"last: in={_fmt_k(in_last)} out={_fmt_k(out_last or 0)} | "
+
+    return (
+        f"  tokens: {last_str}"
+        f"total: in={_fmt_k(in_total)} out={_fmt_k(out_total)}"
+        f"{rate_str}"
+    )
+
+
+def _fmt_k(n: int) -> str:
+    """Format an integer compactly: 1234 -> '1.2k', 123456 -> '123k', 999 -> '999'."""
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    if n >= 1000:
+        return f"{n/1000:.1f}k"
+    return str(n)
+
+
 # Current client ID context variable — set in execute_tool() so executors can
 # read it without needing it as an explicit parameter.
 current_client_id: ContextVar[str] = ContextVar("current_client_id", default="")
@@ -88,51 +236,6 @@ def remove_shorthand_mapping(session_id: str):
 # or when the model is switched while a request is in flight.
 active_tasks: dict[str, asyncio.Task] = {}
 
-# Human gate
-pending_gates: dict[str, dict] = {}
-# Maps client_id -> gate_id while a gate is awaiting human response.
-# Used to detect when a new submission should be rejected rather than
-# cancelling a task that is legitimately blocked waiting for gate approval.
-client_active_gates: dict[str, str] = {}
-
-# autoAIdb state { table_name -> {"read": bool, "write": bool} }
-# True = gate OFF (auto-allow), False = gate ON (requires approval)
-auto_aidb_state: dict[str, dict[str, bool]] = {}
-
-# Tool gate state { tool_name -> {"read": bool, "write": bool} }
-# True = gate OFF (auto-allow), False = gate ON (requires approval)
-tool_gate_state: dict[str, dict[str, bool]] = {}
-
-_GATE_DEFAULTS_FILE = os.path.join(os.path.dirname(__file__), "gate-defaults.json")
-
-def load_gate_defaults():
-    """Load gate defaults from gate-defaults.json into auto_aidb_state and tool_gate_state."""
-    try:
-        with open(_GATE_DEFAULTS_FILE, "r") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return  # No defaults file — start with all gates ON (secure by default)
-    except (json.JSONDecodeError, OSError):
-        return
-
-    db_defaults = data.get("db", {})
-    for table, perms in db_defaults.items():
-        if isinstance(perms, dict):
-            auto_aidb_state[table] = {
-                "read":  bool(perms.get("read",  False)),
-                "write": bool(perms.get("write", False)),
-            }
-
-    tool_defaults = data.get("tools", {})
-    for tool, perms in tool_defaults.items():
-        if isinstance(perms, dict):
-            tool_gate_state[tool] = {
-                "read":  bool(perms.get("read",  False)),
-                "write": bool(perms.get("write", False)),
-            }
-
-load_gate_defaults()
-
 async def get_queue(client_id: str) -> asyncio.Queue:
     async with queue_lock:
         if client_id not in sse_queues:
@@ -169,20 +272,12 @@ async def push_err(client_id: str, msg: str):
     (await get_queue(client_id)).put_nowait({"t": "err", "d": msg})
     (await get_queue(client_id)).put_nowait({"t": "done"})
 
-async def push_gate(client_id: str, gate_data: dict):
-    client_active_gates[client_id] = gate_data["gate_id"]
-    (await get_queue(client_id)).put_nowait({"t": "gate", "d": gate_data})
-
-def clear_client_gate(client_id: str):
-    """Remove the active gate record for a client once it is resolved or cancelled."""
-    client_active_gates.pop(client_id, None)
-
 async def push_model(client_id: str, model_key: str):
     (await get_queue(client_id)).put_nowait({"t": "model", "d": model_key})
 
 # ---------------------------------------------------------------------------
-# Legacy gate API (asyncio.Future-based) — used by agents.py for inline gate checks.
-# The newer gate system uses push_gate()/clear_client_gate() above.
+# Gate infrastructure
+# Per-client pending gate requests: client_id -> asyncio.Future[bool]
 # ---------------------------------------------------------------------------
 _gate_futures: dict[str, asyncio.Future] = {}
 

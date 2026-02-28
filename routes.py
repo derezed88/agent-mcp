@@ -162,6 +162,17 @@ async def cmd_help(client_id: str):
         "    copy <source> <new_name>                 - copy model\n"
         "    delete <model>                           - delete model\n"
         "    enable/disable <model>                   - enable/disable model\n"
+        "  !model_cfg write <model> llm_tools_gates <entry1,entry2,...>\n"
+        "    Configure tool call gates requiring human approval before execution.\n"
+        "    Each entry is either a tool name or 'tool_name subcommand'.\n"
+        "    Examples:\n"
+        "      !model_cfg write gemini25f llm_tools_gates db_query\n"
+        "      !model_cfg write gemini25f llm_tools_gates db_query,model_cfg write\n"
+        "      !model_cfg write gemini25f llm_tools_gates   (empty = clear all gates)\n"
+        "    Gate behavior by client:\n"
+        "      shell.py : prompts user; next input is Y/N\n"
+        "      llama/slack : auto-denied (cannot prompt interactively)\n"
+        "      timeout 120s: auto-denied if no response\n"
         "  !sysprompt_cfg [list_dir|list|read|write|delete|copy_dir|set_dir] [model] [file|dir] [content]\n"
         "  !config [list|read|write] [key] [value]\n"
         "    list                                     - show all config settings\n"
@@ -448,12 +459,14 @@ async def cmd_set_model(client_id: str, key: str, session: dict):
 
 async def cmd_reset(client_id: str, session: dict):
     """Clear conversation history for current session."""
+    from state import delete_history
     history_len = len(session.get("history", []))
     session["history"] = []
     # Recompute history_max_ctx in case it was not set
     model_cfg = LLM_REGISTRY.get(session.get("model", ""), {})
     import plugin_history_default as _phd
     session["history_max_ctx"] = _phd.compute_effective_max_ctx(model_cfg)
+    delete_history(client_id)
     await push_tok(client_id, f"Conversation history cleared ({history_len} messages removed).")
     await conditional_push_done(client_id)
 
@@ -465,7 +478,7 @@ async def cmd_session(client_id: str, arg: str):
       !session <ID> attach    - switch to different session
       !session <ID> delete    - delete a session
     """
-    from state import sessions, get_or_create_shorthand_id, get_session_by_shorthand, remove_shorthand_mapping
+    from state import sessions, get_or_create_shorthand_id, get_session_by_shorthand, remove_shorthand_mapping, estimate_history_size, format_session_token_line
 
     parts = arg.split()
 
@@ -478,11 +491,21 @@ async def cmd_session(client_id: str, arg: str):
             for sid, data in sessions.items():
                 marker = " (current)" if sid == client_id else ""
                 model = data.get("model", "unknown")
-                history_len = len(data.get("history", []))
+                history = data.get("history", [])
+                history_len = len(history)
                 shorthand_id = get_or_create_shorthand_id(sid)
                 peer_ip = data.get("peer_ip")
                 ip_str = f", ip={peer_ip}" if peer_ip else ""
-                lines.append(f"  ID [{shorthand_id}] {sid}: model={model}, history={history_len} messages{ip_str}{marker}")
+                size = estimate_history_size(history)
+                char_k = size["char_count"]
+                tok_est = size["token_est"]
+                size_str = f" (~{char_k:,} chars, ~{tok_est:,} tok est)"
+                token_line = format_session_token_line(data)
+                lines.append(
+                    f"  ID [{shorthand_id}] {sid}: model={model}, "
+                    f"history={history_len} msgs{size_str}{ip_str}{marker}"
+                )
+                lines.append(token_line)
             await push_tok(client_id, "\n".join(lines))
     elif len(parts) == 2:
         target_arg, action = parts[0], parts[1].lower()
@@ -644,7 +667,7 @@ async def cmd_vscode(client_id: str, arg: str):
 
 
 async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip: str = None):
-    from state import get_or_create_shorthand_id
+    from state import get_or_create_shorthand_id, load_history, load_session_config
 
     if client_id not in sessions:
         # Enforce max_users limit before creating new session
@@ -661,14 +684,20 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         model_cfg = LLM_REGISTRY.get(model_key, {})
         import plugin_history_default as _phd
         effective_ctx = _phd.compute_effective_max_ctx(model_cfg)
+        import time as _time_init
+        prior_history = load_history(client_id)
+        prior_cfg = load_session_config(client_id)
         sessions[client_id] = {
             "model": model_key,
-            "history": [],
+            "history": prior_history,
             "history_max_ctx": effective_ctx,
-            "tool_preview_length": get_default_tool_preview_length(),
-            "tool_suppress": get_default_tool_suppress(),
+            "tool_preview_length": prior_cfg.get("tool_preview_length", get_default_tool_preview_length()),
+            "tool_suppress": prior_cfg.get("tool_suppress", get_default_tool_suppress()),
             "_client_id": client_id,
+            "created_at": _time_init.time(),
         }
+        if "agent_call_stream" in prior_cfg:
+            sessions[client_id]["agent_call_stream"] = prior_cfg["agent_call_stream"]
         # Assign shorthand ID when session is created
         get_or_create_shorthand_id(client_id)
     # Store/update peer IP whenever we have it
@@ -931,18 +960,22 @@ async def endpoint_stream(request: Request):
     if not client_id: return JSONResponse({"error": "Missing client_id"}, 400)
 
     # Register session on connect so it shows up in !session before first message
-    from state import get_or_create_shorthand_id
+    from state import get_or_create_shorthand_id, load_history, load_session_config
     if client_id not in sessions:
         import plugin_history_default as _phd
         _mcfg = LLM_REGISTRY.get(DEFAULT_MODEL, {})
+        prior_history = load_history(client_id)
+        prior_cfg = load_session_config(client_id)
         sessions[client_id] = {
             "model": DEFAULT_MODEL,
-            "history": [],
+            "history": prior_history,
             "history_max_ctx": _phd.compute_effective_max_ctx(_mcfg),
-            "tool_preview_length": get_default_tool_preview_length(),
-            "tool_suppress": get_default_tool_suppress(),
+            "tool_preview_length": prior_cfg.get("tool_preview_length", get_default_tool_preview_length()),
+            "tool_suppress": prior_cfg.get("tool_suppress", get_default_tool_suppress()),
             "_client_id": client_id,
         }
+        if "agent_call_stream" in prior_cfg:
+            sessions[client_id]["agent_call_stream"] = prior_cfg["agent_call_stream"]
         get_or_create_shorthand_id(client_id)
     peer_ip = request.client.host if request.client else None
     if peer_ip:
@@ -970,6 +1003,7 @@ async def endpoint_stream(request: Request):
             elif t == "done": yield {"event": "done", "data": ""}
             elif t == "err": yield {"event": "error", "data": json.dumps({"error": item["d"]})}
             elif t == "model": yield {"event": "model", "data": item["d"]}
+            elif t == "gate": yield {"event": "gate", "data": item["d"]}
 
     return EventSourceResponse(generator())
 
@@ -983,6 +1017,33 @@ async def endpoint_stop(request: Request) -> JSONResponse:
     if cancelled:
         await push_done(client_id)
     return JSONResponse({"status": "OK", "cancelled": cancelled})
+
+
+async def endpoint_gate_respond(request: Request) -> JSONResponse:
+    """
+    Resolve a pending gate request for a client.
+
+    POST /gate_respond
+    Body: {"client_id": "...", "approved": true|false}
+
+    Returns {"status": "ok", "resolved": true} if a gate was pending,
+    or {"status": "ok", "resolved": false} if no gate was waiting.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    client_id = payload.get("client_id")
+    approved = payload.get("approved")
+    if not client_id:
+        return JSONResponse({"error": "Missing client_id"}, status_code=400)
+    if not isinstance(approved, bool):
+        return JSONResponse({"error": "approved must be boolean"}, status_code=400)
+
+    from state import resolve_gate
+    resolved = resolve_gate(client_id, approved)
+    return JSONResponse({"status": "ok", "resolved": resolved})
 
 
 async def endpoint_health(request: Request) -> JSONResponse:

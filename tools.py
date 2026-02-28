@@ -21,12 +21,30 @@ async def db_query(sql: str) -> str:
 @mcp_server.tool()
 async def get_system_info() -> dict:
     """Return current date/time and status."""
-    return {
+    from state import current_client_id, sessions, estimate_history_size
+    result: dict = {
         "local_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "timezone": "PST",
         "status": "connected",
         "platform": platform.system(),
     }
+    cid = current_client_id.get("")
+    if cid and cid in sessions:
+        sess = sessions[cid]
+        history = sess.get("history", [])
+        size = estimate_history_size(history)
+        in_total = sess.get("tokens_in_total", 0)
+        out_total = sess.get("tokens_out_total", 0)
+        result["session_context"] = {
+            "history_messages": len(history),
+            "history_chars": size["char_count"],
+            "history_token_est": size["token_est"],
+            "llm_tokens_in_total": in_total,
+            "llm_tokens_out_total": out_total,
+            "llm_tokens_in_last": sess.get("tokens_in_last"),
+            "llm_tokens_out_last": sess.get("tokens_out_last"),
+        }
+    return result
 
 
 @mcp_server.tool()
@@ -67,40 +85,12 @@ async def google_drive(
 _PLUGIN_TOOLS_LC: list = []
 _PLUGIN_TOOL_EXECUTORS: dict = {}
 
-# Gate tool registry: tool_name -> {"type": str, "operations": list[str], "description": str}
-# type examples: "search", "drive", "db"
-# operations: ["read"], ["write"], ["read", "write"]
-_PLUGIN_GATE_TOOLS: dict = {}
-
 # Plugin command registry: command_name -> async handler(subcommand_or_args: str) -> str
 # Handlers have signature: async (args: str) -> str
 # Populated at startup by register_plugin_commands(); queried by routes.py dispatch.
 # Also stores optional help text per plugin: _PLUGIN_HELP[plugin_name] -> str
 _PLUGIN_COMMANDS: dict = {}   # cmd_name -> async handler
 _PLUGIN_HELP: dict = {}       # plugin_name -> help string (from get_help())
-
-
-def register_gate_tools(plugin_name: str, gate_tools: dict):
-    """
-    Register gated tools from a plugin.
-
-    Args:
-        plugin_name: Name of the plugin
-        gate_tools: Dict mapping tool_name -> {"type": str, "operations": list[str], "description": str}
-    """
-    global _PLUGIN_GATE_TOOLS
-    _PLUGIN_GATE_TOOLS.update(gate_tools)
-    log.info(f"Registered {len(gate_tools)} gate tool(s) from {plugin_name}: {list(gate_tools.keys())}")
-
-
-def get_gate_tools_by_type(tool_type: str) -> list[str]:
-    """Return all registered tool names of the given type (e.g. 'search')."""
-    return [name for name, meta in _PLUGIN_GATE_TOOLS.items() if meta.get("type") == tool_type]
-
-
-def get_all_gate_tools() -> dict:
-    """Return the full gate tool registry."""
-    return _PLUGIN_GATE_TOOLS
 
 
 def register_plugin_commands(plugin_name: str, commands: dict, help_text: str = ""):
@@ -152,7 +142,7 @@ def get_section_for_tool(tool_name: str) -> str:
     """
     Return the system prompt section body for a named tool.
     Tries 'tool-<name>' (hyphenated) and 'tool_<name>' (underscored) variants.
-    Used by llm_clean_tool to build the target model's system prompt.
+    Used by llm_call(mode='tool') to build the target model's system prompt.
     """
     # Try hyphenated form first (canonical: tool-url-extract)
     hyphenated = "tool-" + tool_name.replace("_", "-")
@@ -185,39 +175,19 @@ def get_core_tools():
         'lc': CORE_LC_TOOLS,
         'executors': {
             'get_system_info':       get_system_info,
-            'llm_clean_text':        _agents.llm_clean_text,
-            'llm_clean_tool':        _agents.llm_clean_tool,
+            'llm_call':              _agents.llm_call,
             'llm_list':              _agents.llm_list,
             'agent_call':            _agents.agent_call,
-            'sysprompt_list_dir':    _sysprompt_list_dir_exec,
-            'sysprompt_list':        _sysprompt_list_exec,
-            'sysprompt_read':        _sysprompt_read_exec,
-            'sysprompt_write':       _sysprompt_write_exec,
-            'sysprompt_delete':      _sysprompt_delete_exec,
-            'sysprompt_copy_dir':    _sysprompt_copy_dir_exec,
-            'sysprompt_set_dir':     _sysprompt_set_dir_exec,
             'session':               _session_exec,
             'model':                 _model_exec,
             'reset':                 _reset_exec,
             'help':                  _help_exec,
-            'llm_call':              _llm_call_exec,
-            'llm_timeout':           _llm_timeout_exec,
-            'stream':                _stream_exec,
-            'tool_preview_length':   _tool_preview_length_exec,
-            'gate_list':             _gate_list_exec,
-            'limit_depth_list':          _limit_depth_list_exec,
-            'limit_depth_set':           _limit_depth_set_exec,
-            'limit_rate_list':           _limit_rate_list_exec,
-            'limit_rate_set':            _limit_rate_set_exec,
-            'limit_max_iteration_list':  _limit_max_iteration_list_exec,
-            'limit_max_iteration_set':   _limit_max_iteration_set_exec,
-            'sleep':                     _sleep_exec,
-            'token_selection_list':      _token_selection_list_exec,
-            'token_selection_set':       _token_selection_set_exec,
-            'model_copy':                _model_copy_exec,
-            'model_delete':              _model_delete_exec,
-            'model_enable':              _model_enable_exec,
-            'model_disable':             _model_disable_exec,
+            'sleep':                 _sleep_exec,
+            'llm_tools':             _llm_tools_exec,
+            'model_cfg':             _model_cfg_exec,
+            'sysprompt_cfg':         _sysprompt_cfg_exec,
+            'config_cfg':            _config_cfg_exec,
+            'limits_cfg':            _limits_cfg_exec,
         }
     }
 
@@ -232,7 +202,7 @@ def get_all_openai_tools() -> list:
     Get all tool definitions in OpenAI dict format (core + plugins).
 
     Used by try_force_tool_calls() for tool name validation and by
-    get_openai_tool_schema() for llm_clean_tool. Derived from CORE_LC_TOOLS
+    get_openai_tool_schema() for llm_call(mode='tool'). Derived from CORE_LC_TOOLS
     and _PLUGIN_TOOLS_LC so there is a single source of truth.
     """
     return [_lc_tool_to_openai_dict(t) for t in CORE_LC_TOOLS + _PLUGIN_TOOLS_LC]
@@ -267,45 +237,22 @@ def _lc_tool_to_openai_dict(tool: StructuredTool) -> dict:
 
 
 # Tool type mapping for core (always-enabled) tools.
-# Plugin tools declare their type via get_gate_tools() metadata.
 # Used by execute_tool() for universal rate limiting.
 _CORE_TOOL_TYPES: dict[str, str] = {
     "get_system_info":       "system",
-    "llm_clean_text":        "llm_call",
-    "llm_clean_tool":        "llm_call",
-    "at_llm":                "llm_call",
+    "llm_call":              "llm_call",
     "llm_list":              "system",
     "agent_call":            "agent_call",
-    "sysprompt_list_dir":    "system",
-    "sysprompt_list":        "system",
-    "sysprompt_read":        "system",
-    "sysprompt_write":       "system",
-    "sysprompt_delete":      "system",
-    "sysprompt_copy_dir":    "system",
-    "sysprompt_set_dir":     "system",
     "session":               "system",
     "model":                 "system",
     "reset":                 "system",
     "help":                  "system",
-    "llm_call":              "system",
-    "llm_timeout":           "system",
-    "stream":                "system",
-    "tool_preview_length":   "system",
-    "gate_list":             "system",
-    "limit_depth_list":             "system",
-    "limit_depth_set":              "system",
-    "limit_rate_list":              "system",
-    "limit_rate_set":               "system",
-    "limit_max_iteration_list":     "system",
-    "limit_max_iteration_set":      "system",
-    "outbound_agent_filters":       "system",
-    "sleep":                        "system",
-    "token_selection_list":         "system",
-    "token_selection_set":          "system",
-    "model_copy":                   "system",
-    "model_delete":                 "system",
-    "model_enable":                 "system",
-    "model_disable":                "system",
+    "sleep":                 "system",
+    "llm_tools":             "system",
+    "model_cfg":             "system",
+    "sysprompt_cfg":         "system",
+    "config_cfg":            "system",
+    "limits_cfg":            "system",
 }
 
 
@@ -313,13 +260,10 @@ def get_tool_type(tool_name: str) -> str:
     """
     Return the tool type string for rate-limit bucketing.
 
-    Core tools use _CORE_TOOL_TYPES. Plugin tools use the gate registry type.
+    Core tools use _CORE_TOOL_TYPES.
     Falls back to 'system' (unlimited by default) for unknown tools.
     """
-    if tool_name in _CORE_TOOL_TYPES:
-        return _CORE_TOOL_TYPES[tool_name]
-    meta = _PLUGIN_GATE_TOOLS.get(tool_name, {})
-    return meta.get("type", "system")
+    return _CORE_TOOL_TYPES.get(tool_name, "system")
 
 
 def get_tool_executor(tool_name: str):
@@ -329,41 +273,19 @@ def get_tool_executor(tool_name: str):
 
     core_executors = {
         'get_system_info':       get_system_info,
-        'llm_clean_text':        _agents.llm_clean_text,
-        'llm_clean_tool':        _agents.llm_clean_tool,
-        'at_llm':                _agents.at_llm,
+        'llm_call':              _agents.llm_call,
         'llm_list':              _agents.llm_list,
         'agent_call':            _agents.agent_call,
-        'sysprompt_list_dir':    _sysprompt_list_dir_exec,
-        'sysprompt_list':        _sysprompt_list_exec,
-        'sysprompt_read':        _sysprompt_read_exec,
-        'sysprompt_write':       _sysprompt_write_exec,
-        'sysprompt_delete':      _sysprompt_delete_exec,
-        'sysprompt_copy_dir':    _sysprompt_copy_dir_exec,
-        'sysprompt_set_dir':     _sysprompt_set_dir_exec,
         'session':               _session_exec,
         'model':                 _model_exec,
         'reset':                 _reset_exec,
         'help':                  _help_exec,
-        'llm_call':              _llm_call_exec,
-        'llm_timeout':           _llm_timeout_exec,
-        'stream':                _stream_exec,
-        'tool_preview_length':   _tool_preview_length_exec,
-        'gate_list':             _gate_list_exec,
-        'limit_depth_list':          _limit_depth_list_exec,
-        'limit_depth_set':           _limit_depth_set_exec,
-        'limit_rate_list':           _limit_rate_list_exec,
-        'limit_rate_set':            _limit_rate_set_exec,
-        'limit_max_iteration_list':  _limit_max_iteration_list_exec,
-        'limit_max_iteration_set':   _limit_max_iteration_set_exec,
-        'outbound_agent_filters':    _outbound_agent_filters_exec,
-        'sleep':                     _sleep_exec,
-        'token_selection_list':      _token_selection_list_exec,
-        'token_selection_set':       _token_selection_set_exec,
-        'model_copy':                _model_copy_exec,
-        'model_delete':              _model_delete_exec,
-        'model_enable':              _model_enable_exec,
-        'model_disable':             _model_disable_exec,
+        'sleep':                 _sleep_exec,
+        'llm_tools':             _llm_tools_exec,
+        'model_cfg':             _model_cfg_exec,
+        'sysprompt_cfg':         _sysprompt_cfg_exec,
+        'config_cfg':            _config_cfg_exec,
+        'limits_cfg':            _limits_cfg_exec,
     }
 
     if tool_name in core_executors:
@@ -383,88 +305,43 @@ def get_tool_executor(tool_name: str):
 # ---------------------------------------------------------------------------
 
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Literal
 
 
 class _GetSystemInfoArgs(BaseModel):
     pass  # No arguments — explicit schema prevents LangChain from leaking the docstring into parameters
 
 
-class _LlmCleanTextArgs(BaseModel):
-    model: str = Field(description="Model key name. Use llm_list() to see valid names.")
-    prompt: str = Field(description="The complete self-contained prompt. Embed all data the target model needs here.")
-
-
-class _LlmCleanToolArgs(BaseModel):
-    model: str = Field(description="Model key name (e.g., 'nuc11Local'). Use llm_list() to see valid names.")
-    tool: str = Field(description="Exact tool name to delegate (e.g., 'url_extract', 'db_query', 'ddgs_search').")
-    arguments: str = Field(description="The user request / arguments to pass as the prompt to the target model. Be specific.")
-
-
-# ---------------------------------------------------------------------------
-# Sysprompt tool arg schemas
-# ---------------------------------------------------------------------------
-
-class _SyspromptListDirArgs(BaseModel):
-    pass
-
-
-class _SyspromptListArgs(BaseModel):
-    model: str = Field(
-        description="Model key name (use llm_list() to see valid names) or 'self' for the current model."
-    )
-
-
-class _SyspromptReadArgs(BaseModel):
-    model: str = Field(
-        description="Model key name or 'self' for the current model."
-    )
-    file: str = Field(
-        default="",
+class _LlmCallArgs(BaseModel):
+    model: str = Field(description="Target model key. Use llm_list() to see valid names.")
+    prompt: str = Field(description="The prompt / user message to send to the target model.")
+    mode: str = Field(
+        default="text",
         description=(
-            "Optional: specific file to read. Omit to read the full assembled prompt. "
-            "Can be a bare section name ('behavior'), a full filename ('.system_prompt_behavior'), "
-            "or '.system_prompt' for the root file."
+            "'text' — return the target model's raw text response (default). "
+            "'tool' — delegate a single tool call; requires the 'tool' argument."
         ),
     )
-
-
-class _SyspromptWriteArgs(BaseModel):
-    model: str = Field(description="Model key name or 'self' for the current model.")
-    file: str = Field(
+    sys_prompt: str = Field(
+        default="none",
         description=(
-            "File to write. Can be a bare section name ('behavior'), a full filename "
-            "('.system_prompt_behavior'), or '.system_prompt' for the root file."
-        )
-    )
-    data: str = Field(description="Content to write. Overwrites the file (creates if missing).")
-
-
-class _SyspromptDeleteArgs(BaseModel):
-    model: str = Field(description="Model key name or 'self' for the current model.")
-    file: str = Field(
-        default="",
-        description=(
-            "File to delete. Omit to delete the ENTIRE directory (also sets system_prompt_folder='none'). "
-            "Can be a bare section name or full filename."
+            "System prompt to send to the target model. "
+            "'none'   — no system prompt (clean call). "
+            "'caller' — inject the calling model's current assembled system prompt. "
+            "'target' — load the target model's own system_prompt_folder data."
         ),
     )
-
-
-class _SyspromptCopyDirArgs(BaseModel):
-    model: str = Field(description="Model key name or 'self' to copy FROM.")
-    new_dir: str = Field(
-        description="New directory name under system_prompt/ to copy TO (e.g., 'grok4_custom')."
-    )
-
-
-class _SyspromptSetDirArgs(BaseModel):
-    model: str = Field(description="Model key name or 'self' for the current model.")
-    dir: str = Field(
+    history: str = Field(
+        default="none",
         description=(
-            "Directory name under system_prompt/ to assign (e.g., '000_default', 'grok4_custom'). "
-            "Use 'none' to clear the folder assignment."
-        )
+            "Chat history to prepend. "
+            "'none'   — no history; clean single-turn call. "
+            "'caller' — prepend the calling session's full chat history."
+        ),
+    )
+    tool: str = Field(
+        default="",
+        description="Exact tool name to delegate. Required when mode='tool'.",
     )
 
 
@@ -500,71 +377,6 @@ class _HelpArgs(BaseModel):
     pass  # No arguments
 
 
-class _GateListArgs(BaseModel):
-    pass  # No arguments
-
-
-# ---------------------------------------------------------------------------
-# Meta-command tool arg schemas (llm_call, llm_timeout, stream, tool_preview_length)
-# ---------------------------------------------------------------------------
-
-class _LlmCallArgs(BaseModel):
-    action: Literal["list", "set"] = Field(
-        description="'list' to show tool_call_available status for all models, 'set' to change it."
-    )
-    model_key: str = Field(
-        default="",
-        description="Model key to change. Omit (or use '*') to apply to ALL models. Required when action='set'.",
-    )
-    enabled: Optional[bool] = Field(
-        default=None,
-        description="True to enable tool_call_available, False to disable. Required when action='set'.",
-    )
-
-
-class _LlmTimeoutArgs(BaseModel):
-    action: Literal["list", "set"] = Field(
-        description="'list' to show current timeouts, 'set' to change."
-    )
-    model_key: str = Field(
-        default="",
-        description="Model key to set timeout for. Omit (or use '*') to apply to ALL models.",
-    )
-    seconds: Optional[int] = Field(
-        default=None,
-        description="Timeout in seconds. Required when action='set'.",
-    )
-
-
-class _StreamArgs(BaseModel):
-    action: Literal["get", "set"] = Field(
-        description="'get' to show current streaming setting, 'set' to change it."
-    )
-    enabled: Optional[bool] = Field(
-        default=None,
-        description="True to enable streaming, False to disable. Required when action='set'.",
-    )
-
-
-class _ToolPreviewLengthArgs(BaseModel):
-    action: Literal["get", "set"] = Field(
-        description="'get' to show current preview length, 'set' to change it."
-    )
-    length: Optional[int] = Field(
-        default=None,
-        description="Number of characters to show (0 = unlimited). Required when action='set'.",
-    )
-
-
-class _AtLlmArgs(BaseModel):
-    model: str = Field(
-        description="Model key name. Use llm_list() to see valid names."
-    )
-    prompt: str = Field(
-        description="The prompt to send. The model receives the full chat history plus this prompt as a new user turn."
-    )
-
-
 class _AgentCallArgs(BaseModel):
     agent_url: str = Field(
         description="Base URL of the target agent-mcp instance, e.g. 'http://localhost:8767'. "
@@ -594,79 +406,6 @@ class _AgentCallArgs(BaseModel):
                     "Set to False to suppress streaming and return only the final result — "
                     "useful when the intermediate tokens would be noisy or are not needed."
     )
-
-
-# ---------------------------------------------------------------------------
-# Sysprompt tool executors
-# ---------------------------------------------------------------------------
-
-async def _sysprompt_list_dir_exec() -> str:
-    from prompt import sp_list_directories
-    return sp_list_directories()
-
-
-async def _sysprompt_list_exec(model: str) -> str:
-    from prompt import sp_list_files, sp_resolve_model
-    from config import LLM_REGISTRY
-    from state import current_client_id
-    from state import sessions
-    cid = current_client_id.get("")
-    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
-    resolved = sp_resolve_model(model, current_model)
-    return sp_list_files(resolved, LLM_REGISTRY)
-
-
-async def _sysprompt_read_exec(model: str, file: str = "") -> str:
-    from prompt import sp_read_prompt, sp_read_file, sp_resolve_model
-    from config import LLM_REGISTRY
-    from state import current_client_id, sessions
-    cid = current_client_id.get("")
-    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
-    resolved = sp_resolve_model(model, current_model)
-    if file:
-        return sp_read_file(resolved, file, LLM_REGISTRY)
-    return sp_read_prompt(resolved, LLM_REGISTRY)
-
-
-async def _sysprompt_write_exec(model: str, file: str, data: str) -> str:
-    from prompt import sp_write_file, sp_resolve_model
-    from config import LLM_REGISTRY
-    from state import current_client_id, sessions
-    cid = current_client_id.get("")
-    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
-    resolved = sp_resolve_model(model, current_model)
-    return sp_write_file(resolved, file, data, LLM_REGISTRY)
-
-
-async def _sysprompt_delete_exec(model: str, file: str = "") -> str:
-    from prompt import sp_delete_file, sp_delete_directory, sp_resolve_model
-    from config import LLM_REGISTRY
-    from state import current_client_id, sessions
-    cid = current_client_id.get("")
-    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
-    resolved = sp_resolve_model(model, current_model)
-    if file:
-        return sp_delete_file(resolved, file, LLM_REGISTRY)
-    return sp_delete_directory(resolved, LLM_REGISTRY)
-
-
-async def _sysprompt_copy_dir_exec(model: str, new_dir: str) -> str:
-    from prompt import sp_copy_directory, sp_resolve_model
-    from config import LLM_REGISTRY
-    from state import current_client_id, sessions
-    cid = current_client_id.get("")
-    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
-    resolved = sp_resolve_model(model, current_model)
-    return sp_copy_directory(resolved, new_dir, LLM_REGISTRY)
-
-
-async def _sysprompt_set_dir_exec(model: str, dir: str) -> str:
-    from prompt import sp_set_directory, sp_resolve_model
-    from state import current_client_id, sessions
-    cid = current_client_id.get("")
-    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
-    resolved = sp_resolve_model(model, current_model)
-    return sp_set_directory(resolved, dir)
 
 
 # ---------------------------------------------------------------------------
@@ -744,32 +483,25 @@ async def _model_exec(action: str, model_key: str = "") -> str:
 
 
 async def _reset_exec() -> str:
-    from state import current_client_id, sessions
+    from state import current_client_id, sessions, delete_history
     cid = current_client_id.get("")
     if not cid or cid not in sessions:
         return "ERROR: No active session context."
     history_len = len(sessions[cid].get("history", []))
     sessions[cid]["history"] = []
+    delete_history(cid)
     return f"Conversation history cleared ({history_len} messages removed)."
 
 
 async def _help_exec() -> str:
-    from tools import get_all_gate_tools
-    gate_tools = get_all_gate_tools()
-    tool_lines = []
-    for tool_name, meta in sorted(gate_tools.items(), key=lambda x: (x[1].get("type",""), x[0])):
-        desc = meta.get("description", "")
-        tool_lines.append(f"  {tool_name:<30} - {desc}")
     return (
         "Available commands: Use !help in the chat interface for full command list.\n"
         "Key tool calls (LLM-invocable):\n"
-        "  sysprompt_list_dir()          - list all system prompt directories\n"
-        "  sysprompt_list(model)         - list system prompt files for a model\n"
-        "  sysprompt_read(model, file)   - read full prompt or specific file\n"
-        "  sysprompt_write(model, file, data) - write a system prompt file\n"
-        "  sysprompt_delete(model, file) - delete file or entire folder\n"
-        "  sysprompt_copy_dir(model, new_dir) - copy prompt folder\n"
-        "  sysprompt_set_dir(model, dir) - assign prompt folder to model\n"
+        "  llm_tools(action, ...)        - manage named toolsets (list/read/write/delete/add)\n"
+        "  model_cfg(action, ...)        - unified model management (list/read/write/copy/delete/enable/disable)\n"
+        "  sysprompt_cfg(action, ...)    - unified system prompt management (list_dir/list/read/write/delete/copy_dir/set_dir)\n"
+        "  config_cfg(action, ...)       - manage session/server config (stream/tool_preview_length/tool_suppress/default_model)\n"
+        "  limits_cfg(action, ...)       - manage depth/iteration/rate limits\n"
         "  session(action, ...)          - list or delete sessions\n"
         "  model(action, ...)            - list or switch models\n"
         "  reset()                       - clear conversation history\n"
@@ -779,348 +511,10 @@ async def _help_exec() -> str:
         "  google_drive(operation, ...) - Google Drive CRUD\n"
         "  get_system_info()             - date/time/status\n"
         "  llm_list()                    - list LLM models\n"
-        "  llm_clean_text(model, prompt) - call LLM with no context\n"
-        "  llm_clean_tool(model, tool, arguments) - delegate tool call\n"
-        "  llm_call(action, ...)         - manage model delegation\n"
-        "  llm_timeout(action, ...)      - manage delegation timeouts\n"
-        "  stream(action, ...)           - control streaming mode\n"
-        "  tool_preview_length(action, ...) - control tool output display\n"
-        "  agent_call(agent_url, message) - call remote agent (write-gated)\n"
-        "  sleep(seconds)                - sleep 1–300 seconds (write-gated)\n"
-        "\nGated tools (listed below require human approval unless gate is off):\n"
-        + "\n".join(tool_lines)
+        "  llm_call(model, prompt, ...)  - call LLM (mode/sys_prompt/history/tool params)\n"
+        "  agent_call(agent_url, message) - call remote agent\n"
+        "  sleep(seconds)                - sleep 1-300 seconds\n"
     )
-
-
-async def _llm_call_exec(action: str, model_key: str = "", enabled: bool = None) -> str:
-    from config import LLM_REGISTRY
-    if action == "list":
-        lines = ["LLM tool_call_available status:"]
-        for name, cfg in sorted(LLM_REGISTRY.items()):
-            available = "YES" if cfg.get("tool_call_available", False) else "NO"
-            timeout = cfg.get("llm_call_timeout", 60)
-            desc = cfg.get("description", "")
-            lines.append(f"  {name:<14} tool_call={available}  timeout={timeout}s  {desc}")
-        return "\n".join(lines)
-    if action == "set":
-        if enabled is None:
-            return "ERROR: 'enabled' required for action='set'."
-        targets = [model_key] if model_key and model_key != "*" else list(LLM_REGISTRY.keys())
-        for name in targets:
-            if name not in LLM_REGISTRY:
-                return f"ERROR: Unknown model '{name}'."
-            LLM_REGISTRY[name]["tool_call_available"] = enabled
-        status = "enabled" if enabled else "disabled"
-        return f"tool_call_available={status} for: {', '.join(targets)} (runtime only — use agentctl model-llmcall to persist)."
-    return f"Unknown action '{action}'. Valid: list, set"
-
-
-async def _llm_timeout_exec(action: str, model_key: str = "", seconds: int = None) -> str:
-    from config import LLM_REGISTRY
-    if action == "list":
-        lines = ["LLM delegation timeouts:"]
-        for name, cfg in sorted(LLM_REGISTRY.items()):
-            t = cfg.get("llm_call_timeout", 60)
-            available = "YES" if cfg.get("tool_call_available", False) else "NO"
-            lines.append(f"  {name:<14} timeout={t}s  tool_call={available}")
-        return "\n".join(lines)
-    if action == "set":
-        if seconds is None or seconds < 1:
-            return "ERROR: 'seconds' must be a positive integer for action='set'."
-        targets = [model_key] if model_key and model_key != "*" else list(LLM_REGISTRY.keys())
-        for name in targets:
-            if name not in LLM_REGISTRY:
-                return f"ERROR: Unknown model '{name}'."
-            LLM_REGISTRY[name]["llm_call_timeout"] = seconds
-        return f"llm_call_timeout={seconds}s for: {', '.join(targets)} (runtime only — use agentctl model-timeout to persist)."
-    return f"Unknown action '{action}'. Valid: list, set"
-
-
-async def _stream_exec(action: str, enabled: bool = None) -> str:
-    from state import current_client_id, sessions
-    cid = current_client_id.get("")
-    if not cid or cid not in sessions:
-        return "ERROR: No active session context."
-    if action == "get":
-        current = sessions[cid].get("agent_call_stream", True)
-        return f"agent_call streaming: {'enabled' if current else 'disabled'}"
-    if action == "set":
-        if enabled is None:
-            return "ERROR: 'enabled' required for action='set'."
-        sessions[cid]["agent_call_stream"] = enabled
-        return f"agent_call streaming {'enabled' if enabled else 'disabled'}."
-    return f"Unknown action '{action}'. Valid: get, set"
-
-
-async def _tool_preview_length_exec(action: str, length: int = None) -> str:
-    from state import current_client_id, sessions
-    cid = current_client_id.get("")
-    if not cid or cid not in sessions:
-        return "ERROR: No active session context."
-    if action == "get":
-        current = sessions[cid].get("tool_preview_length", 500)
-        return f"Tool preview length: {'unlimited' if current == 0 else f'{current} chars'}"
-    if action == "set":
-        if length is None or length < 0:
-            return "ERROR: 'length' must be >= 0 (0 = unlimited) for action='set'."
-        sessions[cid]["tool_preview_length"] = length
-        return f"Tool preview length set to {'unlimited' if length == 0 else f'{length} chars'}."
-    return f"Unknown action '{action}'. Valid: get, set"
-
-
-async def _gate_list_exec() -> str:
-    from state import auto_aidb_state, tool_gate_state
-    from tools import get_all_gate_tools
-
-    def perm_str(is_auto: bool, perm: str) -> str:
-        """Format one permission: gate=ON/OFF then effect."""
-        if is_auto:
-            return f"gate=OFF ({perm}=auto-allow)"
-        else:
-            return f"gate=ON  ({perm}=gated)"
-
-    lines = [
-        "Gate status  (gate=ON → requires approval; gate=OFF → auto-allow)",
-        "  Runtime toggle: !<tool>_gate_read/write true=gate-ON  false=gate-OFF",
-    ]
-
-    # DB gates
-    lines.append("\ndb_query (per-table):")
-    if not auto_aidb_state:
-        lines.append("  (all tables gated by default)")
-    else:
-        for table in sorted(auto_aidb_state.keys()):
-            perms = auto_aidb_state[table]
-            label = "(default *)" if table == "*" else ("(metadata)" if table == "__meta__" else table)
-            r = perms.get("read", False)
-            w = perms.get("write", False)
-            lines.append(f"  {label:<20} read: {perm_str(r, 'read')}  write: {perm_str(w, 'write')}")
-
-    # Tool gates — iterate all gate-able tools from registry
-    lines.append("\nTool gates:")
-    gate_tools = get_all_gate_tools()
-    # Core gated tools not in plugin registry
-    _CORE_GATED = {
-        "agent_call":      ["write"],
-        "at_llm":          ["write"],
-        "sysprompt_write": ["write"],
-        "session":         ["read", "write"],
-        "model":           ["write"],
-        "reset":           ["write"],
-        "sleep":           ["read"],
-        "gate_list":            ["read"],
-        "limit_depth_list":         ["read"],
-        "limit_depth_set":          ["write"],
-        "limit_rate_list":          ["read"],
-        "limit_rate_set":           ["write"],
-        "limit_max_iteration_list": ["read"],
-        "limit_max_iteration_set":  ["write"],
-        "token_selection_list":     ["read"],
-        "token_selection_set":      ["write"],
-        "model_copy":               ["write"],
-        "model_delete":             ["write"],
-        "model_enable":             ["write"],
-        "model_disable":            ["write"],
-    }
-    all_tools = dict(_CORE_GATED)
-    for name, meta in gate_tools.items():
-        ops = meta.get("operations", ["read"])
-        all_tools[name] = ops
-    # db_query is handled separately via auto_aidb_state (per-table), never in Tool gates
-    all_tools.pop("db_query", None)
-    for tool in sorted(all_tools.keys()):
-        ops = all_tools[tool]
-        perms = tool_gate_state.get(tool, {})
-        default_perms = tool_gate_state.get("*", {})
-        parts = []
-        for op in ops:
-            val = perms.get(op, default_perms.get(op, False))
-            parts.append(f"{op}: {perm_str(val, op)}")
-        lines.append(f"  {tool:<22} {' '.join(parts)}")
-
-    return "\n".join(lines)
-
-
-_LIMIT_DEPTH_KEY_DESCRIPTIONS: dict[str, str] = {
-    "max_at_llm_depth":    "Max nested at_llm hops before rejection (1 = no recursion)",
-    "max_agent_call_depth": "Max nested agent_call hops before rejection (1 = no recursion)",
-}
-
-_LIMIT_MAX_ITER_DEFAULT = 10
-
-
-async def _limit_max_iteration_list_exec() -> str:
-    from config import LIVE_LIMITS
-    val = LIVE_LIMITS.get("max_tool_iterations", _LIMIT_MAX_ITER_DEFAULT)
-    lines = [
-        "Max Tool Iterations (per request):",
-        f"  {'Key':<26} {'Value':>6}  Description",
-        f"  {'-'*26} {'-'*6}  {'-'*50}",
-        f"  {'max_tool_iterations':<26} {str(val):>6}  Max LLM\u2194tool round-trips before [Max iterations] is emitted",
-        "",
-        "Changes take effect immediately. agentctl limit-max-iteration-set persists across restarts.",
-    ]
-    return "\n".join(lines)
-
-
-async def _limit_max_iteration_set_exec(value: int) -> str:
-    from config import LIVE_LIMITS
-    if value < 1:
-        return "ERROR: value must be >= 1."
-    old = LIVE_LIMITS.get("max_tool_iterations", _LIMIT_MAX_ITER_DEFAULT)
-    LIVE_LIMITS["max_tool_iterations"] = value
-    return f"max_tool_iterations: {old} \u2192 {value}. Applied immediately (runtime only \u2014 use agentctl limit-max-iteration-set to persist)."
-
-
-class _LimitMaxIterationListArgs(BaseModel):
-    pass
-
-
-class _LimitMaxIterationSetArgs(BaseModel):
-    value: int = Field(
-        description=(
-            "New max iterations value. Must be >= 1. "
-            "Controls how many LLM\u2194tool round-trips are allowed before the agent loop stops. "
-            "Default is 10. Increase for complex multi-tool tasks."
-        )
-    )
-
-
-async def _limit_depth_list_exec() -> str:
-    from config import LIVE_LIMITS
-    lines = ["Depth / Iteration Limits:"]
-    lines.append(f"  {'Key':<26} {'Value':>6}  Description")
-    lines.append(f"  {'-'*26} {'-'*6}  {'-'*40}")
-    for key, desc in sorted(_LIMIT_DEPTH_KEY_DESCRIPTIONS.items()):
-        val = LIVE_LIMITS.get(key, 1)
-        lines.append(f"  {key:<26} {str(val):>6}  {desc}")
-    lines.append("\nChanges take effect immediately. agentctl limit-depth-set persists across restarts.")
-    return "\n".join(lines)
-
-
-async def _limit_depth_set_exec(key: str, value: int) -> str:
-    from config import LIVE_LIMITS, save_limit_field
-    if key not in _LIMIT_DEPTH_KEY_DESCRIPTIONS:
-        valid = ", ".join(sorted(_LIMIT_DEPTH_KEY_DESCRIPTIONS.keys()))
-        return f"ERROR: Unknown limit key '{key}'. Valid keys: {valid}"
-    if value < 0:
-        return "ERROR: Value must be >= 0."
-    old = LIVE_LIMITS.get(key, 1)
-    LIVE_LIMITS[key] = value
-    return f"{key}: {old} → {value}. Applied immediately (runtime only — use agentctl limit-depth-set to persist)."
-
-
-class _LimitDepthListArgs(BaseModel):
-    pass
-
-
-class _LimitDepthSetArgs(BaseModel):
-    key: str = Field(
-        description=(
-            "Depth limit key to update. Valid keys: 'max_at_llm_depth', 'max_agent_call_depth'. "
-            "Use limit_depth_list() first to see current values and descriptions."
-        )
-    )
-    value: int = Field(
-        description="New integer value. Must be >= 0. (1 = no recursion/nesting, 0 = fully disabled)"
-    )
-
-
-async def _limit_rate_list_exec() -> str:
-    from config import RATE_LIMITS
-    lines = ["Rate Limits by Tool Type:"]
-    lines.append(f"  {'Tool Type':<14} {'Calls':>6}  {'Window':>8}  Auto-Disable")
-    lines.append(f"  {'-'*14} {'-'*6}  {'-'*8}  {'-'*12}")
-    for tool_type, cfg in sorted(RATE_LIMITS.items()):
-        calls = cfg.get("calls", 0)
-        window = cfg.get("window_seconds", 0)
-        auto_dis = cfg.get("auto_disable", False)
-        calls_str = "unlimited" if calls == 0 else str(calls)
-        window_str = "n/a" if window == 0 else f"{window}s"
-        auto_str = "YES" if auto_dis else "no"
-        lines.append(f"  {tool_type:<14} {calls_str:>6}  {window_str:>8}  {auto_str}")
-    lines.append("\nChanges take effect immediately. agentctl ratelimit-set persists across restarts.")
-    return "\n".join(lines)
-
-
-async def _limit_rate_set_exec(tool_type: str, calls: int, window_seconds: int) -> str:
-    from config import RATE_LIMITS
-    if calls < 0:
-        return "ERROR: calls must be >= 0 (0 = unlimited)."
-    if window_seconds < 0:
-        return "ERROR: window_seconds must be >= 0 (0 = unlimited)."
-    if tool_type not in RATE_LIMITS and calls == 0:
-        return f"ERROR: Unknown tool type '{tool_type}'. Known types: {', '.join(sorted(RATE_LIMITS.keys()))}"
-    old = RATE_LIMITS.get(tool_type, {})
-    old_calls = old.get("calls", 0)
-    old_window = old.get("window_seconds", 0)
-    if tool_type not in RATE_LIMITS:
-        RATE_LIMITS[tool_type] = {}
-    RATE_LIMITS[tool_type]["calls"] = calls
-    RATE_LIMITS[tool_type]["window_seconds"] = window_seconds
-    calls_str = "unlimited" if calls == 0 else str(calls)
-    old_calls_str = "unlimited" if old_calls == 0 else str(old_calls)
-    return (
-        f"{tool_type}: {old_calls_str}/{old_window}s → {calls_str}/{window_seconds}s. "
-        f"Applied immediately (runtime only — use agentctl ratelimit-set to persist)."
-    )
-
-
-class _LimitRateListArgs(BaseModel):
-    pass
-
-
-class _LimitRateSetArgs(BaseModel):
-    tool_type: str = Field(
-        description=(
-            "Tool type to update rate limit for. "
-            "Use limit_rate_list() first to see valid types and current values. "
-            "Common types: llm_call, search, drive, db, extract, system, agent_call, tmux."
-        )
-    )
-    calls: int = Field(
-        description="Max calls allowed within the window. 0 = unlimited."
-    )
-    window_seconds: int = Field(
-        description="Window duration in seconds. 0 = unlimited (no rate limit)."
-    )
-
-
-async def _outbound_agent_filters_exec() -> str:
-    """Return the current OUTBOUND_AGENT_ALLOWED/BLOCKED_COMMANDS configuration."""
-    import json as _json, os as _os
-    try:
-        path = _os.path.join(_os.path.dirname(__file__), "plugins-enabled.json")
-        with open(path, "r") as f:
-            cfg = _json.load(f)
-        api_cfg = cfg.get("plugin_config", {}).get("plugin_client_api", {})
-        allowed = api_cfg.get("OUTBOUND_AGENT_ALLOWED_COMMANDS", [])
-        blocked = api_cfg.get("OUTBOUND_AGENT_BLOCKED_COMMANDS", [])
-    except Exception as e:
-        return f"ERROR: Could not read outbound agent filters: {e}"
-
-    lines = ["Outbound agent message filters (applied to agent_call messages):"]
-    if allowed:
-        lines.append(f"  OUTBOUND_AGENT_ALLOWED_COMMANDS ({len(allowed)} entries):")
-        for p in allowed:
-            lines.append(f"    - {p}")
-        lines.append("  → Messages must start with one of the above prefixes.")
-    else:
-        lines.append("  OUTBOUND_AGENT_ALLOWED_COMMANDS: [] (empty — all messages permitted)")
-
-    if blocked:
-        lines.append(f"  OUTBOUND_AGENT_BLOCKED_COMMANDS ({len(blocked)} entries):")
-        for p in blocked:
-            lines.append(f"    - {p}")
-        lines.append("  → Messages must NOT start with any of the above prefixes.")
-    else:
-        lines.append("  OUTBOUND_AGENT_BLOCKED_COMMANDS: [] (empty — nothing blocked)")
-
-    return "\n".join(lines)
-
-
-class _OutboundAgentFiltersArgs(BaseModel):
-    pass
 
 
 class _SleepArgs(BaseModel):
@@ -1139,217 +533,496 @@ async def _sleep_exec(seconds: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Token Selection Tools — temperature / top_p / top_k / token_selection_setting
+# Unified resource tools: llm_tools, model_cfg, sysprompt_cfg, config_cfg, limits_cfg
+# These consolidate multiple individual tools into single CRUD-style resources.
 # ---------------------------------------------------------------------------
 
-async def _token_selection_list_exec(model: str = "") -> str:
-    """
-    List token selection settings (temperature, top_p, top_k, token_selection_setting)
-    for all models or a single model.
-    """
-    from model_settings import get_token_selection_setting
-    from config import LLM_REGISTRY
+class _LlmToolsArgs(BaseModel):
+    action: Literal["list", "read", "write", "delete", "add"] = Field(
+        description=(
+            "'list' — show all toolset names and their tool lists.\n"
+            "'read' — show a single toolset (requires name).\n"
+            "'write' — overwrite a toolset (requires name and tools).\n"
+            "'delete' — remove a toolset (requires name).\n"
+            "'add' — add tool names to an existing toolset (requires name and tools)."
+        )
+    )
+    name: str = Field(
+        default="",
+        description="Toolset name (e.g. 'core', 'db', 'search'). Required for read/write/delete/add.",
+    )
+    tools: str = Field(
+        default="",
+        description="Comma-separated tool names for write/add actions (e.g. 'db_query,search_ddgs').",
+    )
 
-    if model:
-        cfg = LLM_REGISTRY.get(model)
-        if cfg is None:
-            available = ", ".join(sorted(LLM_REGISTRY.keys()))
-            return f"ERROR: Unknown model '{model}'. Available: {available}"
-        setting = get_token_selection_setting(model)
-        mtype = cfg.get("type", "?")
-        lines = [
-            f"Model: {model} ({mtype})",
-            f"  token_selection_setting : {setting}",
-            f"  temperature             : {cfg.get('temperature', 'n/a')}",
-            f"  top_p                   : {cfg.get('top_p', 'n/a')}",
-            f"  top_k                   : {cfg.get('top_k', 'n/a')}  {'(GEMINI only)' if mtype == 'OPENAI' else ''}",
-        ]
+
+async def _llm_tools_exec(action: str, name: str = "", tools: str = "") -> str:
+    from config import LLM_TOOLSETS, LLM_REGISTRY, save_llm_toolset, delete_llm_toolset
+
+    if action == "list":
+        if not LLM_TOOLSETS:
+            return "No toolsets defined in llm-tools.json."
+        lines = ["Toolsets (llm-tools.json):"]
+        for ts_name in sorted(LLM_TOOLSETS.keys()):
+            tool_list = LLM_TOOLSETS[ts_name]
+            lines.append(f"  {ts_name}: {', '.join(tool_list)} ({len(tool_list)} tools)")
+        # Also show per-model assignments
+        lines.append("\nModel → toolsets:")
+        for model_name in sorted(LLM_REGISTRY.keys()):
+            ts = LLM_REGISTRY[model_name].get("llm_tools", [])
+            lines.append(f"  {model_name}: {', '.join(ts) if ts else '(none)'}")
         return "\n".join(lines)
 
-    lines = ["Token selection settings per model:"]
-    lines.append(f"  {'Model':<16} {'Type':<6} {'Mode':<8}  {'Temp':>5}  {'top_p':>6}  {'top_k':>6}")
-    lines.append(f"  {'-'*16} {'-'*6} {'-'*8}  {'-'*5}  {'-'*6}  {'-'*6}")
-    for name in sorted(LLM_REGISTRY.keys()):
-        cfg = LLM_REGISTRY[name]
-        setting = get_token_selection_setting(name)
-        mtype = cfg.get("type", "?")
-        temp = cfg.get("temperature", "n/a")
-        top_p = cfg.get("top_p", "n/a")
-        top_k = cfg.get("top_k", "n/a") if mtype == "GEMINI" else "N/A"
-        lines.append(f"  {name:<16} {mtype:<6} {setting:<8}  {str(temp):>5}  {str(top_p):>6}  {str(top_k):>6}")
-    lines.append("\nUse token_selection_set() to change settings. Changes persist to llm-models.json.")
-    return "\n".join(lines)
+    if action == "read":
+        if not name:
+            return "ERROR: 'name' required for action='read'."
+        ts = LLM_TOOLSETS.get(name)
+        if ts is None:
+            return f"ERROR: Toolset '{name}' not found. Use llm_tools(action='list') to see available toolsets."
+        return f"Toolset '{name}': {', '.join(ts)} ({len(ts)} tools)"
+
+    if action == "write":
+        if not name:
+            return "ERROR: 'name' required for action='write'."
+        if not tools:
+            return "ERROR: 'tools' required for action='write'. Provide comma-separated tool names."
+        tool_list = [t.strip() for t in tools.split(",") if t.strip()]
+        if save_llm_toolset(name, tool_list):
+            LLM_TOOLSETS[name] = tool_list
+            return f"Toolset '{name}' written: {', '.join(tool_list)} ({len(tool_list)} tools). Persisted to llm-tools.json."
+        return f"ERROR: Failed to save toolset '{name}'."
+
+    if action == "delete":
+        if not name:
+            return "ERROR: 'name' required for action='delete'."
+        ok, msg = delete_llm_toolset(name)
+        if ok:
+            LLM_TOOLSETS.pop(name, None)
+        return msg
+
+    if action == "add":
+        if not name:
+            return "ERROR: 'name' required for action='add'."
+        if not tools:
+            return "ERROR: 'tools' required for action='add'. Provide comma-separated tool names to add."
+        existing = LLM_TOOLSETS.get(name, [])
+        new_tools = [t.strip() for t in tools.split(",") if t.strip()]
+        merged = list(dict.fromkeys(existing + new_tools))  # preserve order, dedupe
+        if save_llm_toolset(name, merged):
+            LLM_TOOLSETS[name] = merged
+            added = [t for t in new_tools if t not in existing]
+            return f"Toolset '{name}' updated: added {', '.join(added) if added else '(no new tools)'}. Now {len(merged)} tools."
+        return f"ERROR: Failed to update toolset '{name}'."
+
+    return f"Unknown action '{action}'. Valid: list, read, write, delete, add"
 
 
-async def _token_selection_set_exec(
-    model: str,
-    param: str,
-    value: str,
-) -> str:
-    """
-    Set a token selection parameter for a model.
-    param must be one of: token_selection_setting, temperature, top_p, top_k
-    """
-    from model_settings import (
-        set_token_selection_setting,
-        set_model_temperature,
-        set_model_top_p,
-        set_model_top_k,
+class _ModelCfgArgs(BaseModel):
+    action: Literal["list", "read", "write", "copy", "delete", "enable", "disable"] = Field(
+        description=(
+            "'list' — show all models.\n"
+            "'read' — show full config for a model (requires name).\n"
+            "'write' — set a model field (requires name, field, value).\n"
+            "'copy' — copy a model (requires name=source, value=new_name).\n"
+            "'delete' — delete a model (requires name).\n"
+            "'enable' — enable a disabled model (requires name).\n"
+            "'disable' — disable a model (requires name)."
+        )
     )
-    from config import LLM_REGISTRY
-
-    if model not in LLM_REGISTRY:
-        available = ", ".join(sorted(LLM_REGISTRY.keys()))
-        return f"ERROR: Unknown model '{model}'. Available: {available}"
-
-    param = param.strip().lower()
-    try:
-        if param == "token_selection_setting":
-            set_token_selection_setting(model, value)
-            return f"token_selection_setting='{value}' for '{model}' (persisted to llm-models.json)."
-        elif param == "temperature":
-            set_model_temperature(model, float(value))
-            return f"temperature={value} for '{model}' (persisted to llm-models.json)."
-        elif param == "top_p":
-            set_model_top_p(model, float(value))
-            return f"top_p={value} for '{model}' (persisted to llm-models.json)."
-        elif param == "top_k":
-            set_model_top_k(model, int(value))
-            return f"top_k={value} for '{model}' (persisted to llm-models.json)."
-        else:
-            return (
-                f"ERROR: Unknown param '{param}'. "
-                "Valid params: token_selection_setting, temperature, top_p, top_k"
-            )
-    except (ValueError, TypeError, KeyError) as e:
-        return f"ERROR: {e}"
-
-
-class _TokenSelectionListArgs(BaseModel):
-    model: str = Field(
+    name: str = Field(default="", description="Model key (e.g. 'gemini25f').")
+    field: str = Field(
         default="",
         description=(
-            "Model key to inspect (e.g. 'gemini25f', 'gpt4om'). "
-            "Leave empty to list all models."
+            "Field to update for action='write'. "
+            "Valid fields: llm_tools, llm_tools_gates, llm_call_timeout, "
+            "temperature, top_p, top_k, token_selection_setting, system_prompt_folder, max_context."
         ),
     )
+    value: str = Field(default="", description="New value as string. For llm_tools, comma-separated toolset names.")
 
 
-class _TokenSelectionSetArgs(BaseModel):
-    model: str = Field(
-        description="Model key to update (e.g. 'gemini25f', 'gpt4om'). Use token_selection_list() to see valid keys."
+async def _model_cfg_exec(action: str, name: str = "", field: str = "", value: str = "") -> str:
+    from config import (
+        LLM_REGISTRY, save_llm_model_field, copy_llm_model, delete_llm_model,
+        enable_llm_model, disable_llm_model,
     )
-    param: str = Field(
+    from state import current_client_id, sessions, cancel_active_task
+
+    if action == "list":
+        if not LLM_REGISTRY:
+            return "No models registered."
+        lines = ["Registered models:"]
+        cid = current_client_id.get("")
+        current = sessions.get(cid, {}).get("model", "") if cid else ""
+        for key in sorted(LLM_REGISTRY.keys()):
+            cfg = LLM_REGISTRY[key]
+            marker = " (current)" if key == current else ""
+            ts = cfg.get("llm_tools", [])
+            lines.append(
+                f"  {key:<16} {cfg.get('model_id',''):<30} "
+                f"tools=[{','.join(ts)}]{marker}"
+            )
+        return "\n".join(lines)
+
+    if action == "read":
+        if not name:
+            return "ERROR: 'name' required for action='read'."
+        cfg = LLM_REGISTRY.get(name)
+        if not cfg:
+            return f"ERROR: Model '{name}' not found. Available: {', '.join(sorted(LLM_REGISTRY.keys()))}"
+        lines = [f"Model: {name}"]
+        for k, v in sorted(cfg.items()):
+            if k == "key":
+                lines.append(f"  {k}: {'***' if v else '(none)'}")
+            else:
+                lines.append(f"  {k}: {v}")
+        return "\n".join(lines)
+
+    if action == "write":
+        if not name:
+            return "ERROR: 'name' required for action='write'."
+        if not field:
+            return "ERROR: 'field' required for action='write'."
+        if name not in LLM_REGISTRY:
+            return f"ERROR: Model '{name}' not found."
+
+        # Type coercion for known fields
+        coerced_value = value
+        if field in ("llm_tools", "llm_tools_gates"):
+            # Accept comma-separated list; empty string clears the list
+            coerced_value = [t.strip() for t in value.split(",") if t.strip()]
+        elif field in ("llm_call_timeout", "max_context"):
+            try:
+                coerced_value = int(value)
+            except ValueError:
+                return f"ERROR: '{field}' must be an integer."
+        elif field in ("temperature", "top_p"):
+            try:
+                coerced_value = float(value)
+            except ValueError:
+                return f"ERROR: '{field}' must be a number."
+        elif field == "top_k":
+            if value.lower() == "null" or value.lower() == "none":
+                coerced_value = None
+            else:
+                try:
+                    coerced_value = int(value)
+                except ValueError:
+                    return f"ERROR: 'top_k' must be an integer or null."
+
+        old = LLM_REGISTRY[name].get(field, "(unset)")
+        LLM_REGISTRY[name][field] = coerced_value
+        if save_llm_model_field(name, field, coerced_value):
+            return f"{name}.{field}: {old} → {coerced_value} (persisted to llm-models.json)"
+        return f"{name}.{field}: {old} → {coerced_value} (runtime only — JSON write failed)"
+
+    if action == "copy":
+        if not name:
+            return "ERROR: 'name' (source model) required for action='copy'."
+        if not value:
+            return "ERROR: 'value' (new model name) required for action='copy'."
+        ok, msg = copy_llm_model(name, value)
+        return msg
+
+    if action == "delete":
+        if not name:
+            return "ERROR: 'name' required for action='delete'."
+        cid = current_client_id.get("")
+        if cid and sessions.get(cid, {}).get("model") == name:
+            return f"ERROR: Cannot delete '{name}' — it is the active model. Switch first."
+        ok, msg = delete_llm_model(name)
+        return msg
+
+    if action == "enable":
+        if not name:
+            return "ERROR: 'name' required for action='enable'."
+        ok, msg = enable_llm_model(name)
+        return msg
+
+    if action == "disable":
+        if not name:
+            return "ERROR: 'name' required for action='disable'."
+        ok, msg = disable_llm_model(name)
+        return msg
+
+    return f"Unknown action '{action}'. Valid: list, read, write, copy, delete, enable, disable"
+
+
+class _SyspromptCfgArgs(BaseModel):
+    action: Literal["list_dir", "list", "read", "write", "delete", "copy_dir", "set_dir"] = Field(
         description=(
-            "Parameter to set. Must be one of: "
-            "'token_selection_setting' (values: default|custom), "
-            "'temperature' (float 0.0–2.0), "
-            "'top_p' (float 0.0–1.0), "
-            "'top_k' (int >= 1, GEMINI models only)."
+            "'list_dir' — list all system prompt directories.\n"
+            "'list' — list files in a model's prompt dir (requires model).\n"
+            "'read' — read a prompt file or full assembled prompt (requires model; file optional).\n"
+            "'write' — write a prompt file (requires model, file, content).\n"
+            "'delete' — delete a file or entire dir (requires model; file optional).\n"
+            "'copy_dir' — copy prompt dir to new name (requires model, newdir).\n"
+            "'set_dir' — assign prompt dir to model (requires model, newdir)."
         )
     )
-    value: str = Field(
-        description=(
-            "New value as a string. Examples: '0.7', '0.95', '40', 'custom', 'default'. "
-            "For token_selection_setting: 'default' uses API defaults, 'custom' applies the stored values."
-        )
+    model: str = Field(default="", description="Model key or 'self' for current model.")
+    file: str = Field(default="", description="Section name or filename (e.g. 'behavior', '.system_prompt').")
+    content: str = Field(default="", description="Content to write (for action='write').")
+    newdir: str = Field(default="", description="New directory name (for copy_dir/set_dir).")
+
+
+async def _sysprompt_cfg_exec(
+    action: str, model: str = "", file: str = "", content: str = "", newdir: str = ""
+) -> str:
+    from prompt import (
+        sp_list_directories, sp_list_files, sp_read_prompt, sp_read_file,
+        sp_write_file, sp_delete_file, sp_delete_directory,
+        sp_copy_directory, sp_set_directory, sp_resolve_model,
     )
-
-
-# ---------------------------------------------------------------------------
-# Model copy / delete tool arg schemas and executors
-# ---------------------------------------------------------------------------
-
-class _ModelCopyArgs(BaseModel):
-    source_model: str = Field(
-        description=(
-            "Key of the existing model to copy from (e.g. 'gemini25f'). "
-            "Use model(action='list') or llm_list() to see valid keys."
-        )
-    )
-    new_model_name: str = Field(
-        description=(
-            "Unique key for the new model copy (e.g. 'gemini25f_lowtemp'). "
-            "Must not already exist. Use lowercase letters, digits, and underscores."
-        )
-    )
-
-
-class _ModelDeleteArgs(BaseModel):
-    model_name: str = Field(
-        description=(
-            "Key of the model to permanently delete (e.g. 'gemini25f_lowtemp'). "
-            "Use model(action='list') or llm_list() to see valid keys. "
-            "Cannot delete the currently active session model."
-        )
-    )
-
-
-async def _model_copy_exec(source_model: str, new_model_name: str) -> str:
-    from config import LLM_REGISTRY, copy_llm_model
-    if source_model not in LLM_REGISTRY:
-        available = ", ".join(sorted(LLM_REGISTRY.keys()))
-        return f"ERROR: Source model '{source_model}' not found.\nAvailable: {available}"
-    if new_model_name in LLM_REGISTRY:
-        return f"ERROR: Model '{new_model_name}' already exists. Choose a different name."
-    ok, msg = copy_llm_model(source_model, new_model_name)
-    if ok:
-        new_cfg = LLM_REGISTRY.get(new_model_name, {})
-        msg += (
-            f"\n  type={new_cfg.get('type')}, model_id={new_cfg.get('model_id')}"
-            f"\n  Use model(action='set', model_key='{new_model_name}') to switch, "
-            f"or token_selection_set() to adjust parameters."
-        )
-    return msg
-
-
-async def _model_delete_exec(model_name: str) -> str:
-    from config import LLM_REGISTRY, delete_llm_model
+    from config import LLM_REGISTRY
     from state import current_client_id, sessions
-    if model_name not in LLM_REGISTRY:
-        available = ", ".join(sorted(LLM_REGISTRY.keys()))
-        return f"ERROR: Model '{model_name}' not found.\nAvailable: {available}"
+
     cid = current_client_id.get("")
-    if cid and sessions.get(cid, {}).get("model") == model_name:
-        return (
-            f"ERROR: Cannot delete '{model_name}' — it is the active model for this session.\n"
-            f"Switch to a different model first with model(action='set', model_key=...), then retry."
-        )
-    ok, msg = delete_llm_model(model_name)
-    return msg
+    current_model = sessions.get(cid, {}).get("model", "") if cid else ""
+
+    if action == "list_dir":
+        return sp_list_directories()
+
+    if action == "list":
+        if not model:
+            return "ERROR: 'model' required for action='list'."
+        resolved = sp_resolve_model(model, current_model)
+        return sp_list_files(resolved, LLM_REGISTRY)
+
+    if action == "read":
+        if not model:
+            return "ERROR: 'model' required for action='read'."
+        resolved = sp_resolve_model(model, current_model)
+        if file:
+            return sp_read_file(resolved, file, LLM_REGISTRY)
+        return sp_read_prompt(resolved, LLM_REGISTRY)
+
+    if action == "write":
+        if not model:
+            return "ERROR: 'model' required for action='write'."
+        if not file:
+            return "ERROR: 'file' required for action='write'."
+        if not content:
+            return "ERROR: 'content' required for action='write'."
+        resolved = sp_resolve_model(model, current_model)
+        return sp_write_file(resolved, file, content, LLM_REGISTRY)
+
+    if action == "delete":
+        if not model:
+            return "ERROR: 'model' required for action='delete'."
+        resolved = sp_resolve_model(model, current_model)
+        if file:
+            return sp_delete_file(resolved, file, LLM_REGISTRY)
+        return sp_delete_directory(resolved, LLM_REGISTRY)
+
+    if action == "copy_dir":
+        if not model:
+            return "ERROR: 'model' required for action='copy_dir'."
+        if not newdir:
+            return "ERROR: 'newdir' required for action='copy_dir'."
+        resolved = sp_resolve_model(model, current_model)
+        return sp_copy_directory(resolved, newdir, LLM_REGISTRY)
+
+    if action == "set_dir":
+        if not model:
+            return "ERROR: 'model' required for action='set_dir'."
+        if not newdir:
+            return "ERROR: 'newdir' required for action='set_dir'."
+        resolved = sp_resolve_model(model, current_model)
+        return sp_set_directory(resolved, newdir)
+
+    return f"Unknown action '{action}'. Valid: list_dir, list, read, write, delete, copy_dir, set_dir"
 
 
-class _ModelEnableArgs(BaseModel):
-    model_name: str = Field(
+class _ConfigCfgArgs(BaseModel):
+    action: Literal["list", "read", "write"] = Field(
         description=(
-            "Key of the disabled model to enable (e.g. 'Win11'). "
-            "Use model(action='list') or llm_list() to see available keys. "
-            "A server restart is required for the change to take effect."
+            "'list' — show all session config keys and values.\n"
+            "'read' — show a single config key (requires key).\n"
+            "'write' — set a config key (requires key and value)."
         )
     )
-
-
-class _ModelDisableArgs(BaseModel):
-    model_name: str = Field(
+    key: str = Field(
+        default="",
         description=(
-            "Key of the model to disable (e.g. 'Win11'). "
-            "Cannot disable the current default model. "
-            "Use model(action='list') or llm_list() to see valid keys. "
-            "A server restart is required for the change to take effect."
+            "Config key. Valid keys: stream, tool_preview_length, tool_suppress, "
+            "default_model, outbound_agent_filters."
+        ),
+    )
+    value: str = Field(default="", description="New value as string.")
+
+
+async def _config_cfg_exec(action: str, key: str = "", value: str = "") -> str:
+    from state import current_client_id, sessions
+    from config import DEFAULT_MODEL, save_default_model, LLM_REGISTRY
+    import config as _config_mod
+
+    cid = current_client_id.get("")
+    sess = sessions.get(cid, {}) if cid else {}
+
+    _SESSION_KEYS = {
+        "stream":              ("agent_call_stream",  "bool",  True),
+        "tool_preview_length": ("tool_preview_length", "int",  500),
+        "tool_suppress":       ("tool_suppress",       "bool", False),
+    }
+
+    if action == "list":
+        lines = ["Session config:"]
+        for display_key, (sess_key, typ, default) in _SESSION_KEYS.items():
+            val = sess.get(sess_key, default)
+            lines.append(f"  {display_key}: {val}")
+        lines.append(f"\nServer config:")
+        lines.append(f"  default_model: {_config_mod.DEFAULT_MODEL}")
+        return "\n".join(lines)
+
+    if action == "read":
+        if not key:
+            return "ERROR: 'key' required for action='read'."
+        if key in _SESSION_KEYS:
+            sess_key, typ, default = _SESSION_KEYS[key]
+            val = sess.get(sess_key, default)
+            return f"{key}: {val}"
+        if key == "default_model":
+            return f"default_model: {_config_mod.DEFAULT_MODEL}"
+        if key == "outbound_agent_filters":
+            from agents import _outbound_agent_allowed, _outbound_agent_blocked
+            return f"allowed: {_outbound_agent_allowed}\nblocked: {_outbound_agent_blocked}"
+        return f"ERROR: Unknown config key '{key}'."
+
+    if action == "write":
+        if not key:
+            return "ERROR: 'key' required for action='write'."
+        if not value and key != "tool_suppress":
+            return "ERROR: 'value' required for action='write'."
+
+        if key in _SESSION_KEYS:
+            sess_key, typ, default = _SESSION_KEYS[key]
+            if not cid or cid not in sessions:
+                return "ERROR: No active session context."
+            if typ == "bool":
+                coerced = value.lower() in ("true", "1", "yes")
+            elif typ == "int":
+                try:
+                    coerced = int(value)
+                except ValueError:
+                    return f"ERROR: '{key}' must be an integer."
+            else:
+                coerced = value
+            old = sess.get(sess_key, default)
+            sessions[cid][sess_key] = coerced
+            from state import save_session_config
+            save_session_config(cid, sessions[cid])
+            return f"{key}: {old} → {coerced}"
+
+        if key == "default_model":
+            if value not in LLM_REGISTRY:
+                return f"ERROR: Model '{value}' not found."
+            old = _config_mod.DEFAULT_MODEL
+            _config_mod.DEFAULT_MODEL = value
+            save_default_model(value)
+            return f"default_model: {old} → {value} (persisted)"
+
+        return f"ERROR: Unknown config key '{key}'."
+
+    return f"Unknown action '{action}'. Valid: list, read, write"
+
+
+class _LimitsCfgArgs(BaseModel):
+    action: Literal["list", "read", "write"] = Field(
+        description=(
+            "'list' — show all limits.\n"
+            "'read' — show a single limit (requires key).\n"
+            "'write' — set a limit (requires key and value)."
         )
     )
+    key: str = Field(
+        default="",
+        description=(
+            "Limit key. Valid keys: max_at_llm_depth, max_agent_call_depth, "
+            "max_tool_iterations, rate_<type>_calls, rate_<type>_window."
+        ),
+    )
+    value: str = Field(default="", description="New integer value.")
 
 
-async def _model_enable_exec(model_name: str) -> str:
-    from config import enable_llm_model
-    ok, msg = enable_llm_model(model_name)
-    return msg
+async def _limits_cfg_exec(action: str, key: str = "", value: str = "") -> str:
+    from config import LIVE_LIMITS, RATE_LIMITS, save_limit_field, save_rate_limit
 
+    _DEPTH_KEYS = {
+        "max_at_llm_depth": "Max nested llm_call(history=caller) hops",
+        "max_agent_call_depth": "Max nested agent_call hops",
+        "max_tool_iterations": "Max LLM↔tool round-trips per request",
+    }
 
-async def _model_disable_exec(model_name: str) -> str:
-    from config import disable_llm_model
-    ok, msg = disable_llm_model(model_name)
-    return msg
+    if action == "list":
+        lines = ["Depth / iteration limits:"]
+        for k, desc in sorted(_DEPTH_KEYS.items()):
+            val = LIVE_LIMITS.get(k, 1)
+            lines.append(f"  {k}: {val} — {desc}")
+        lines.append("\nRate limits:")
+        for tool_type in sorted(RATE_LIMITS.keys()):
+            cfg = RATE_LIMITS[tool_type]
+            calls = cfg.get("calls", 0)
+            window = cfg.get("window_seconds", 0)
+            auto = cfg.get("auto_disable", False)
+            lines.append(
+                f"  {tool_type}: {calls} calls / {window}s"
+                f"{' (auto-disable)' if auto else ''}"
+            )
+        return "\n".join(lines)
+
+    if action == "read":
+        if not key:
+            return "ERROR: 'key' required for action='read'."
+        if key in _DEPTH_KEYS:
+            val = LIVE_LIMITS.get(key, 1)
+            return f"{key}: {val} — {_DEPTH_KEYS[key]}"
+        # Rate limit keys: rate_<type>_calls or rate_<type>_window
+        if key.startswith("rate_"):
+            parts = key.split("_")
+            if len(parts) >= 3 and parts[-1] in ("calls", "window"):
+                tool_type = "_".join(parts[1:-1])
+                field = parts[-1] if parts[-1] == "calls" else "window_seconds"
+                cfg = RATE_LIMITS.get(tool_type, {})
+                val = cfg.get(field, 0)
+                return f"{key}: {val}"
+        return f"ERROR: Unknown limit key '{key}'."
+
+    if action == "write":
+        if not key:
+            return "ERROR: 'key' required for action='write'."
+        if not value:
+            return "ERROR: 'value' required for action='write'."
+        try:
+            int_val = int(value)
+        except ValueError:
+            return "ERROR: value must be an integer."
+
+        if key in _DEPTH_KEYS:
+            if int_val < 0:
+                return "ERROR: Value must be >= 0."
+            old = LIVE_LIMITS.get(key, 1)
+            LIVE_LIMITS[key] = int_val
+            save_limit_field(key, int_val)
+            return f"{key}: {old} → {int_val} (persisted)"
+
+        # Rate limit keys
+        if key.startswith("rate_"):
+            parts = key.split("_")
+            if len(parts) >= 3 and parts[-1] in ("calls", "window"):
+                tool_type = "_".join(parts[1:-1])
+                field = parts[-1] if parts[-1] == "calls" else "window_seconds"
+                if tool_type not in RATE_LIMITS:
+                    RATE_LIMITS[tool_type] = {}
+                old = RATE_LIMITS[tool_type].get(field, 0)
+                RATE_LIMITS[tool_type][field] = int_val
+                save_rate_limit(tool_type, field, int_val)
+                return f"{key}: {old} → {int_val} (persisted)"
+
+        return f"ERROR: Unknown limit key '{key}'."
+
+    return f"Unknown action '{action}'. Valid: list, read, write"
 
 
 def _make_core_lc_tools() -> list:
@@ -1363,42 +1036,37 @@ def _make_core_lc_tools() -> list:
             args_schema=_GetSystemInfoArgs,
         ),
         StructuredTool.from_function(
-            coroutine=_agents.llm_clean_text,
-            name="llm_clean_text",
+            coroutine=_agents.llm_call,
+            name="llm_call",
             description=(
-                "Call a target LLM model with a single prompt and absolutely no context. "
-                "The target model receives ONLY the prompt text — no system prompt, no chat "
-                "history, no tool definitions, and no session state. "
-                "The response is the raw text returned by the target model. "
-                "Only models with tool_call_available=true may be called. "
-                "Use llm_list() first to see which models are available. "
-                "Best for: summarization, analysis, or formatting of data you embed in the prompt. "
-                "Subject to rate limiting (default: 3 calls per 20 seconds per session)."
+                "Call a target LLM model with full control over system prompt and history.\n\n"
+                "Parameters:\n"
+                "  model      — target model key (use llm_list() to see valid names)\n"
+                "  prompt     — the user message to send\n"
+                "  mode       — 'text' (default): return raw text response\n"
+                "               'tool': delegate a single tool call; requires 'tool' argument\n"
+                "  sys_prompt — 'none' (default): no system prompt sent\n"
+                "               'caller': inject the calling model's assembled system prompt\n"
+                "               'target': load the target model's own system_prompt_folder\n"
+                "  history    — 'none' (default): clean single-turn call\n"
+                "               'caller': prepend the calling session's full chat history\n"
+                "  tool       — exact tool name; required when mode='tool'\n\n"
+                "Common patterns:\n"
+                "  Summarize text cleanly:     mode=text sys_prompt=none  history=none\n"
+                "  Delegate with full context: mode=text sys_prompt=target history=caller\n"
+                "  Offload a tool call:        mode=tool sys_prompt=none  history=none  tool=url_extract\n"
+                "  Expert tool call:           mode=tool sys_prompt=target history=none  tool=db_query\n\n"
+                "Rate limited (default: 3 calls per 20 seconds per session)."
             ),
-            args_schema=_LlmCleanTextArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_agents.llm_clean_tool,
-            name="llm_clean_tool",
-            description=(
-                "Delegate a single tool call to a target LLM with no session context. "
-                "The target model receives only the named tool's definition as its system prompt "
-                "and the arguments string as the user message. "
-                "The server executes the tool call (normal gates apply) and returns the result "
-                "to the target model for synthesis. Only the final text is returned to you. "
-                "Use this to offload tool execution to a free/local model. "
-                "Only models with tool_call_available=true may be called. "
-                "Subject to rate limiting (same bucket as llm_clean_text)."
-            ),
-            args_schema=_LlmCleanToolArgs,
+            args_schema=_LlmCallArgs,
         ),
         StructuredTool.from_function(
             coroutine=_agents.llm_list,
             name="llm_list",
             description=(
                 "List all registered LLM models with their details: type, model_id, host, "
-                "max_context, tool_call_available status, timeout, and description. "
-                "Use this before calling llm_clean_text or llm_clean_tool to identify a suitable target model."
+                "max_context, timeout, and description. "
+                "Use this before calling llm_call to identify a suitable target model."
             ),
         ),
         StructuredTool.from_function(
@@ -1417,94 +1085,9 @@ def _make_core_lc_tools() -> list:
                 "Max swarm depth errors.\n\n"
                 "Rate limited: 5 calls per 60 seconds per session. "
                 "By default (stream=True) remote tokens are relayed in real-time for live Slack progress. "
-                "Set stream=False to suppress streaming and return only the final result. "
-                "Requires write gate approval (controlled by !agent_call_gate_write). Default: gated."
+                "Set stream=False to suppress streaming and return only the final result."
             ),
             args_schema=_AgentCallArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_agents.at_llm,
-            name="at_llm",
-            description=(
-                "Call a named LLM model using the FULL current session context "
-                "(system prompt + complete chat history + the given prompt as a new user turn). "
-                "Equivalent to the @<model> prefix syntax but usable as a tool call. "
-                "The result is NOT added to the session history. "
-                "All tool gates are bypassed for the called model (same as @<model>). "
-                "Use this to get a second opinion, delegate a sub-question, or query "
-                "a specialised model mid-conversation without switching models permanently. "
-                "Subject to rate limiting (same bucket as llm_clean_text). "
-                "Requires at_llm write gate approval (controlled by !at_llm_gate_write). "
-                "Default: gated."
-            ),
-            args_schema=_AtLlmArgs,
-        ),
-        # --- Sysprompt management tools ---
-        StructuredTool.from_function(
-            coroutine=_sysprompt_list_dir_exec,
-            name="sysprompt_list_dir",
-            description=(
-                "List all available directories in the system_prompt/ base directory. "
-                "Use this to discover which prompt folders exist before assigning one to a model."
-            ),
-            args_schema=_SyspromptListDirArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_sysprompt_list_exec,
-            name="sysprompt_list",
-            description=(
-                "List all .system_prompt* files in a model's system prompt folder. "
-                "Use model='self' for the current model."
-            ),
-            args_schema=_SyspromptListArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_sysprompt_read_exec,
-            name="sysprompt_read",
-            description=(
-                "Read the system prompt for a model. Omit 'file' to get the full assembled prompt. "
-                "Specify 'file' to read a specific section file. Use model='self' for current model."
-            ),
-            args_schema=_SyspromptReadArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_sysprompt_write_exec,
-            name="sysprompt_write",
-            description=(
-                "Overwrite or create a system prompt file for a model. "
-                "Use model='self' for the current model. "
-                "The file argument can be a section name ('behavior') or full filename ('.system_prompt_behavior'). "
-                "WARNING: This overwrites the entire file. Requires gate approval."
-            ),
-            args_schema=_SyspromptWriteArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_sysprompt_delete_exec,
-            name="sysprompt_delete",
-            description=(
-                "Delete a system prompt file (or the entire folder) for a model. "
-                "Omit 'file' to delete the ENTIRE directory and set folder='none'. "
-                "Use model='self' for the current model. Requires gate approval."
-            ),
-            args_schema=_SyspromptDeleteArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_sysprompt_copy_dir_exec,
-            name="sysprompt_copy_dir",
-            description=(
-                "Copy a model's system prompt folder to a new directory under system_prompt/. "
-                "Use model='self' for the current model. Requires gate approval."
-            ),
-            args_schema=_SyspromptCopyDirArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_sysprompt_set_dir_exec,
-            name="sysprompt_set_dir",
-            description=(
-                "Assign a model's system_prompt_folder to an existing directory under system_prompt/. "
-                "Use 'none' to clear the folder. Persists to llm-models.json. Requires gate approval."
-            ),
-            args_schema=_SyspromptSetDirArgs,
         ),
         # --- Session / model / reset / help tools ---
         StructuredTool.from_function(
@@ -1512,8 +1095,7 @@ def _make_core_lc_tools() -> list:
             name="session",
             description=(
                 "Manage agent sessions. action='list' shows all active sessions. "
-                "action='delete' removes a session (requires session_id, can be shorthand integer or full ID). "
-                "List requires read gate approval; delete requires write gate approval."
+                "action='delete' removes a session (requires session_id, can be shorthand integer or full ID)."
             ),
             args_schema=_SessionArgs,
         ),
@@ -1522,8 +1104,7 @@ def _make_core_lc_tools() -> list:
             name="model",
             description=(
                 "Manage the active LLM model. action='list' shows all available models. "
-                "action='set' switches the active model for this session (requires model_key). "
-                "List is always allowed; set requires write gate approval."
+                "action='set' switches the active model for this session (requires model_key)."
             ),
             args_schema=_ModelArgs,
         ),
@@ -1531,8 +1112,7 @@ def _make_core_lc_tools() -> list:
             coroutine=_reset_exec,
             name="reset",
             description=(
-                "Clear conversation history for the current session. "
-                "Requires write gate approval."
+                "Clear conversation history for the current session."
             ),
             args_schema=_ResetArgs,
         ),
@@ -1542,217 +1122,73 @@ def _make_core_lc_tools() -> list:
             description="Return a summary of available commands and tool calls.",
             args_schema=_HelpArgs,
         ),
-        # --- Meta-command tools (also accessible via !commands) ---
-        StructuredTool.from_function(
-            coroutine=_llm_call_exec,
-            name="llm_call",
-            description=(
-                "Manage the tool_call_available flag for LLM models. "
-                "action='list' shows all models with their tool_call_available status. "
-                "action='set' enables/disables delegation for a model (or all models if model_key is omitted). "
-                "Always allowed (no gate)."
-            ),
-            args_schema=_LlmCallArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_llm_timeout_exec,
-            name="llm_timeout",
-            description=(
-                "Manage llm_call_timeout for LLM delegation. "
-                "action='list' shows current timeouts. "
-                "action='set' updates the timeout in seconds (omit model_key to set all models). "
-                "Always allowed (no gate)."
-            ),
-            args_schema=_LlmTimeoutArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_stream_exec,
-            name="stream",
-            description=(
-                "Control agent_call streaming for the current session. "
-                "action='get' shows current setting. "
-                "action='set' enables or disables real-time token relay. "
-                "Always allowed (no gate)."
-            ),
-            args_schema=_StreamArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_tool_preview_length_exec,
-            name="tool_preview_length",
-            description=(
-                "Control how many characters of tool output are shown in chat. "
-                "The full result is always sent to the LLM regardless. "
-                "action='get' shows current setting. "
-                "action='set' changes it (0 = unlimited). "
-                "Always allowed (no gate)."
-            ),
-            args_schema=_ToolPreviewLengthArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_gate_list_exec,
-            name="gate_list",
-            description=(
-                "List the current live gate status for all tools and DB tables. "
-                "Shows whether each tool requires human approval (gated) or is auto-allowed (gate OFF). "
-                "Read-only. Requires read gate approval (controlled by !gate_list_gate_read)."
-            ),
-            args_schema=_GateListArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_limit_depth_list_exec,
-            name="limit_depth_list",
-            description=(
-                "List all configurable depth and iteration limits (e.g. max_at_llm_depth, max_agent_call_depth). "
-                "Shows current runtime values and descriptions. Read-only. "
-                "Requires read gate approval (controlled by !limit_depth_list_gate_read, default: auto-allowed)."
-            ),
-            args_schema=_LimitDepthListArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_limit_depth_set_exec,
-            name="limit_depth_set",
-            description=(
-                "Update a depth or iteration limit. Changes take effect immediately at runtime. "
-                "Valid keys: max_at_llm_depth, max_agent_call_depth. "
-                "Requires write gate approval (controlled by !limit_depth_set_gate_write, default: gated)."
-            ),
-            args_schema=_LimitDepthSetArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_limit_rate_list_exec,
-            name="limit_rate_list",
-            description=(
-                "List all rate limit settings by tool type (llm_call, search, drive, db, etc.). "
-                "Shows current runtime values. Read-only. "
-                "Requires read gate approval (controlled by !limit_rate_list_gate_read, default: auto-allowed)."
-            ),
-            args_schema=_LimitRateListArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_limit_rate_set_exec,
-            name="limit_rate_set",
-            description=(
-                "Update rate limit for a tool type. Changes take effect immediately at runtime. "
-                "Use limit_rate_list() to see valid tool types and current values. "
-                "Requires write gate approval (controlled by !limit_rate_set_gate_write, default: gated)."
-            ),
-            args_schema=_LimitRateSetArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_limit_max_iteration_list_exec,
-            name="limit_max_iteration_list",
-            description=(
-                "Show the current max_tool_iterations limit — how many LLM↔tool round-trips are "
-                "allowed per request before the [Max iterations] stop is emitted. "
-                "Read-only. Requires read gate approval (controlled by !limit_max_iteration_list_gate_read, default: auto-allowed)."
-            ),
-            args_schema=_LimitMaxIterationListArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_limit_max_iteration_set_exec,
-            name="limit_max_iteration_set",
-            description=(
-                "Update the max_tool_iterations limit. Changes take effect immediately at runtime. "
-                "Increase this when a complex task requires more LLM↔tool round-trips than the current limit. "
-                "Requires write gate approval (controlled by !limit_max_iteration_set_gate_write, default: gated)."
-            ),
-            args_schema=_LimitMaxIterationSetArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=_outbound_agent_filters_exec,
-            name="outbound_agent_filters",
-            description=(
-                "Show the current outbound agent message filter configuration. "
-                "Returns OUTBOUND_AGENT_ALLOWED_COMMANDS and OUTBOUND_AGENT_BLOCKED_COMMANDS lists "
-                "that are applied to messages sent via agent_call to remote agents. "
-                "Call this before using agent_call if you want to ensure your message will pass the filters. "
-                "Always allowed — no gate required."
-            ),
-            args_schema=_OutboundAgentFiltersArgs,
-        ),
+        # --- Utility tools ---
         StructuredTool.from_function(
             coroutine=_sleep_exec,
             name="sleep",
             description=(
                 "Sleep (pause execution) for a specified number of seconds (1–300). "
-                "Useful for rate-limiting, polling loops, or staged sequences. "
-                "Requires write gate approval (controlled by !sleep_gate_read, default: gated)."
+                "Useful for rate-limiting, polling loops, or staged sequences."
             ),
             args_schema=_SleepArgs,
         ),
+        # --- Unified resource tools ---
         StructuredTool.from_function(
-            coroutine=_token_selection_list_exec,
-            name="token_selection_list",
+            coroutine=_llm_tools_exec,
+            name="llm_tools",
             description=(
-                "List token selection settings (temperature, top_p, top_k, token_selection_setting) "
-                "for all models or a single model. "
-                "When token_selection_setting='custom', those values are sent to the API on every call. "
-                "When 'default', the API uses its own defaults. "
-                "Read-only. Requires read gate approval (controlled by !token_selection_list_gate_read, default: auto-allowed)."
+                "Manage named toolsets that control which tools each model can use. "
+                "Each model's llm_tools array references toolset names (e.g. ['core','db','search']). "
+                "Actions: list (all toolsets + model assignments), read (one toolset), "
+                "write (overwrite toolset), delete (remove toolset), add (append tools to toolset). "
+                "Changes persist to llm-tools.json."
             ),
-            args_schema=_TokenSelectionListArgs,
+            args_schema=_LlmToolsArgs,
         ),
         StructuredTool.from_function(
-            coroutine=_token_selection_set_exec,
-            name="token_selection_set",
+            coroutine=_model_cfg_exec,
+            name="model_cfg",
             description=(
-                "Set a token selection parameter for a model. "
-                "Params: token_selection_setting (default|custom), temperature (0.0–2.0), "
-                "top_p (0.0–1.0), top_k (int >= 1, GEMINI only). "
-                "Changes persist to llm-models.json and take effect on the next LLM call. "
-                "Set token_selection_setting='custom' to activate custom temperature/top_p/top_k. "
-                "Requires write gate approval (controlled by !token_selection_set_gate_write, default: gated)."
+                "Unified model management: list, read, write fields, copy, delete, enable, disable. "
+                "Use action='write' with field and value to set any model parameter "
+                "(llm_tools, llm_tools_gates, llm_call_timeout, temperature, top_p, top_k, "
+                "token_selection_setting, system_prompt_folder, max_context, etc.). "
+                "llm_tools_gates: comma-separated gate entries (e.g. 'db_query,model_cfg write') "
+                "that require human approval before the tool call is executed."
             ),
-            args_schema=_TokenSelectionSetArgs,
-        ),
-        # --- Model copy / delete tools ---
-        StructuredTool.from_function(
-            coroutine=_model_copy_exec,
-            name="model_copy",
-            description=(
-                "Copy an existing model entry to a new name. "
-                "The new model inherits all parameters (type, host, model_id, temperature, etc.) from the source. "
-                "Persists to llm-models.json and takes effect immediately — no restart needed. "
-                "Use this to create model variants with different temperature, top_p, or system_prompt_folder. "
-                "Use llm_list() or model(action='list') to see valid source keys. "
-                "Requires write gate approval (controlled by !model_copy_gate_write, default: gated)."
-            ),
-            args_schema=_ModelCopyArgs,
+            args_schema=_ModelCfgArgs,
         ),
         StructuredTool.from_function(
-            coroutine=_model_delete_exec,
-            name="model_delete",
+            coroutine=_sysprompt_cfg_exec,
+            name="sysprompt_cfg",
             description=(
-                "Permanently delete a model entry from llm-models.json. "
-                "The model is removed from the in-memory registry immediately — no restart needed. "
-                "Cannot delete the currently active session model; switch first with model(action='set'). "
-                "Use llm_list() or model(action='list') to see valid keys. "
-                "Requires write gate approval (controlled by !model_delete_gate_write, default: gated)."
+                "Unified system prompt management. Actions: list_dir, list, read, write, delete, copy_dir, set_dir. "
+                "Use model='self' for the current model."
             ),
-            args_schema=_ModelDeleteArgs,
+            args_schema=_SyspromptCfgArgs,
         ),
         StructuredTool.from_function(
-            coroutine=_model_enable_exec,
-            name="model_enable",
+            coroutine=_config_cfg_exec,
+            name="config_cfg",
             description=(
-                "Enable a disabled model in llm-models.json. "
-                "The model will be available after the next server restart. "
-                "Use model(action='list') or llm_list() to see current model keys. "
-                "Requires write gate approval (controlled by !model_enable_gate_write, default: gated)."
+                "Manage session and server configuration. "
+                "Actions: list (all settings), read (single key), write (set key). "
+                "Session keys: stream, tool_preview_length, tool_suppress. "
+                "Server keys: default_model."
             ),
-            args_schema=_ModelEnableArgs,
+            args_schema=_ConfigCfgArgs,
         ),
         StructuredTool.from_function(
-            coroutine=_model_disable_exec,
-            name="model_disable",
+            coroutine=_limits_cfg_exec,
+            name="limits_cfg",
             description=(
-                "Disable an enabled model in llm-models.json. "
-                "Cannot disable the server default model; change the default first. "
-                "The model will be hidden after the next server restart. "
-                "Use model(action='list') or llm_list() to see current model keys. "
-                "Requires write gate approval (controlled by !model_disable_gate_write, default: gated)."
+                "Manage depth, iteration, and rate limits. "
+                "Actions: list (all limits), read (single key), write (set key). "
+                "Depth keys: max_at_llm_depth, max_agent_call_depth, max_tool_iterations. "
+                "Rate keys: rate_<type>_calls, rate_<type>_window (e.g. rate_llm_call_calls). "
+                "Changes persist to JSON."
             ),
-            args_schema=_ModelDisableArgs,
+            args_schema=_LimitsCfgArgs,
         ),
     ]
 
