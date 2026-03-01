@@ -5,7 +5,7 @@
     "gpd3": {
       "model_id": "gpd3",
       "type": "OPENAI",
-      "host": "https://YOUR_TUNNEL_URL_HERE",
+      "host": "https://pinipjjdtp.a.pinggy.link",
       "env_key": "LLAMA_API_KEY",
       "max_context": 200,
       "enabled": true,
@@ -26,7 +26,7 @@
     "nuc11Localtokens": {
       "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       "type": "OPENAI",
-      "host": "http://YOUR_LOCAL_LLM_HOST:8000/v1",
+      "host": "http://192.168.10.101:8000/v1",
       "env_key": null,
       "max_context": 200,
       "enabled": true,
@@ -44,7 +44,7 @@
     "nuc11Local": {
       "model_id": "Qwen3-8B-Q4_K_M.gguf",
       "type": "OPENAI",
-      "host": "http://YOUR_LOCAL_LLM_HOST:8000/v1",
+      "host": "http://192.168.10.101:8000/v1",
       "env_key": null,
       "max_context": 200,
       "enabled": true,
@@ -286,14 +286,15 @@
       "env_key": "XAI_API_KEY",
       "max_context": 5000,
       "enabled": true,
-      "description": "Samaritan reasoning brain (Grok, minimal tools — delegates execution)",
+      "description": "Samaritan reasoning brain (Grok, minimal tools \u2014 delegates execution)",
       "llm_call_timeout": 90,
       "llm_tools": [
         "get_system_info",
         "llm_call",
         "llm_list",
         "search_tavily",
-        "search_xai"
+        "search_xai",
+        "memory"
       ],
       "system_prompt_folder": "system_prompt/004_reasoning",
       "temperature": 0.7,
@@ -321,7 +322,8 @@
       "temperature": 0.1,
       "top_p": 0.5,
       "top_k": null,
-      "token_selection_setting": "custom"
+      "token_selection_setting": "custom",
+      "llm_tools_gates": []
     }
   },
   "limits": {
