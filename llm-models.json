@@ -300,7 +300,8 @@
       "temperature": 0.2,
       "top_p": 0.7,
       "top_k": null,
-      "token_selection_setting": "custom"
+      "token_selection_setting": "custom",
+      "memory_scan": true
     },
     "samaritan-execution": {
       "model_id": "gpt-4o-mini",

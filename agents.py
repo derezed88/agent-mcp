@@ -627,6 +627,91 @@ def try_force_tool_calls(text: str, valid_tool_names: set[str] | None = None) ->
 
     return []
 
+# --- Post-response memory scan ---
+#
+# For models that narrate tool calls instead of issuing them (e.g. grok-4-1-fast-non-reasoning),
+# scan the final text response for memory_save() call syntax and execute any found saves silently
+# after the response is already streamed to the user (zero added latency).
+#
+# Activated per-model via "memory_scan": true in llm-models.json.
+# Handles the exact syntax the system prompt teaches:
+#   memory_save(topic="...", content="...", importance=N)
+#   memory_save(topic='...', content='...', importance=N, source='user')
+#
+# Also catches JSON-blob form in case the model outputs structured JSON inline.
+
+_MEMORY_SAVE_RE = re.compile(
+    r'memory_save\s*\(\s*'
+    r'topic\s*=\s*["\'](?P<topic>[^"\']+)["\']'
+    r'\s*,\s*content\s*=\s*["\'](?P<content>[^"\']+)["\']'
+    r'(?:\s*,\s*importance\s*=\s*(?P<importance>\d+))?'
+    r'(?:\s*,\s*source\s*=\s*["\'](?P<source>[^"\']+)["\'])?'
+    r'[^)]*\)',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+async def _scan_and_save_memories(text: str, client_id: str, model_key: str) -> int:
+    """Scan a final text response for memory_save() calls and execute any found.
+
+    Returns the number of memories actually saved (0 if none found or all duplicates).
+    Runs silently — no output to the user stream.
+    """
+    from tools import _memory_save_exec
+    saved = 0
+
+    # Pass 1: function-call syntax  memory_save(topic="...", content="...", importance=N)
+    for m in _MEMORY_SAVE_RE.finditer(text):
+        topic = m.group("topic").strip()
+        content = m.group("content").strip()
+        importance = int(m.group("importance")) if m.group("importance") else 5
+        source = m.group("source") or "session"
+        if not topic or not content:
+            continue
+        try:
+            result = await _memory_save_exec(
+                topic=topic, content=content, importance=importance, source=source
+            )
+            if "already persisted" not in result:
+                saved += 1
+                log.info(
+                    f"memory_scan: auto-saved from {model_key} response — "
+                    f"topic={topic!r} importance={importance}"
+                )
+        except Exception as exc:
+            log.warning(f"memory_scan: save failed for topic={topic!r}: {exc}")
+
+    # Pass 2: JSON-blob form  {"name": "memory_save", "arguments": {...}}
+    if not saved:
+        for m in _JSON_BLOB_RE.finditer(text):
+            parsed = _try_parse_json_tool(m.group(0))
+            if parsed is None:
+                continue
+            name, args = parsed
+            if name != "memory_save":
+                continue
+            topic = str(args.get("topic", "")).strip()
+            content = str(args.get("content", "")).strip()
+            importance = int(args.get("importance", 5))
+            source = str(args.get("source", "session"))
+            if not topic or not content:
+                continue
+            try:
+                result = await _memory_save_exec(
+                    topic=topic, content=content, importance=importance, source=source
+                )
+                if "already persisted" not in result:
+                    saved += 1
+                    log.info(
+                        f"memory_scan: auto-saved (JSON form) from {model_key} — "
+                        f"topic={topic!r} importance={importance}"
+                    )
+            except Exception as exc:
+                log.warning(f"memory_scan: JSON-form save failed for topic={topic!r}: {exc}")
+
+    return saved
+
+
 # --- Enrichment ---
 
 def _load_enrich_rules() -> list[dict]:
@@ -725,6 +810,9 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         # length so we can detect first-turn failures and retry with tool_choice='any'.
         _initial_ctx_len = len(ctx)
         _is_gemini = (LLM_REGISTRY.get(model_key, {}).get("type") == "GEMINI")
+        # Post-response memory scan: for models that narrate tool calls instead of
+        # issuing them, scan the final text for memory_save() syntax and execute saves.
+        _memory_scan = bool(LLM_REGISTRY.get(model_key, {}).get("memory_scan", False))
         # Tool-call loop detection: track the last N consecutive tool-call fingerprints.
         # If the same set of tool+args repeats >= _TOOL_LOOP_THRESHOLD times in a row,
         # the model is stuck in a deterministic loop (Qwen3, Hermes, etc.).
@@ -804,6 +892,8 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                                     f"metadata={getattr(ai_msg, 'response_metadata', {})}"
                                 )
                                 await push_tok(client_id, "[empty string]")
+                            if _memory_scan and final:
+                                await _scan_and_save_memories(final, client_id, model_key)
                             await push_done(client_id)
                             return final
                     else:
@@ -840,6 +930,8 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                                     f"tool_calls={getattr(ai_msg, 'tool_calls', 'n/a')}"
                                 )
                                 await push_tok(client_id, "[empty string]")
+                            if _memory_scan and final:
+                                await _scan_and_save_memories(final, client_id, model_key)
                             await push_done(client_id)
                             return final
                         log.warning(
@@ -849,9 +941,13 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                             f"metadata={getattr(ai_msg, 'response_metadata', {})}"
                         )
                         await push_tok(client_id, "[empty string]")
+                        if _memory_scan and final:
+                            await _scan_and_save_memories(final, client_id, model_key)
                         await push_done(client_id)
                         return final
                 if not ai_msg.tool_calls:
+                    if _memory_scan and final:
+                        await _scan_and_save_memories(final, client_id, model_key)
                     await push_done(client_id)
                     return final
 
