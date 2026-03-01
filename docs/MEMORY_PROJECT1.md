@@ -504,8 +504,8 @@ Priority = functionality gain ÷ implementation complexity. P1 = high value, low
 
 | Priority | Feature | Status | Effort | Notes |
 |---|---|---|---|---|
-| P1 | Memory confirmation UX | Not built | Low | Push "[memory] saved: topic=X (imp=8)" after each reset — one line in `summarize_and_save()`. Immediately visible value with near-zero complexity. |
-| P1 | Deduplication | Not built | Low | `INSERT … ON DUPLICATE KEY UPDATE` or a pre-save `SELECT` by topic+content hash. Repeated resets accumulate noise fast; easy SQL fix. |
+| P1 | Memory confirmation UX | **Built** | Low | `[memory] Summarized N messages → M memories saved, K duplicate(s) skipped.` pushed after every reset. |
+| P1 | Deduplication | **Built** | Low | `save_memory()` checks both shortterm and longterm for identical topic+content before inserting. Duplicate returns 0 without touching the DB. |
 | P2 | Importance decay | Not built | Low-Med | Scheduled SQL: `UPDATE shortterm SET importance = importance - 1 WHERE importance > 3 AND created_at < NOW() - INTERVAL 7 DAY`. Could run at session-start alongside aging. Prevents stale high-imp facts from crowding injection. |
 | P2 | Per-topic retention policies | Not built | Med | JSON config mapping topic patterns → `age_after_hours` overrides. Requires modifying `age_to_longterm()` to apply per-row policy instead of a single threshold. High value for operational use but needs schema for the config. |
 | P3 | Google Drive archival | Not built | Med | `memory_age` extended to optionally export aged rows to a Drive file before deletion. Google Drive plugin already exists — mainly plumbing. Low urgency since longterm table handles this well enough. |
