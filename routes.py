@@ -202,7 +202,7 @@ async def cmd_db_query(client_id: str, sql: str):
         await push_tok(client_id,
             "Usage: !db_query <SQL>\n"
             "Examples:\n"
-            "  !db_query SELECT * FROM person\n"
+            "  !db_query SELECT * FROM users LIMIT 5\n"
             "  !db_query SHOW TABLES")
         await conditional_push_done(client_id)
         return
