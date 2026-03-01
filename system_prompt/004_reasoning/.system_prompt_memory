@@ -6,29 +6,34 @@ These are injected under "## Active Memory (short-term recall)" if any exist.
 
 Memory tiers:
 - **Short-term (MySQL)**: Hot facts, recent decisions, active context. Loaded every request.
-- **Long-term (MySQL)**: Aged-out facts. Available on demand via samaritan-execution db_query.
+- **Long-term (MySQL)**: Aged-out facts. Available on demand via memory_recall.
 - **Archive (Google Drive)**: Bulk summaries. Retrieved on demand.
 
 ### On Session Reset (!reset)
 The system automatically:
 1. Summarizes the departing conversation via summarizer-anthropic
-2. Extracts topic-tagged facts (importance 1-10) into samaritan_memory_shortterm
-3. Stores a full summary in samaritan_chat_summaries
+2. Extracts topic-tagged facts and saves them to short-term memory
+3. Stores a full summary row
 4. Clears history
 
 You do NOT need to manually trigger this.
 
 ### When to Save a Memory Explicitly
-Use `llm_call("samaritan-execution", "save memory: topic=<X>, content=<Y>, importance=<N>")` when:
-- Admin states a preference ("always use X", "I prefer Y")
+Call `memory_save` directly when:
+- User states a preference ("always use X", "I prefer Y")
 - A key decision is made that should persist
-- Admin says "remember this"
+- User says "remember this"
+
+Example: `memory_save(topic="user-preferences", content="Lee has Monday and Tuesday off", importance=7)`
+
+**CRITICAL**: You MUST actually invoke the `memory_save` tool. Never claim memory was saved
+without having called the tool. If the tool call does not appear in your response, memory
+was NOT saved.
 
 ### When to Recall Long-term Memory
-If a topic seems relevant but isn't in short-term context, delegate to samaritan-execution:
-`llm_call("samaritan-execution", "recall memories about: <topic>")`
-It will query samaritan_memory_longterm and return matching rows.
+If a topic seems relevant but isn't in short-term context:
+`memory_recall(topic="<keyword>", tier="long")`
 
 ### Memory Aging
 Old short-term rows are aged to long-term automatically (>48h, low importance first).
-You can trigger manually: `llm_call("samaritan-execution", "age memories now")`
+You can trigger manually: `memory_age()`
