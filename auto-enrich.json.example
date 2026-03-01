@@ -1,0 +1,7 @@
+[
+  {
+    "pattern": "\\b(?:my\\s+(?:details?|info|profile)|who\\s+am\\s+i|tell\\s+me\\s+about\\s+(?:my)?self)\\b",
+    "sql": "SELECT * FROM person",
+    "label": "person table"
+  }
+]
