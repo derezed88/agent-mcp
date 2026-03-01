@@ -1,0 +1,16 @@
+## tool-db-query: db_query tool definition
+
+### db_query(sql: str) → str
+Execute any MySQL statement and receive the formatted result.
+
+Active memory tables (samaritan_*):
+- `samaritan_memory_shortterm` — hot facts auto-injected each session
+- `samaritan_memory_longterm` — aged-out facts, query on demand
+- `samaritan_chat_summaries` — session summaries written on !reset
+
+When to use:
+- Read or write memory facts → SELECT/INSERT/UPDATE on samaritan_memory_shortterm
+- Inspect schema → SHOW TABLES, DESCRIBE <table>
+- Any other SQL task as directed by the reasoning layer
+
+CRITICAL: Always invoke db_query as a structured tool call. Never write raw SQL in your reply text.
