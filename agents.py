@@ -783,7 +783,9 @@ def _memory_cfg() -> dict:
 def _memory_feature(feature: str) -> bool:
     """Return True if a specific memory feature is enabled.
     Master switch: 'enabled' (default True).
-    Feature switches: 'context_injection', 'reset_summarize', 'post_response_scan' (all default True).
+    Feature switches: 'context_injection', 'reset_summarize', 'post_response_scan',
+                      'fuzzy_dedup' (all default True).
+    fuzzy_dedup is read directly by memory.py (_fuzzy_dedup_threshold), not via this function.
     A feature is only active when both the master switch and the feature switch are True.
     """
     cfg = _memory_cfg()

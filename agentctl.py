@@ -1061,7 +1061,7 @@ class PluginManager:
         Features: context_injection, reset_summarize, post_response_scan
         Master switch: 'all' (or no feature arg) toggles the 'enabled' key.
         """
-        FEATURES = ("context_injection", "reset_summarize", "post_response_scan")
+        FEATURES = ("context_injection", "reset_summarize", "post_response_scan", "fuzzy_dedup")
         action = args[0] if args else "status"
         feature = args[1] if len(args) > 1 else "all"
 
@@ -1070,6 +1070,8 @@ class PluginManager:
             "context_injection": True,
             "reset_summarize": True,
             "post_response_scan": True,
+            "fuzzy_dedup": True,
+            "fuzzy_dedup_threshold": 0.78,
         })
 
         def _bool_str(val: bool) -> str:
@@ -1083,7 +1085,10 @@ class PluginManager:
                 val = mem_cfg.get(feat, True)
                 active = master and val
                 note = "" if active else f"  {Colors.GRAY}(inactive — {'master off' if not master else 'feature off'}){Colors.RESET}"
-                print(f"  {feat:<24}: {_bool_str(val)}{note}")
+                extra = ""
+                if feat == "fuzzy_dedup" and val:
+                    extra = f"  (threshold={mem_cfg.get('fuzzy_dedup_threshold', 0.85):.2f})"
+                print(f"  {feat:<24}: {_bool_str(val)}{note}{extra}")
 
         elif action in ("enable", "disable"):
             new_val = (action == "enable")
@@ -1101,6 +1106,24 @@ class PluginManager:
             state_str = "enabled" if new_val else "disabled"
             print(f"{Colors.GREEN}✓{Colors.RESET} {label}: {state_str} (persisted)")
             print(f"  Restart the server for changes to take effect.")
+
+        elif action == "set":
+            # memory set fuzzy_dedup_threshold 0.80
+            key = feature  # reuse 'feature' positional arg as key name
+            value = args[2] if len(args) > 2 else ""
+            if key == "fuzzy_dedup_threshold":
+                try:
+                    t = float(value)
+                    if not (0.0 < t <= 1.0):
+                        raise ValueError
+                    mem_cfg["fuzzy_dedup_threshold"] = t
+                    self._save_plugins_enabled()
+                    print(f"{Colors.GREEN}✓{Colors.RESET} fuzzy_dedup_threshold set to {t:.2f} (persisted)")
+                    print(f"  Takes effect immediately (no restart needed).")
+                except (ValueError, TypeError):
+                    print(f"{Colors.RED}✗ Invalid threshold '{value}'. Must be a float between 0.0 and 1.0.{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}✗ Unknown key '{key}'. Currently settable: fuzzy_dedup_threshold{Colors.RESET}")
 
         else:
             print(f"{Colors.RED}✗ Unknown action '{action}'. "
@@ -1134,10 +1157,11 @@ class PluginManager:
         print("    field 'llm_tools_gates': comma-separated gate entries, e.g. 'db_query,model_cfg write'")
         print("  limits list|read|write [key] [value]")
         print(f"\n{Colors.BOLD}Memory Commands:{Colors.RESET}")
-        print("  memory status                     - Show memory feature on/off state")
-        print("  memory enable [feature]           - Enable memory (or a specific feature)")
-        print("  memory disable [feature]          - Disable memory (or a specific feature)")
-        print(f"    features: context_injection, reset_summarize, post_response_scan")
+        print("  memory status                             - Show memory feature on/off state")
+        print("  memory enable [feature]                   - Enable memory (or a specific feature)")
+        print("  memory disable [feature]                  - Disable memory (or a specific feature)")
+        print(f"    features: context_injection, reset_summarize, post_response_scan, fuzzy_dedup")
+        print("  memory set fuzzy_dedup_threshold <0.0-1.0> - Set similarity threshold (default 0.85)")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
         print("  quit                              - Exit plugin manager")

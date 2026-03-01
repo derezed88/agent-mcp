@@ -15,6 +15,7 @@ Public API:
 """
 
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -47,6 +48,43 @@ _LT  = _tables.get("memory_longterm",  "memory_longterm")
 _SUM = _tables.get("chat_summaries",   "chat_summaries")
 
 # ---------------------------------------------------------------------------
+# Fuzzy dedup config (read from plugins-enabled.json at call time)
+# ---------------------------------------------------------------------------
+
+def _fuzzy_dedup_threshold() -> float | None:
+    """
+    Return fuzzy dedup threshold (0.0–1.0), or None if feature is disabled.
+    Reads plugins-enabled.json each call so live config changes take effect
+    without restart (same pattern as _memory_feature in agents.py).
+    Default threshold: 0.78
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins-enabled.json")
+    try:
+        with open(path) as f:
+            mem_cfg = json.load(f).get("plugin_config", {}).get("memory", {})
+    except Exception:
+        return None
+    if not mem_cfg.get("enabled", True):
+        return None
+    if not mem_cfg.get("fuzzy_dedup", True):
+        return None
+    return float(mem_cfg.get("fuzzy_dedup_threshold", 0.78))
+
+
+def _fuzzy_similar(a: str, b: str, threshold: float) -> bool:
+    """
+    Return True if strings a and b are similar enough to be considered duplicates.
+    Uses SequenceMatcher ratio (word-level tokens for speed on longer strings).
+    Both inputs are lowercased and stripped before comparison.
+    """
+    a, b = a.lower().strip(), b.lower().strip()
+    if a == b:
+        return True
+    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    return ratio >= threshold
+
+
+# ---------------------------------------------------------------------------
 # Short-term: save
 # ---------------------------------------------------------------------------
 
@@ -64,24 +102,48 @@ async def save_memory(
     source = source if source in ("session", "user", "directive") else "session"
     importance = max(1, min(10, int(importance)))
 
-    # Dedup: skip insert if identical topic+content exists in shortterm or longterm
+    # Dedup pass 1: exact match on topic+content in both tiers
     try:
         dup_check = (
             f"SELECT 1 FROM {_ST} "
             f"WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
         )
-        dup_result = await execute_sql(dup_check)
-        if dup_result.strip() and "1" in dup_result:
+        if "1" in (await execute_sql(dup_check)).strip():
             return 0
         dup_check_lt = (
             f"SELECT 1 FROM {_LT} "
             f"WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
         )
-        dup_result_lt = await execute_sql(dup_check_lt)
-        if dup_result_lt.strip() and "1" in dup_result_lt:
+        if "1" in (await execute_sql(dup_check_lt)).strip():
             return 0
     except Exception as e:
-        log.warning(f"save_memory dedup check failed: {e}")
+        log.warning(f"save_memory exact-dedup check failed: {e}")
+
+    # Dedup pass 2: fuzzy similarity against existing rows for the same topic
+    threshold = _fuzzy_dedup_threshold()
+    if threshold is not None:
+        try:
+            # Load content of existing rows with the same topic (both tiers)
+            rows_sql = (
+                f"SELECT content FROM {_ST} WHERE topic = '{topic}' "
+                f"UNION ALL "
+                f"SELECT content FROM {_LT} WHERE topic = '{topic}'"
+            )
+            raw = await execute_sql(rows_sql)
+            # Parse: first line is header "content", rest are values
+            existing = [
+                line.strip() for line in raw.strip().splitlines()[1:]
+                if line.strip() and not set(line.strip()) <= set("-+|")
+            ]
+            for existing_content in existing:
+                if _fuzzy_similar(content, existing_content, threshold):
+                    log.debug(
+                        f"save_memory fuzzy-dedup: skipped topic={topic!r} "
+                        f"(ratio>={threshold:.2f} vs existing row)"
+                    )
+                    return 0
+        except Exception as e:
+            log.warning(f"save_memory fuzzy-dedup check failed: {e}")
 
     sql = (
         f"INSERT INTO {_ST} "
