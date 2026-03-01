@@ -14,7 +14,7 @@ mcp_server = FastMCP("AIOps-DB-Tools")
 
 @mcp_server.tool()
 async def db_query(sql: str) -> str:
-    """Execute SQL against the configured MySQL database."""
+    """Execute SQL against mymcp MySQL database."""
     return await execute_sql(sql)
 
 
@@ -286,6 +286,9 @@ def get_tool_executor(tool_name: str):
         'sysprompt_cfg':         _sysprompt_cfg_exec,
         'config_cfg':            _config_cfg_exec,
         'limits_cfg':            _limits_cfg_exec,
+        'memory_save':           _memory_save_exec,
+        'memory_recall':         _memory_recall_exec,
+        'memory_age':            _memory_age_exec,
     }
 
     if tool_name in core_executors:
@@ -561,6 +564,8 @@ async def _memory_save_exec(topic: str, content: str, importance: int = 5, sourc
         importance=importance, source=source,
         session_id=session_id,
     )
+    if row_id == 0:
+        return f"Memory already persisted (duplicate): [{topic}] {content} — no action needed."
     return f"Memory saved (id={row_id}): [{topic}] {content} (importance={importance})"
 
 

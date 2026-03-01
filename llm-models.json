@@ -297,8 +297,8 @@
         "memory"
       ],
       "system_prompt_folder": "system_prompt/004_reasoning",
-      "temperature": 0.7,
-      "top_p": 0.9,
+      "temperature": 0.2,
+      "top_p": 0.7,
       "top_k": null,
       "token_selection_setting": "custom"
     },

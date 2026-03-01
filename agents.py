@@ -728,7 +728,8 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         # Tool-call loop detection: track the last N consecutive tool-call fingerprints.
         # If the same set of tool+args repeats >= _TOOL_LOOP_THRESHOLD times in a row,
         # the model is stuck in a deterministic loop (Qwen3, Hermes, etc.).
-        _TOOL_LOOP_THRESHOLD = 2
+        # Threshold of 3: allows one retry after a dedup/no-op result before aborting.
+        _TOOL_LOOP_THRESHOLD = 3
         _last_tc_fingerprint: str = ""
         _tc_repeat_count: int = 0
         for _ in range(LIVE_LIMITS.get("max_tool_iterations", MAX_TOOL_ITERATIONS)):
@@ -870,6 +871,12 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                     f"agentic_lc: tool-call loop detected for model={model_key} "
                     f"(repeated {_tc_repeat_count}x): {_tc_fp[:120]}"
                 )
+                # Execute pending tools first so tool_call_ids are resolved in ctx
+                # before injecting the break message. Skipping this causes a 400 from
+                # OpenAI ("tool_calls must be followed by tool messages").
+                for tc in ai_msg.tool_calls:
+                    result = await execute_tool(client_id, tc["name"], tc["args"])
+                    ctx.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
                 await push_tok(client_id, "\n[tool-loop detected — asking model to respond in text]\n")
                 ctx.append(HumanMessage(
                     content="You have already called the same tool(s) with the same arguments multiple times "

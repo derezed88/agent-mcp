@@ -20,7 +20,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from database import execute_sql
+from database import execute_sql, execute_insert
 
 log = logging.getLogger("memory")
 
@@ -89,12 +89,7 @@ async def save_memory(
         f"VALUES ('{topic}', '{content}', {importance}, '{source}', '{session_id}')"
     )
     try:
-        await execute_sql(sql)
-        id_result = await execute_sql("SELECT LAST_INSERT_ID() AS new_id")
-        for line in id_result.splitlines():
-            if line.strip().isdigit():
-                return int(line.strip())
-        return 0
+        return await execute_insert(sql)
     except Exception as e:
         log.error(f"save_memory failed: {e}")
         return 0
@@ -328,16 +323,16 @@ async def summarize_and_save(
 # ---------------------------------------------------------------------------
 
 def _parse_table(raw: str) -> list[dict]:
-    """Parse tab-separated execute_sql output into list of dicts."""
+    """Parse pipe-separated execute_sql output into list of dicts."""
     lines = raw.strip().splitlines()
     if len(lines) < 2:
         return []
-    headers = [h.strip() for h in lines[0].split("\t")]
+    headers = [h.strip() for h in lines[0].split("|")]
     rows = []
     for line in lines[1:]:
-        if not line.strip() or line.startswith("---"):
+        if not line.strip() or line.startswith("---") or set(line.strip()) <= set("-+"):
             continue
-        vals = line.split("\t")
+        vals = line.split("|")
         row = {}
         for i, h in enumerate(headers):
             v = vals[i].strip() if i < len(vals) else ""
