@@ -7,12 +7,12 @@
 #
 # Usage (local, same machine):
 #   cd /some/target/dir
-#   ./setup-agent-mcp.sh --source-dir /path/to/your/agent-mcp/install
+#   ./setup-agent-mcp.sh --source-dir /home/markj/projects/kaliLinuxNWScripts/mymcp
 #
 # Usage (remote machine — SSH back to the dev host to pull secrets/config):
-#   ./setup-agent-mcp.sh --source-host 192.168.1.10 \
-#                        --source-dir /path/to/your/agent-mcp/install \
-#                        [--source-user <user>] [--branch <branch>] [--name <dirname>]
+#   ./setup-agent-mcp.sh --source-host 192.168.10.111 \
+#                        --source-dir /home/markj/projects/kaliLinuxNWScripts/mymcp \
+#                        [--source-user markj] [--branch <branch>] [--name <dirname>]
 #
 # Options:
 #   --branch <branch>       Git branch to check out after clone (default: main)
@@ -242,6 +242,10 @@ copy_file "token.json"
 
 # Model registry (may have local hosts/keys not in repo copy)
 copy_file "llm-models.json"
+
+# Instance-specific config (gitignored, must be copied from reference)
+copy_file "db-config.json"
+copy_file "auto-enrich.json"
 
 # Service account JSON referenced in .env (SERVICE_ACCOUNT_FILE=./gen-lang-*.json)
 # Extract the filename from .env if present, then copy it too.
