@@ -34,12 +34,31 @@ async def save_memory(
     source: str = "session",
     session_id: str = "",
 ) -> int:
-    """Insert a new short-term memory row. Returns new row id."""
+    """Insert a new short-term memory row. Returns new row id, or 0 if duplicate/error."""
     topic = topic.replace("'", "''")[:255]
     content = content.replace("'", "''")
     session_id = (session_id or "").replace("'", "''")[:255]
     source = source if source in ("session", "user", "directive") else "session"
     importance = max(1, min(10, int(importance)))
+
+    # Dedup: skip insert if identical topic+content exists in shortterm or longterm
+    try:
+        dup_check = (
+            f"SELECT 1 FROM samaritan_memory_shortterm "
+            f"WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
+        )
+        dup_result = await execute_sql(dup_check)
+        if dup_result.strip() and "1" in dup_result:
+            return 0
+        dup_check_lt = (
+            f"SELECT 1 FROM samaritan_memory_longterm "
+            f"WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
+        )
+        dup_result_lt = await execute_sql(dup_check_lt)
+        if dup_result_lt.strip() and "1" in dup_result_lt:
+            return 0
+    except Exception as e:
+        log.warning(f"save_memory dedup check failed: {e}")
 
     sql = (
         f"INSERT INTO samaritan_memory_shortterm "
@@ -47,8 +66,7 @@ async def save_memory(
         f"VALUES ('{topic}', '{content}', {importance}, '{source}', '{session_id}')"
     )
     try:
-        result = await execute_sql(sql)
-        # Grab the last inserted id
+        await execute_sql(sql)
         id_result = await execute_sql("SELECT LAST_INSERT_ID() AS new_id")
         for line in id_result.splitlines():
             if line.strip().isdigit():
@@ -212,6 +230,7 @@ async def summarize_and_save(
         result_text = None
 
     memories_saved = 0
+    memories_skipped = 0
     if result_text:
         # Strip any markdown fences
         cleaned = result_text.strip()
@@ -230,14 +249,17 @@ async def summarize_and_save(
                     content = str(item.get("content", ""))[:2000]
                     importance = int(item.get("importance", 5))
                     if topic and content:
-                        await save_memory(
+                        new_id = await save_memory(
                             topic=topic,
                             content=content,
                             importance=importance,
                             source="session",
                             session_id=session_id,
                         )
-                        memories_saved += 1
+                        if new_id:
+                            memories_saved += 1
+                        else:
+                            memories_skipped += 1
         except (json.JSONDecodeError, ValueError) as e:
             log.warning(f"summarize_and_save JSON parse failed: {e}. Raw: {result_text[:200]}")
 
@@ -253,7 +275,8 @@ async def summarize_and_save(
         f"VALUES ('{sid_safe}', '{summary_text[:4000]}', {msg_count}, '{model_key_safe}')"
     )
 
-    return f"Summarized {msg_count} messages → {memories_saved} memories saved to short-term."
+    skip_note = f", {memories_skipped} duplicate(s) skipped" if memories_skipped else ""
+    return f"Summarized {msg_count} messages → {memories_saved} memories saved{skip_note}."
 
 
 # ---------------------------------------------------------------------------
