@@ -79,16 +79,6 @@ class GoogleDrivePlugin(BasePlugin):
         """Cleanup Google Drive resources."""
         self.enabled = False
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare google_drive as a gated tool with both read and write operations."""
-        return {
-            "google_drive": {
-                "type": "drive",
-                "operations": ["read", "write"],
-                "description": "Google Drive CRUD (separate read/write gates)"
-            }
-        }
-
     def get_tools(self) -> Dict[str, Any]:
         """Return Google Drive tool definitions in LangChain StructuredTool format."""
         return {

@@ -67,7 +67,7 @@ Gemini (`GEMINI_API_KEY`) is optional — `summarizer-gemini` is a fallback summ
 
 ## Database Setup
 
-Run once against your `mymcp` database:
+Run once against your `agent_mcp` database:
 
 ```sql
 CREATE TABLE samaritan_memory_shortterm (

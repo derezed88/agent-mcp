@@ -74,25 +74,6 @@ class BasePlugin(ABC):
         """
         return []
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """
-        Declare which tools this plugin provides that require human gate approval.
-
-        Returns:
-            Dict mapping tool_name to gate metadata:
-            {
-                "tool_name": {
-                    "type": "search" | "drive" | "db" | ...,
-                    "operations": ["read"] | ["write"] | ["read", "write"],
-                    "description": "human-readable label for !help"
-                }
-            }
-
-        Only override this for tools that need gating. Core tools (get_system_info, etc.)
-        that are always auto-allowed should NOT be listed here.
-        """
-        return {}
-
     def get_commands(self) -> Dict[str, Any]:
         """
         Return special ! commands this plugin provides.
@@ -325,10 +306,11 @@ class PluginLoader:
         self.loaded_plugins.clear()
 
     def get_default_model(self) -> str:
-        """Get default LLM model from configuration."""
-        return self.config.get('default_model', 'gemini-2.5-flash')
+        """Get default LLM model from llm-models.json."""
+        from config import load_default_model
+        return load_default_model()
 
     def set_default_model(self, model_key: str) -> bool:
-        """Set default LLM model in configuration."""
-        self.config['default_model'] = model_key
-        return self.save_config()
+        """Set default LLM model in llm-models.json."""
+        from config import save_default_model
+        return save_default_model(model_key)

@@ -69,16 +69,6 @@ class UrlextractTavilyPlugin(BasePlugin):
         self._client = None
         self.enabled = False
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare url_extract as a read-only gated extract tool."""
-        return {
-            "url_extract": {
-                "type": "extract",
-                "operations": ["read"],
-                "description": "web page content extraction via Tavily (read-only)"
-            }
-        }
-
     def get_tools(self) -> Dict[str, Any]:
         """Return url_extract tool definitions in LangChain StructuredTool format."""
         client = self._client

@@ -56,16 +56,6 @@ class SearchTavilyPlugin(BasePlugin):
         self._client = None
         self.enabled = False
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare search_tavily as a read-only gated search tool."""
-        return {
-            "search_tavily": {
-                "type": "search",
-                "operations": ["read"],
-                "description": "web search via Tavily AI (read-only)"
-            }
-        }
-
     def get_tools(self) -> Dict[str, Any]:
         """Return Tavily search tool definitions in LangChain StructuredTool format."""
         client = self._client

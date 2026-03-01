@@ -8,5 +8,3 @@ Parameters:
 
 Use search_tavily when higher-quality, AI-curated results are needed, or when search_ddgs
 did not return satisfactory results. Requires TAVILY_API_KEY.
-
-This tool always requires human gate approval before it executes.

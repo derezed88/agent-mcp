@@ -14,5 +14,3 @@ Use search_xai when:
 - The user explicitly asks to search X (Twitter) or social media.
 
 Requires XAI_API_KEY.
-
-This tool always requires human gate approval before it executes.

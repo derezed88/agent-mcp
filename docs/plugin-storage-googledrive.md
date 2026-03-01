@@ -8,14 +8,13 @@ Google Drive CRUD tool. Gives the LLM access to files in an authorized Drive fol
 
 Operations: `list`, `create`, `read`, `append`, `delete`
 
-## Gate behavior
+## Tool access
 
-Separate read and write gates:
+Access to `google_drive` is controlled per-model via the `llm_tools` field in `llm-models.json`. Add `"google_drive"` to a model's tool list to grant Drive access.
 
 ```
-!autogate drive read true     auto-allow list/read operations
-!autogate drive write true    auto-allow create/append/delete operations
-!autogate drive               show current drive gate status
+!llm_tools read <model>               show which tools a model can use
+!llm_tools write <model> google_drive  grant Drive access to a model
 ```
 
 ## Dependencies

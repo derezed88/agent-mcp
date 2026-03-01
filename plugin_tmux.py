@@ -854,25 +854,6 @@ class TmuxPlugin(BasePlugin):
             "  !tmux restart-reader <name>               - force-restart bg reader thread for a session\n"
         )
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """
-        All tmux tools are write-gated.
-        Group gate 'tmux' covers all; per-tool gates override for individual tools.
-        tmux_call_limit supports both read and write gates.
-        """
-        entry = {"type": "tmux", "operations": ["write"]}
-        return {
-            "tmux_new":           {**entry, "description": "create a new PTY shell session"},
-            "tmux_exec":          {**entry, "description": "execute a command in a PTY session"},
-            "tmux_ls":            {**entry, "description": "list active PTY sessions"},
-            "tmux_kill_session":  {**entry, "description": "terminate a named PTY session"},
-            "tmux_kill_server":   {**entry, "description": "terminate all PTY sessions"},
-            "tmux_history":       {**entry, "description": "show session rolling history"},
-            "tmux_history_limit": {**entry, "description": "change the rolling history line limit"},
-            "tmux_call_limit":    {"type": "tmux", "operations": ["read", "write"],
-                                   "description": "read or set the tmux tool rate limit"},
-        }
-
     def get_tools(self) -> Dict[str, Any]:
         return {
             "lc": [

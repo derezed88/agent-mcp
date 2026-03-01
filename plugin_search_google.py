@@ -53,16 +53,6 @@ class GoogleSearchPlugin(BasePlugin):
         """Cleanup Google Search resources."""
         self.enabled = False
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare search_google as a read-only gated search tool."""
-        return {
-            "search_google": {
-                "type": "search",
-                "operations": ["read"],
-                "description": "web search via Gemini grounding (read-only)"
-            }
-        }
-
     def get_tools(self) -> Dict[str, Any]:
         """Return Google Search tool definitions in LangChain StructuredTool format."""
         return {

@@ -31,7 +31,7 @@ from config import log, SYSTEM_PROMPT_FILE, BASE_DIR, LLM_MODELS_FILE
 # ---------------------------------------------------------------------------
 
 DEFAULT_MAIN_PROMPT = """\
-You are Robot, an AI assistant with persistent memory via a MySQL database (mymcp).
+You are Robot, an AI assistant with persistent memory via a MySQL database.
 Your primary user and system architect is Mark.
 You are an autonomous agent. When you need information, you MUST use a tool call. Do not explain your steps. Do not provide Markdown code blocks. If you have a tool available for a task, use it immediately.
 
@@ -696,8 +696,10 @@ def sp_write_file(model_key: str, filename: str, data: str, llm_registry: dict) 
     try:
         with open(fpath, 'w', encoding='utf-8') as fh:
             fh.write(data)
+        log.info(f"sp_write_file: wrote {len(data)} bytes to {fpath}")
         return f"Wrote {len(data)} bytes to {fpath}"
     except Exception as exc:
+        log.error(f"sp_write_file: error writing {fpath}: {exc}")
         return f"Error writing {fpath}: {exc}"
 
 

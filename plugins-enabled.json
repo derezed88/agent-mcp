@@ -19,8 +19,7 @@
     "plugin_history_default": {
       "agent_max_ctx": 200,
       "chain": [
-        "plugin_history_default",
-        "plugin_history_sec_sync"
+        "plugin_history_default"
       ]
     },
     "plugin_proxy_llama": {
@@ -47,7 +46,7 @@
       "OUTBOUND_AGENT_BLOCKED_COMMANDS": []
     },
     "plugin_history_sec_sync": {
-      "enabled": true,
+      "enabled": false,
       "airs_url": "http://localhost:8900",
       "airs_profile": "ai-sec-security",
       "timeout_seconds": 10,
@@ -137,7 +136,6 @@
     "last_modified": "2026-02-21",
     "notes": "Configuration for enabled plugins. Modified by agentctl.py"
   },
-  "default_model": "gemini25f",
   "max_users": 50,
   "session_idle_timeout_minutes": 60
 }

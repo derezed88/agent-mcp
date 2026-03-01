@@ -6,18 +6,14 @@ MySQL database tool. Gives the LLM read/write access to a local MySQL database.
 
 `db_query(sql: str) → str` — executes any SQL statement and returns formatted results.
 
-## Gate behavior
+## Tool access
 
-Per-table gates with read/write distinction. Control via `!autoAIdb`:
+Access to `db_query` is controlled per-model via the `llm_tools` field in `llm-models.json`. Add `"db_query"` to a model's tool list to grant database access.
 
 ```
-!autoAIdb status                  show current settings
-!autoAIdb person read true        auto-allow SELECT on person table
-!autoAIdb read true               auto-allow ALL table reads (wildcard default)
-!autoAIdb write false             require gate for all writes (wildcard default)
+!llm_tools read <model>           show which tools a model can use
+!llm_tools write <model> db_query grant database access to a model
 ```
-
-`__meta__` controls SHOW TABLES / DESCRIBE queries.
 
 ## Dependencies
 
@@ -32,7 +28,7 @@ MYSQL_USER=<username>
 MYSQL_PASS=<password>
 ```
 
-Database name is `mymcp` on `localhost` (hardcoded default; change in `config.py` if needed).
+Database name is `agent_mcp` on `localhost` (hardcoded default; change in `config.py` if needed).
 
 ## Enable
 

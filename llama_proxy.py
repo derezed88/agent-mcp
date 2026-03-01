@@ -38,7 +38,7 @@ curl http://localhost:11434/api/generate -d '{
   "model": "Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf",
   "prompt": "Hello, world!"
 }'
- curl http://192.168.10.101:11434/v1/chat/completions \
+ curl http://YOUR_OLLAMA_HOST:11434/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf",

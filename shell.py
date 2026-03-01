@@ -9,8 +9,6 @@ Input model:
 
 Key bindings — input:
   Enter / F5 / Ctrl+G  — submit immediately
-  [a]                  — allow pending AI tool request  (gate mode only)
-  [r]                  — reject pending AI tool request (gate mode only)
   Backspace / Delete   — delete char before cursor
   Left / Right         — move cursor
   Up / Down            — move cursor one visual row up/down
@@ -26,7 +24,6 @@ Key bindings — output buffer scrolling:
 Special client-side commands:
   !input_lines <n>              — resize input area (1-20 rows)
   !mouse [on|off]               — toggle mouse capture (OFF allows text selection)
-  !gate_preview_length [n]      — get/set gate preview char limit (default 25)
   !session                      — list all active sessions (shows current)
   !session <ID> attach          — switch to a different session (immediate)
   !session <ID> delete          — delete a session from server
@@ -36,9 +33,7 @@ Server-side commands (forwarded):
   !model                        — list available models
   !model <key>                  — switch active LLM
   !reset                        — clear conversation history
-  !db <sql>                     — run SQL directly (no LLM, no gate)
-  !autoAIdb <table> true|false  — toggle AI db gate per table
-  !autoAIdb status              — show current gate settings
+  !db <sql>                     — run SQL directly (no LLM)
   !help                         — full help
 """
 
@@ -64,8 +59,6 @@ load_dotenv()
 SERVER_HOST         = os.getenv("AISVC_HOST", "http://127.0.0.1:8765")
 SUBMIT_URL          = f"{SERVER_HOST}/submit"
 STREAM_URL          = f"{SERVER_HOST}/stream"
-GATE_RESPONSE_URL   = f"{SERVER_HOST}/gate_response"
-
 DEFAULT_INPUT_LINES = 3
 BORDER_CHAR         = "─"
 
@@ -128,14 +121,10 @@ class AppState:
         self.redraw_event          = asyncio.Event()
         self.running: bool         = True
         self.current_model: str    = "unknown"
-        # Human gate
-        self.pending_gate: dict | None = None
         # Output buffer scroll  (0 = pinned to bottom; N = scrolled up N display-lines)
         self.output_scroll: int    = 0
         # Mouse capture state
         self.mouse_enabled: bool   = False
-        # Gate preview truncation length (chars). Configurable via !gate_preview_length.
-        self.gate_preview_length: int = 25
         # Session switching
         self.session_switch_requested: bool = False
         self.new_session_id: str | None = None
@@ -143,6 +132,8 @@ class AppState:
         self.input_history: list[str] = []   # oldest first
         self.history_idx: int = -1           # -1 = not browsing; 0..n-1 = index into history
         self.history_draft: str = ""         # saved draft while browsing
+        # Gate state — set when server sends a gate event; cleared after response
+        self.gate_pending: bool = False      # True = waiting for user y/n
 
     async def append_output(self, text: str):
         async with self.lock:
@@ -197,15 +188,19 @@ async def submit_to_server(text: str):
         await state.append_output(f"[ERROR] Submit failed: {exc}")
 
 
-async def send_gate_response(gate_id: str, decision: str):
+async def gate_respond(approved: bool):
+    """Send gate Y/N response to the server."""
+    gate_url = f"{SERVER_HOST}/gate_respond"
+    payload = {"client_id": CLIENT_ID, "approved": approved}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(GATE_RESPONSE_URL, json={
-                "gate_id":  gate_id,
-                "decision": decision,
-            })
+            resp = await client.post(gate_url, json=payload)
+            if resp.status_code != 200:
+                await state.append_output(
+                    f"[GATE ERROR] Server returned {resp.status_code}: {resp.text}"
+                )
     except Exception as exc:
-        await state.append_output(f"[ERROR] Gate response failed: {exc}")
+        await state.append_output(f"[GATE ERROR] gate_respond failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -346,12 +341,13 @@ async def attach_session(session_id: str):
 async def sse_listener():
     """
     Persistent SSE connection.  Decodes \\n → real newlines in token data.
-    Handles: token stream, done, error, gate_request.
+    Handles: token stream, done, error.
     """
     global CLIENT_ID
     params          = {"client_id": CLIENT_ID}
     current_reply: list[str] = []
     current_event   = "message"
+    gate_buf: list[str] = []   # accumulates data: lines for a multi-line gate event
 
     while state.running:
         # Check for session switch request
@@ -378,6 +374,17 @@ async def sse_listener():
                         line = line.strip()
 
                         if not line:
+                            # Blank line = SSE event dispatch boundary.
+                            # If we were accumulating a gate event, dispatch it now.
+                            if gate_buf:
+                                decoded_gate = "\n".join(gate_buf)
+                                gate_buf.clear()
+                                await state.append_output(f"\n{'='*60}")
+                                await state.append_output(decoded_gate)
+                                await state.append_output(f"{'='*60}\n")
+                                async with state.lock:
+                                    state.gate_pending = True
+                                await state.set_status("GATE: type y/yes to allow, anything else to deny")
                             current_event = "message"
                             continue
 
@@ -389,6 +396,7 @@ async def sse_listener():
                                 if current_reply:
                                     await state.append_output("")
                                     current_reply.clear()
+                                gate_buf.clear()
                                 current_event = "message"
                             continue
 
@@ -412,6 +420,12 @@ async def sse_listener():
                             current_event = "message"
                             continue
 
+                        # ---- gate prompt ----------------------------------
+                        # Accumulate all data: lines; dispatch on blank line above.
+                        if current_event == "gate":
+                            gate_buf.append(raw.replace("\\n", "\n"))
+                            continue
+
                         # ---- error ----------------------------------------
                         if current_event == "error":
                             try:
@@ -421,73 +435,6 @@ async def sse_listener():
                                 )
                             except Exception:
                                 await state.append_output(f"\n[SERVER ERROR] {raw}")
-                            current_event = "message"
-                            continue
-
-                        # ---- gate_request ----------------------------------
-                        if current_event == "gate_request":
-                            try:
-                                gate_data = json.loads(raw)
-                                async with state.lock:
-                                    state.pending_gate = gate_data
-                                    prev_len = state.gate_preview_length
-                                tool_name = gate_data.get("tool_name", "unknown")
-                                tool_args = gate_data.get("tool_args", {})
-                                raw_tables = gate_data.get("tables", [])
-
-                                def _trunc(text: str, n: int) -> str:
-                                    """Truncate to n chars and append ellipsis if cut."""
-                                    return text[:n] + ("…" if len(text) > n else "")
-
-                                # Friendly label for __meta__ sentinel
-                                def _fmt_table(t: str) -> str:
-                                    return "(no-table: SHOW/DESCRIBE/etc.)" if t == "__meta__" else t
-
-                                tables_str = ", ".join(_fmt_table(t) for t in raw_tables)
-
-                                if tool_name == "db_query":
-                                    sql = tool_args.get("sql", "")
-                                    meta_hint = (
-                                        "\n   💡 Tip: '!autoAIdb __meta__ true' to auto-allow these"
-                                        if raw_tables == ["__meta__"] else ""
-                                    )
-                                    await state.append_output(
-                                        f"\n🔒 AI tool request: {tool_name}\n"
-                                        f"   SQL    : {_trunc(sql, prev_len)}\n"
-                                        f"   Tables : {tables_str or '(none detected)'}"
-                                        f"{meta_hint}\n"
-                                        f"   ► Press [a] to allow  or  [r] to reject"
-                                    )
-                                elif tool_name == "google_search":
-                                    query = tool_args.get("query", "")
-                                    await state.append_output(
-                                        f"\n🔍 AI web search request: {tool_name}\n"
-                                        f"   Query  : {_trunc(query, prev_len)}\n"
-                                        f"   (external network call — costs API quota)\n"
-                                        f"   ► Press [a] to allow  or  [r] to reject"
-                                    )
-                                elif tool_name == "update_system_prompt":
-                                    operation = tool_args.get("operation", "?")
-                                    content   = tool_args.get("content", "")
-                                    target    = tool_args.get("target", "")
-                                    lines = [
-                                        f"\n🔒 AI tool request: {tool_name}",
-                                        f"   Operation: {operation}",
-                                    ]
-                                    if content:
-                                        lines.append(f"   Content  : {_trunc(content, prev_len)}")
-                                    if target:
-                                        lines.append(f"   Target   : {_trunc(target, prev_len)}")
-                                    lines.append("   ► Press [a] to allow  or  [r] to reject")
-                                    await state.append_output("\n".join(lines))
-                                else:
-                                    await state.append_output(
-                                        f"\n🔒 AI tool request: {tool_name}\n"
-                                        f"   Args   : {_trunc(str(tool_args), prev_len)}\n"
-                                        f"   ► Press [a] to allow  or  [r] to reject"
-                                    )
-                            except Exception as exc:
-                                await state.append_output(f"[gate parse error] {exc}")
                             current_event = "message"
                             continue
 
@@ -523,6 +470,19 @@ async def sse_listener():
 async def user_input_handler(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
+        return True
+
+    # Gate response intercept — if a gate is pending, this input is the Y/N answer
+    async with state.lock:
+        gate_active = state.gate_pending
+    if gate_active:
+        approved = stripped.lower() in ("y", "yes")
+        async with state.lock:
+            state.gate_pending = False
+        label = "ALLOWED" if approved else "DENIED"
+        await state.append_output(f"[GATE] {label}")
+        await gate_respond(approved)
+        await state.set_status(f"Connected  model={state.current_model}")
         return True
 
     if stripped.startswith("!"):
@@ -563,24 +523,6 @@ async def user_input_handler(text: str) -> bool:
                     state.mouse_enabled = not state.mouse_enabled
                     new_mode = state.mouse_enabled
                 await state.append_output(f"[shell] Mouse capture {'ON' if new_mode else 'OFF'}.")
-            return True
-
-        if cmd == "gate_preview_length":
-            if arg:
-                try:
-                    n = int(arg)
-                    if n >= 1:
-                        async with state.lock:
-                            state.gate_preview_length = n
-                        await state.append_output(f"[shell] Gate preview length set to {n} chars.")
-                    else:
-                        await state.append_output("[shell] !gate_preview_length: value must be >= 1.")
-                except ValueError:
-                    await state.append_output("[shell] Usage: !gate_preview_length <integer>")
-            else:
-                async with state.lock:
-                    current = state.gate_preview_length
-                await state.append_output(f"[shell] Gate preview length: {current} chars.")
             return True
 
         if cmd == "session":
@@ -702,19 +644,15 @@ def _draw(stdscr, snap: dict):
             pass
 
     # ---- Separator ---------------------------------------------------------
-    if snap["pending_gate"]:
-        status_str = " ⚠  AI GATE PENDING — [a]llow / [r]eject "
-        attr = curses.A_BOLD | curses.A_REVERSE
-    else:
-        base_status = snap["status"]
-        if scroll > 0:
-            lines_above = max(0, total_display - output_rows - scroll)
-            base_status = f"{base_status}  [↑{scroll} scrolled — ↑{lines_above} more above]"
-        elif total_display > output_rows:
-            lines_above = total_display - output_rows
-            base_status = f"{base_status}  [↑{lines_above} above — PgUp to scroll]"
-        status_str = f" {base_status} "
-        attr = curses.A_BOLD
+    base_status = snap["status"]
+    if scroll > 0:
+        lines_above = max(0, total_display - output_rows - scroll)
+        base_status = f"{base_status}  [↑{scroll} scrolled — ↑{lines_above} more above]"
+    elif total_display > output_rows:
+        lines_above = total_display - output_rows
+        base_status = f"{base_status}  [↑{lines_above} above — PgUp to scroll]"
+    status_str = f" {base_status} "
+    attr = curses.A_BOLD
 
     fill_len = max(0, max_x - len(status_str))
     sep_line = (status_str + BORDER_CHAR * fill_len)[:max_x]
@@ -726,44 +664,37 @@ def _draw(stdscr, snap: dict):
     # ---- Input area --------------------------------------------------------
     usable = max_x - 2         # 2 chars for "> " / "  " prefix
 
-    if snap["pending_gate"]:
-        hint = "  (input blocked — resolve gate above)"[:max_x]
+    text      = snap["input_text"]
+    pos       = snap["input_cursor_pos"]
+    chunks    = _chunk_input(text, usable)
+
+    # Scroll offset so cursor chunk is always visible
+    cur_chunk    = pos // usable if usable > 0 else 0
+    start_chunk  = max(0, cur_chunk - (input_lines - 1))
+
+    for i in range(input_lines):
+        row = border_row + 1 + i
+        if row >= max_y:
+            break
+        chunk_idx = start_chunk + i
+        chunk     = chunks[chunk_idx] if chunk_idx < len(chunks) else ""
+        prefix    = "> " if (start_chunk == 0 and i == 0) else "  "
         try:
-            stdscr.addstr(border_row + 1, 0, hint, curses.A_DIM)
+            stdscr.addstr(row, 0, (prefix + chunk)[:max_x])
         except Exception:
             pass
-    else:
-        text      = snap["input_text"]
-        pos       = snap["input_cursor_pos"]
-        chunks    = _chunk_input(text, usable)
 
-        # Scroll offset so cursor chunk is always visible
-        cur_chunk    = pos // usable if usable > 0 else 0
-        start_chunk  = max(0, cur_chunk - (input_lines - 1))
-
-        for i in range(input_lines):
-            row = border_row + 1 + i
-            if row >= max_y:
-                break
-            chunk_idx = start_chunk + i
-            chunk     = chunks[chunk_idx] if chunk_idx < len(chunks) else ""
-            prefix    = "> " if (start_chunk == 0 and i == 0) else "  "
-            try:
-                stdscr.addstr(row, 0, (prefix + chunk)[:max_x])
-            except Exception:
-                pass
-
-        # Cursor
-        col_in_chunk = pos % usable if usable > 0 else 0
-        screen_row   = border_row + 1 + (cur_chunk - start_chunk)
-        screen_col   = 2 + col_in_chunk
-        try:
-            stdscr.move(
-                min(screen_row, max_y - 1),
-                min(screen_col, max_x - 1),
-            )
-        except Exception:
-            pass
+    # Cursor
+    col_in_chunk = pos % usable if usable > 0 else 0
+    screen_row   = border_row + 1 + (cur_chunk - start_chunk)
+    screen_col   = 2 + col_in_chunk
+    try:
+        stdscr.move(
+            min(screen_row, max_y - 1),
+            min(screen_col, max_x - 1),
+        )
+    except Exception:
+        pass
 
     stdscr.refresh()
 
@@ -776,7 +707,6 @@ def _snapshot(st: AppState) -> dict:
         "input_cursor_pos": st.input_cursor_pos,
         "input_lines":      st.input_lines,
         "status":           st.status,
-        "pending_gate":     st.pending_gate,
     }
 
 
@@ -969,24 +899,6 @@ async def input_loop(stdscr):
                     state.redraw_event.set()
             except Exception:
                 pass
-            continue
-
-        # ---- Human gate mode -----------------------------------------------
-        async with state.lock:
-            gate = state.pending_gate
-
-        if gate is not None:
-            if ch in (ord('a'), ord('A')):
-                async with state.lock:
-                    state.pending_gate = None
-                await state.append_output("[shell] ✓ Allowed — AI tool proceeding.")
-                loop.create_task(send_gate_response(gate["gate_id"], "allow"))
-            elif ch in (ord('r'), ord('R')):
-                async with state.lock:
-                    state.pending_gate = None
-                await state.append_output("[shell] ✗ Rejected — AI tool blocked.")
-                loop.create_task(send_gate_response(gate["gate_id"], "reject"))
-            state.redraw_event.set()
             continue
 
         # ---- Normal mode ---------------------------------------------------

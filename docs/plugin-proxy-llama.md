@@ -24,8 +24,7 @@ OpenAI/Ollama-compatible API proxy. Enables external chat apps (open-webui, Ench
 - **Model parameter is ignored** — the server uses the session's active model regardless of what the client sends
 - **Client history is ignored** — server maintains its own session history
 - **Client system prompt is ignored** — server uses its own `.system_prompt` files
-- **Gates auto-reject** — proxy clients cannot respond to gate pop-ups; pre-approve with `!autogate`/`!autoAIdb`
-- **All `!commands` work** — send `!help`, `!model`, `!autogate`, etc. as chat messages
+- **All `!commands` work** — send `!help`, `!model`, `!llm_tools list`, etc. as chat messages
 - Session ID format: `llama-<client-ip>`
 
 ## Dependencies

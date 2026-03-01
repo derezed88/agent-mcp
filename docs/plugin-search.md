@@ -1,16 +1,16 @@
 # Plugins: Search Tools
 
-Four search plugins are available. All are read-only and share the same gate type (`search`).
+Four search plugins are available. All are read-only.
 
-## Gate control
+## Tool access
+
+Search tool access is controlled per-model via `llm_tools` in `llm-models.json`. Add the
+search tool names to a model's tool list to grant access, or use `"all"` to include all tools.
 
 ```
-!autogate search true              auto-allow ALL search tools
-!autogate ddgs_search true         auto-allow DuckDuckGo only
-!autogate tavily_search true       auto-allow Tavily only
-!autogate xai_search true          auto-allow xAI only
-!autogate google_search true       auto-allow Google only
-!autogate search                   show current search gate status
+!llm_tools read <model>                    show which tools a model can use
+!llm_tools write <model> ddgs_search       grant DuckDuckGo only
+!llm_tools write <model> ddgs_search,tavily_search,xai_search,google_search   grant all search
 ```
 
 ---
@@ -88,8 +88,4 @@ pip install tavily-python
 python agentctl.py enable plugin_urlextract_tavily
 ```
 
-Gate type: `extract` (separate from search):
-```
-!autogate extract true             auto-allow all URL extractions
-!autogate url_extract true         auto-allow url_extract specifically
-```
+Access controlled per-model via `llm_tools` — add `"url_extract"` to a model's tool list.

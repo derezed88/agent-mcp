@@ -7,24 +7,15 @@ and agent-to-agent (swarm) communication.
 Endpoints:
 - POST /api/v1/submit        - Submit message or command
 - GET  /api/v1/stream/{id}   - SSE stream of JSON events
-- POST /api/v1/gate/{gate_id}- Respond to a gate request
 - GET  /api/v1/sessions      - List active sessions
 - GET  /api/v1/health        - Health check
 - DELETE /api/v1/session/{sid} - Delete a session
 
 SSE event types (all data is JSON):
   event: tok        data: {"text": "..."}
-  event: gate       data: {"gate_id": "...", "tool_name": "...", "tool_args": {...}, "tables": [...]}
   event: done       data: {}
   event: error      data: {"message": "..."}
   event: keepalive  (comment, no data)
-
-Gate handling for api- clients:
-  Gates are pushed to the SSE queue immediately. The server waits
-  API_GATE_TIMEOUT seconds (default 2s) for the client to POST a response
-  via /api/v1/gate/{gate_id}. If no response arrives in time, the gate
-  auto-rejects. AgentClient uses auto_approve_gates policy to respond
-  automatically within milliseconds when configured.
 """
 
 import os
@@ -39,12 +30,9 @@ from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from plugin_loader import BasePlugin
-from state import get_queue, push_done, sessions, pending_gates, sse_queues, remove_shorthand_mapping, get_or_create_shorthand_id, drain_queue
+from state import get_queue, push_done, sessions, sse_queues, remove_shorthand_mapping, get_or_create_shorthand_id, drain_queue
 from routes import process_request, cancel_active_task
 from state import active_tasks
-
-# How long (seconds) gate.py waits for an api- client to respond before auto-rejecting
-API_GATE_TIMEOUT: float = float(os.getenv("API_GATE_TIMEOUT", "2.0"))
 
 # Optional API key — if set, all /api/v1/* requests must carry Authorization: Bearer <key>
 _API_KEY: str = os.getenv("API_KEY", "")
@@ -139,10 +127,6 @@ async def endpoint_api_submit(request: Request) -> JSONResponse:
                         "status": "complete",
                         "text": "".join(accumulated),
                     })
-                elif t == "gate":
-                    # In sync mode, gate events are auto-rejected (no interaction possible)
-                    # The gate.py side handles the timeout rejection; just skip here.
-                    pass
         except asyncio.CancelledError:
             return JSONResponse({"client_id": client_id, "status": "cancelled", "text": "".join(accumulated)})
     else:
@@ -194,37 +178,9 @@ async def endpoint_api_stream(request: Request):
                 yield {"event": "flush", "data": "{}"}
             elif t == "err":
                 yield {"event": "error", "data": json.dumps({"message": item["d"].replace("\\n", "\n")})}
-            elif t == "gate":
-                yield {"event": "gate", "data": json.dumps(item["d"])}
 
     return EventSourceResponse(generator())
 
-
-async def endpoint_api_gate(request: Request) -> JSONResponse:
-    """
-    Respond to a gate request.
-
-    POST /api/v1/gate/{gate_id}
-    Body: {"approve": true}
-    Response: {"status": "ok"} or {"error": "unknown gate"}
-    """
-    if not _check_auth(request):
-        return _auth_error()
-
-    gate_id = request.path_params.get("gate_id", "")
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-
-    approve = bool(body.get("approve", False))
-    decision = "allow" if approve else "reject"
-
-    if gate_id in pending_gates:
-        pending_gates[gate_id]["decision"] = decision
-        pending_gates[gate_id]["event"].set()
-        return JSONResponse({"status": "ok"})
-    return JSONResponse({"error": "unknown gate"}, status_code=404)
 
 
 async def endpoint_api_sessions(request: Request) -> JSONResponse:
@@ -338,7 +294,6 @@ class ApiClientPlugin(BasePlugin):
         return [
             Route("/api/v1/submit", endpoint_api_submit, methods=["POST"]),
             Route("/api/v1/stream/{client_id}", endpoint_api_stream, methods=["GET"]),
-            Route("/api/v1/gate/{gate_id}", endpoint_api_gate, methods=["POST"]),
             Route("/api/v1/stop", endpoint_api_stop, methods=["POST"]),
             Route("/api/v1/sessions", endpoint_api_sessions, methods=["GET"]),
             Route("/api/v1/health", endpoint_api_health, methods=["GET"]),

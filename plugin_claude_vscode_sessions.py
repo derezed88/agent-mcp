@@ -37,7 +37,7 @@ def _resolve_summary_model(requested: str) -> str | None:
     Priority:
       1. Explicitly requested model (non-empty string).
       2. The calling session's currently selected model (via current_client_id).
-      3. None — llm_call will return an error, caller falls back to full text.
+      3. DEFAULT_MODEL — covers API/MCP callers that have no agent-mcp session context.
     """
     if requested:
         return requested
@@ -45,15 +45,48 @@ def _resolve_summary_model(requested: str) -> str | None:
         from state import current_client_id, sessions
         client_id = current_client_id.get("")
         if client_id:
-            return sessions.get(client_id, {}).get("model") or None
+            model = sessions.get(client_id, {}).get("model")
+            if model:
+                return model
     except Exception:
         pass
-    return None
-
+    try:
+        from config import LLM_MODELS_FILE
+        import json as _json
+        with open(LLM_MODELS_FILE) as _f:
+            return _json.load(_f).get("default_model") or None
+    except Exception:
+        pass
+    try:
+        from config import DEFAULT_MODEL
+        return DEFAULT_MODEL or None
+    except Exception:
+        return None
 
 _API_KEY: str = os.getenv("API_KEY", "")
 
 CLAUDE_PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+
+# Summarizer instruction sent to the LLM for mode="summary" calls.
+# Tuned for Qwen2.5-7B (nuc11Localtokens): explicit structure rules
+# produce better output than a single-sentence instruction.
+_SUMMARIZE_INSTRUCTION = (
+    "You are a technical summarizer. Read the Claude Code chat session below "
+    "and produce a structured summary.\n\n"
+    "Rules:\n"
+    "- Use short labeled sections: ## Goal, ## Key Decisions, ## Commands Run, "
+    "## Files Changed, ## Left Unfinished\n"
+    "- Copy commands, config values, file paths, and error messages verbatim — "
+    "do not paraphrase them\n"
+    "- Omit tool call scaffolding, retries, and filler assistant text\n"
+    "- Be concise. Prefer bullet points over prose.\n"
+    "- Do not add commentary or opinions about the session.\n"
+)
+
+# Max characters of session text sent to the summarizer LLM.
+# Gemini Flash Lite (max_context=10000 tokens ≈ 40K chars) times out on larger
+# sessions. 30K chars leaves headroom for the instruction + response tokens.
+_MAX_SUMMARY_CHARS = 30_000
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +129,20 @@ def _extract_session_title(jsonl_path: str) -> Optional[str]:
     return None
 
 
+def _utc_ts_to_local_date(ts: str) -> str:
+    """
+    Convert a UTC ISO 8601 timestamp (e.g. '2026-02-26T00:08:01.380Z') to a
+    local YYYY-MM-DD date string using the system timezone.
+    Falls back to the raw date prefix on parse failure.
+    """
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%Y-%m-%d")
+    except Exception:
+        return ts[:10]
+
+
 def _extract_session_meta(jsonl_path: str) -> dict:
     """Return metadata for a single JSONL session file."""
     session_id = os.path.splitext(os.path.basename(jsonl_path))[0]
@@ -127,7 +174,7 @@ def _extract_session_meta(jsonl_path: str) -> dict:
 
     title = _extract_session_title(jsonl_path)
 
-    # Decode project dir name (-home-markj-projects-foo → /home/markj/projects/foo)
+    # Decode project dir name (-home-user-projects-foo → /home/user/projects/foo)
     project_dir = os.path.basename(os.path.dirname(jsonl_path))
     project_path = project_dir.replace("-", "/").lstrip("/")
     if not project_path.startswith("/"):
@@ -171,7 +218,11 @@ def _list_all_sessions(date_filter: Optional[str] = None,
         meta = _extract_session_meta(jsonl_path)
 
         if date_filter and meta.get("first_timestamp"):
-            if not meta["first_timestamp"].startswith(date_filter):
+            # Convert UTC timestamp to local date before filtering so that
+            # sessions started after 22:00 local (but already next UTC day)
+            # are correctly attributed to the local calendar date.
+            local_date = _utc_ts_to_local_date(meta["first_timestamp"])
+            if not local_date.startswith(date_filter):
                 continue
 
         if project_filter and project_filter.lower() not in meta["project_path"].lower():
@@ -273,7 +324,7 @@ async def endpoint_sessions_read(request: Request) -> JSONResponse:
         return JSONResponse({"error": "session_ids required (comma-separated)"}, status_code=400)
 
     mode  = request.query_params.get("mode", "full").strip().lower()
-    model = request.query_params.get("model", "").strip() or None
+    model = request.query_params.get("model", "").strip() or _resolve_summary_model("")
 
     try:
         all_sessions = await asyncio.to_thread(_list_all_sessions)
@@ -311,12 +362,10 @@ async def endpoint_sessions_read(request: Request) -> JSONResponse:
             if mode == "summary":
                 try:
                     from agents import llm_call
-                    instruction = (
-                        "Summarize this Claude Code chat session. "
-                        "Preserve specific commands, syntax, config values, and technical details verbatim. "
-                        "Organize into clearly labeled topic sections."
-                    )
-                    prompt = f"{instruction}\n\n---\n{raw_text}\n---"
+                    truncated = raw_text[:_MAX_SUMMARY_CHARS]
+                    if len(raw_text) > _MAX_SUMMARY_CHARS:
+                        truncated += f"\n\n[TRUNCATED: session is {len(raw_text):,} chars; only first {_MAX_SUMMARY_CHARS:,} sent to summarizer]"
+                    prompt = f"{_SUMMARIZE_INSTRUCTION}\n\n---\n{truncated}\n---"
                     session_text = await llm_call(
                         model=model, prompt=prompt, mode="text",
                         sys_prompt="none", history="none",
@@ -405,11 +454,13 @@ async def _cmd_vscode(args: str) -> str:
             return "No sessions found."
         lines = [f"Found {len(sessions)} session(s):\n"]
         for s in sessions:
-            ts = (s.get("first_timestamp") or "")[:10]
+            ts = _utc_ts_to_local_date(s["first_timestamp"]) if s.get("first_timestamp") else ""
             proj = (s.get("project_path") or "").split("/")[-1]
             sid  = s["session_id"][:8]
             title = (s.get("title") or "(no title)")[:60]
-            lines.append(f"  [{ts}] {proj:<28} ID: {sid}...  \"{title}\"")
+            kb = (s.get("file_bytes") or 0) / 1024
+            size_str = f"{kb:.0f}kB"
+            lines.append(f"  [{ts}] {proj:<28} ID: {sid}...  {size_str:>7}  \"{title}\"")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -459,12 +510,10 @@ async def _cmd_vscode(args: str) -> str:
             if mode == "summary":
                 try:
                     from agents import llm_call
-                    instruction = (
-                        "Summarize this Claude Code chat session. "
-                        "Preserve specific commands, syntax, config values, and technical details verbatim. "
-                        "Organize into clearly labeled topic sections."
-                    )
-                    prompt = f"{instruction}\n\n---\n{raw_text}\n---"
+                    truncated = raw_text[:_MAX_SUMMARY_CHARS]
+                    if len(raw_text) > _MAX_SUMMARY_CHARS:
+                        truncated += f"\n\n[TRUNCATED: session is {len(raw_text):,} chars; only first {_MAX_SUMMARY_CHARS:,} sent to summarizer]"
+                    prompt = f"{_SUMMARIZE_INSTRUCTION}\n\n---\n{truncated}\n---"
                     session_text = await llm_call(
                         model=model, prompt=prompt, mode="text",
                         sys_prompt="none", history="none",
@@ -510,11 +559,13 @@ async def _vscode_sessions_list_executor(date: str = "", project: str = "") -> s
         return "No sessions found."
     lines = [f"Found {len(sessions)} session(s):\n"]
     for s in sessions:
-        ts    = (s.get("first_timestamp") or "")[:10]
+        ts    = _utc_ts_to_local_date(s["first_timestamp"]) if s.get("first_timestamp") else ""
         proj  = (s.get("project_path") or "").split("/")[-1]
         sid   = s["session_id"][:8]
         title = (s.get("title") or "(no title)")[:60]
-        lines.append(f"  [{ts}] {proj:<28} ID: {sid}...  \"{title}\"")
+        kb = (s.get("file_bytes") or 0) / 1024
+        size_str = f"{kb:.0f}kB"
+        lines.append(f"  [{ts}] {proj:<28} ID: {sid}...  {size_str:>7}  \"{title}\"")
     return "\n".join(lines)
 
 
@@ -554,12 +605,10 @@ async def _vscode_sessions_read_executor(session_ids: str, mode: str = "full", m
         if mode == "summary":
             try:
                 from agents import llm_call
-                instruction = (
-                    "Summarize this Claude Code chat session. "
-                    "Preserve specific commands, syntax, config values, and technical details verbatim. "
-                    "Organize into clearly labeled topic sections."
-                )
-                prompt = f"{instruction}\n\n---\n{raw_text}\n---"
+                truncated = raw_text[:_MAX_SUMMARY_CHARS]
+                if len(raw_text) > _MAX_SUMMARY_CHARS:
+                    truncated += f"\n\n[TRUNCATED: session is {len(raw_text):,} chars; only first {_MAX_SUMMARY_CHARS:,} sent to summarizer]"
+                prompt = f"{_SUMMARIZE_INSTRUCTION}\n\n---\n{truncated}\n---"
                 session_text = await llm_call(
                     model=resolved_model, prompt=prompt, mode="text",
                     sys_prompt="none", history="none",

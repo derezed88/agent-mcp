@@ -14,7 +14,7 @@ Slack bidirectional client. The agent joins Slack via Socket Mode — no public 
 
 - Session ID format: `slack-<channel_id>-<thread_ts>`
 - Each thread = isolated session with its own history and model
-- Gates auto-reject (Slack cannot display approval pop-ups; pre-approve with `!autogate`/`!autoAIdb`)
+- Tool access controlled per-model via `llm_tools` in `llm-models.json`
 
 ## Prerequisites
 

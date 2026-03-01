@@ -135,8 +135,6 @@ python agentctl.py model-remove <model_name>          # remove a model
 python agentctl.py model-enable <model_name>          # enable a model
 python agentctl.py model-disable <model_name>         # disable a model
 python agentctl.py model <model_name>                 # set as default model
-python agentctl.py model-llmcall <model_name> <t|f>  # set tool_call_available
-python agentctl.py model-llmcall-all <t|f>           # set for all models
 python agentctl.py model-timeout <model_name> <secs> # set llm_call_timeout
 ```
 
@@ -158,7 +156,7 @@ Tool types: `llm_call`, `search`, `extract`, `drive`, `db`, `system`, `tmux`
 
 **All clients connecting to the API port (`plugin_client_api`, default 8767) are treated as trusted administrators.**
 
-There is no inbound command ACL — any client that can reach the port can send any message, including `!commands`. The gate system is the enforcement layer: LLMs must pass gate checks for sensitive tool calls, but the human-facing command interface has no restrictions for API clients.
+There is no inbound command ACL — any client that can reach the port can send any message, including `!commands`. Tool access is controlled per-model via `llm_tools` in `llm-models.json`, but the human-facing command interface has no restrictions for API clients.
 
 This is intentional. The API port is for trusted orchestrators: other agent-mcp instances, automation scripts, and inter-agent swarms. Inbound restriction is out of scope; network-level controls (firewall, SSH tunnel, VPN) are expected to restrict who can reach the port at all.
 
@@ -203,44 +201,91 @@ Once connected via shell.py, all administration is done via `!commands`.
 !model <name>              switch active LLM for this session
 ```
 
-### Gate Management
+### Tool Access Management
 
-Gates are per-session controls that require human approval before tool calls execute.
+Tool access is controlled per-model via the `llm_tools` field in `llm-models.json`. Use the unified resource commands to view and manage toolsets:
 
-**Database gates:**
 ```
-!autoAIdb status                        show current DB gate settings
-!autoAIdb <table> read <true|false>     toggle read gate for a specific table
-!autoAIdb <table> write <true|false>    toggle write gate for a specific table
-!autoAIdb <table> <true|false>          toggle both read+write for a table
-!autoAIdb read <true|false>             set DEFAULT for ALL tables
-!autoAIdb write <true|false>            set DEFAULT for ALL tables
-!autoAIdb __meta__ read <true|false>    toggle gate for SHOW/DESCRIBE queries
+!llm_tools list                         list all models with their tool access
+!llm_tools read <model>                 show tools available to a specific model
+!llm_tools write <model> all            give model access to all tools
+!llm_tools write <model> tool1,tool2    set specific tool list for a model
+!llm_tools write <model> none           remove all tool access (text-only)
 ```
 
-**Tool gates (search, extract, drive):**
+### Tool Call Gates (`llm_tools_gates`)
+
+Tool call gates require a human to approve a specific tool call before the LLM can execute it.
+Gates are configured per-model using the `llm_tools_gates` field in `llm-models.json`.
+
+#### Gate entry syntax
+
+| Entry | Effect |
+|---|---|
+| `db_query` | Gate **all** `db_query` calls |
+| `model_cfg write` | Gate only `model_cfg` calls where `action == "write"` |
+| `google_drive` | Gate all Google Drive operations |
+
+Multiple entries are comma-separated.
+
+#### Configuring gates at runtime
+
 ```
-!autogate status                        show all tool gate settings
-!autogate search <true|false>           toggle gate for ALL search tools
-!autogate <tool_name> <true|false>      toggle gate for one specific tool
-!autogate extract <true|false>          toggle gate for ALL extract tools
-!autogate drive read <true|false>       toggle Drive read gate
-!autogate drive write <true|false>      toggle Drive write gate
-!autogate read <true|false>             set DEFAULT for all tools
-!autogate write <true|false>            set DEFAULT for all tools
+!model_cfg write <model> llm_tools_gates <entry1,entry2,...>
 ```
 
-**System prompt gates:**
+Examples:
 ```
-!autoAISysPrompt                        show current settings
-!autoAISysPrompt read <true|false>      toggle read_system_prompt gate
-!autoAISysPrompt write <true|false>     toggle update_system_prompt gate
+!model_cfg write gemini25f llm_tools_gates db_query
+!model_cfg write gemini25f llm_tools_gates db_query,model_cfg write,google_drive
+!model_cfg write gemini25f llm_tools_gates        (empty value = clear all gates)
 ```
 
-`true` = gate OFF (auto-allow, no approval needed)
-`false` = gate ON (requires human approval each time)
+Via agentctl:
+```bash
+python agentctl.py model-cfg write gemini25f llm_tools_gates db_query,model_cfg write
+```
 
-**Wildcard defaults:** Setting a gate without a specific table/tool name sets the default for all unspecified entries.
+Or directly in `llm-models.json`:
+```json
+"gemini25f": {
+  "llm_tools_gates": ["db_query", "model_cfg write"]
+}
+```
+
+#### How gates work by client
+
+| Client | Gate behavior |
+|---|---|
+| **shell.py** | Shows gate prompt; user types `y`/`yes` to allow, anything else to deny |
+| **llama proxy** | Auto-denied immediately; LLM receives denial message |
+| **Slack** | Auto-denied immediately; LLM receives denial message |
+| **Timeout** | Auto-denied after 120 seconds if no response |
+
+When a gate is pending in shell.py, the status bar changes to `GATE: type y/yes to allow, anything else to deny`. The next input you type is consumed as the gate answer and not sent to the LLM.
+
+#### What the LLM sees on denial
+
+```
+GATE DENIED: tool call '<name>' was denied by the user (or timed out).
+Do NOT retry the same call. Acknowledge the denial and continue without it.
+```
+
+---
+
+### Configuration Management
+
+Five unified resource commands replace the old individual `!commands`:
+
+```
+!model_cfg read <model>                 show model configuration
+!model_cfg write <model> <field> <val>  update a model config field
+!sysprompt_cfg read                     show system prompt
+!sysprompt_cfg read <section>           show a specific section
+!config_cfg read                        show server configuration
+!limits_cfg read                        show depth and rate limits
+!limits_cfg write <key> <value>         update a limit value
+```
 
 ### @model — Per-Turn Model Switch
 
@@ -248,13 +293,12 @@ Prefix any prompt with `@ModelName` to temporarily use a different model for tha
 
 ```
 @localmodel extract https://www.example.com and summarize it
-@gemini25 what is the weather like today?    ← same model, just bypasses gates
+@gemini25 what is the weather like today?
 ```
 
 - Result lands in shared session history
 - Original model restored after the turn
-- All gates are bypassed (admin-initiated delegation)
-- Works with same model too (gate bypass without model switch)
+- Uses the target model's `llm_tools` set for that turn
 
 ### Session Management
 
@@ -293,11 +337,6 @@ Tool results are always sent in full to the LLM. This controls what is displayed
 !tool_preview_length 0          unlimited (no truncation)
 ```
 
-Gate pop-up preview length (shell.py only):
-```
-!gate_preview_length [n]        get/set gate approval preview char limit
-```
-
 ### Agent Streaming Control
 
 ```
@@ -324,26 +363,17 @@ tool calls; humans manage sessions via `!tmux` commands.
 > after a silence timeout — long-running commands should be backgrounded with `&` and polled.
 > See the "Advanced: PTY Session Semantics" section below.
 
-#### Gate Control
+#### Tool Access
 
-All tmux tool calls are **write-gated by default** — the human must approve each call. No
-read gate exists: `tmux_ls` and `tmux_history` are also write-gated because they expose
-session topology (PIDs, names) and command history including credentials.
+Tmux tool access is controlled per-model via `llm_tools` in `llm-models.json`. Add the
+tmux tool names (`tmux_new`, `tmux_exec`, `tmux_ls`, `tmux_history`, `tmux_kill_session`,
+`tmux_kill_server`) to a model's `llm_tools` list to grant access, or use `"all"` to
+include all tools.
 
 ```
-!tmux_gate_write <true|false>              — group gate covering all tmux tools
-!tmux_new_gate_write <true|false>          — per-tool override
-!tmux_exec_gate_write <true|false>         — per-tool override
-!tmux_ls_gate_write <true|false>           — per-tool override
-!tmux_history_gate_write <true|false>      — per-tool override
-!tmux_kill_session_gate_write <true|false> — per-tool override
-!tmux_kill_server_gate_write <true|false>  — per-tool override
-!tmux_history_limit_gate_write <true|false>— per-tool override
-!tmux_call_limit_gate_read <true|false>    — rate limit read gate
-!tmux_call_limit_gate_write <true|false>   — rate limit write gate
+!llm_tools read <model>                    show which tools a model can use
+!llm_tools write <model> tmux_exec,tmux_ls grant specific tmux tools
 ```
-
-`true` = gate OFF (auto-allow). `false` = gate ON (requires human approval).
 
 #### Session Commands
 
@@ -393,15 +423,11 @@ Additionally, `OUTBOUND_AGENT_BLOCKED_COMMANDS` (from `plugin_client_api`) is al
 inside `tmux_exec` — so the same patterns that block outbound agent messages also block PTY
 commands when configured.
 
-#### Security: Gate Bypass via Shell Access
+#### Security: Shell Access Considerations
 
-> **Critical security consideration.** If the tmux gate is set to auto-allow (`!tmux_gate_write true` / `!tmux_exec_gate_write true`), an LLM with shell access can execute arbitrary shell commands — including editing `gate-defaults.json`, `plugins-enabled.json`, and `llm-models.json` directly. This means every other gate in the system becomes bypassable without human approval.
+> **Critical security consideration.** If a model has tmux tools in its `llm_tools` list, it can execute arbitrary shell commands — including editing `plugins-enabled.json` and `llm-models.json` directly. An LLM that can run `sed` or `python` can rewrite any config file on the host.
 >
-> **When tmux auto-allow is enabled, all other security gates are effectively advisory.** An LLM that can run `sed` or `python` can rewrite any config file on the host.
->
-> This is considered out of scope for the gate system. The gate system protects against unintended LLM actions under normal operation; it is not designed to defend against a fully-trusted shell session. If you enable tmux auto-allow, you are granting the LLM root-equivalent control over the agent's configuration — treat it accordingly.
->
-> **Recommendation:** Keep all tmux tools write-gated (the default) unless you are actively in a supervised session and understand the consequences. Use the per-tool overrides to allow only what is needed.
+> **Recommendation:** Only grant tmux tools to models you trust. Use specific tool lists in `llm_tools` rather than `"all"` when tmux access is not needed. Use the command filtering (see below) as an additional safeguard.
 
 #### Advanced: PTY Session Semantics
 
@@ -430,98 +456,68 @@ The agent supports four modes of LLM delegation — ways for either the user or 
 invoke another model. Each mode provides a different level of context isolation and is subject to
 different gates and rate limits.
 
-> **Security note:** Every `!command` available to the human user is also available as a tool call
-> to the LLM. A model with write gates open can switch models, reset history, edit system prompts,
-> and change gate and limit settings on its own. Enable only the gates you intend to. When an
-> `at_llm` or `agent_call` is delegating to another model, that remote model inherits the same
-> tool access — read the depth limit section below before opening write gates broadly.
+> **Security note:** Tool access is controlled per-model via `llm_tools` in `llm-models.json`.
+> A model with access to configuration tools can switch models, reset history, edit system prompts,
+> and change limit settings on its own. Only grant the tools you intend to. When an
+> `at_llm` or `agent_call` is delegating to another model, that remote model uses its own
+> `llm_tools` set — read the depth limit section below before granting broad access.
 
 ---
 
 #### Delegation Method Comparison
 
-| Method | User command | Tool call | System prompt | Chat history | Result in history | Gate |
+| Method | User command | Tool call | System prompt | Chat history | Result in history | Controls |
 |---|---|---|---|---|---|---|
-| `@model` prefix | `@gpt5m <prompt>` | — | ✓ current session | ✓ full | ✓ yes | none (admin-initiated) |
-| `at_llm` | — | `at_llm(model, prompt)` | ✓ current session | ✓ full | ✗ no | write gate |
-| `llm_clean_text` | `!llm_clean_text <model> <prompt>` | `llm_clean_text(model, prompt)` | ✗ none | ✗ none | ✗ no | rate limit only |
-| `llm_clean_tool` | `!llm_clean_tool <model> <tool> <args>` | `llm_clean_tool(model, tool, arguments)` | ✗ none (tool schema only) | ✗ none | ✗ no | rate limit only |
+| `@model` prefix | `@gpt5m <prompt>` | — | ✓ current session | ✓ full | ✓ yes | target model's `llm_tools` |
+| `llm_call` (history=caller) | `!llm_call_invoke <model> <prompt> history=caller` | `llm_call(model, prompt, history="caller")` | caller's or target's (sys_prompt=) | ✓ full | ✗ no | target model's `llm_tools`, rate limited, depth guarded |
+| `llm_call` (history=none) | `!llm_call_invoke <model> <prompt>` | `llm_call(model, prompt)` | none by default | ✗ none | ✗ no | rate limited |
+| `llm_call` (mode=tool) | `!llm_call_invoke <model> <prompt> mode=tool tool=<name>` | `llm_call(model, prompt, mode="tool", tool="name")` | ✗ none (tool schema only) | ✗ none | ✗ no | rate limited |
 | `agent_call` | — | `agent_call(agent_url, message)` | ✓ remote instance's own | ✓ remote session's own | ✗ no | rate limited, depth guarded |
 
 ---
 
 #### `@model` — Per-Turn Model Switch (user only)
 
-Prefix any message with `@ModelName` to use a different model for that one turn. All gates are
-bypassed — this is an explicit admin action. The result is added to shared session history and the
-original model is restored afterward.
+Prefix any message with `@ModelName` to use a different model for that one turn. The target model
+uses its own `llm_tools` set. The result is added to shared session history and the original model
+is restored afterward.
 
 ```
 @gpt5m summarize what we discussed so far
-@gemini25 what is 2+2       ← same model just bypasses gates for this turn
+@gemini25 what is 2+2
 ```
 
 ---
 
-#### `at_llm` — Full-Context LLM Delegation (tool only)
+#### `llm_call` — Unified LLM Delegation (tool + user command)
 
-Passes the **full current session context** (assembled system prompt + complete chat history +
-the given prompt as a new user turn) to the named model and returns its response. The result is
-**not** added to session history, matching `@model` semantics but invocable as a tool call.
+The single unified delegation tool. Behaviour is controlled by three parameters:
 
-All tool gates are bypassed for the called model (same as `@model`). Subject to the `llm_call`
-rate limit bucket.
+**`mode`** — `"text"` (default) returns a text response; `"tool"` forces a single tool call
+(requires `tool=<name>`).
 
-```
-# LLM tool call:
-at_llm(model="gpt5m", prompt="Review the last tool result and suggest improvements.")
-```
+**`sys_prompt`** — `"none"` (default): no system prompt; `"caller"`: calling model's assembled
+prompt; `"target"`: target model's own folder prompt.
 
-**Gate:** write-gated — controlled by `!at_llm_gate_write <true|false>` (default: gated).
-Enable with `!at_llm_gate_write false` to allow without approval.
-
----
-
-#### `llm_clean_text` — Stateless LLM Call
-
-Calls a target model with **no context at all** — no system prompt, no history, no tool
-definitions. The target model sees only the literal prompt string. The response is returned
-directly to the calling LLM or printed in the shell; it is never added to history.
-
-Use for: offloading summarization, translation, reformatting, or analysis of data you embed in
-the prompt itself. Only models with `tool_call_available=true` may be called.
+**`history`** — `"none"` (default): no chat history; `"caller"`: full current session history
+(depth-guarded via `max_at_llm_depth`).
 
 ```
-# User command:
-!llm_clean_text nuc11Local Summarize: "The quick brown fox..."
+# Stateless text call (replaces llm_clean_text):
+!llm_call_invoke nuc11Local "Summarize: the quick brown fox..."
+llm_call(model="nuc11Local", prompt="Summarize the following text: ...")
 
-# LLM tool call:
-llm_clean_text(model="nuc11Local", prompt="Summarize the following text: ...")
+# Full-context delegation (replaces at_llm):
+!llm_call_invoke gpt5m "Review the last tool result." history=caller sys_prompt=caller
+llm_call(model="gpt5m", prompt="Review the last tool result.", history="caller", sys_prompt="caller")
+
+# Tool delegation (replaces llm_clean_tool):
+!llm_call_invoke nuc11Local "https://example.com summarize" mode=tool tool=url_extract
+llm_call(model="nuc11Local", prompt="https://example.com summarize", mode="tool", tool="url_extract")
 ```
 
-**Rate limited:** default 3 calls per 20 seconds (shared with `llm_clean_tool` and `at_llm`).
-No gate — always allowed when within rate limits.
-
----
-
-#### `llm_clean_tool` — Stateless Tool Delegation
-
-Delegates a **single named tool call** to a target model with minimal context. The target model
-receives only that tool's schema as its system prompt and the `arguments` string as the user
-message. The server executes the resulting tool call (normal gates apply), and the tool result is
-synthesized by the target model before returning the final text.
-
-Use for: offloading tool execution to a local/free model to save frontier API quota.
-
-```
-# User command:
-!llm_clean_tool nuc11Local url_extract https://example.com summarize the main points
-
-# LLM tool call:
-llm_clean_tool(model="nuc11Local", tool="url_extract", arguments="https://example.com summarize main points")
-```
-
-**Rate limited:** same bucket as `llm_clean_text`. No gate — always allowed when within limits.
+**Rate limited:** default 3 calls per 20 seconds. `history=caller` calls are additionally
+depth-guarded via `max_at_llm_depth`.
 
 ---
 
@@ -538,20 +534,7 @@ Use for: multi-agent swarms, parallel task execution, cross-instance verificatio
 agent_call(agent_url="http://192.168.1.50:8765", message="Search for recent Python 3.13 release notes.")
 ```
 
-**Rate limited:** default 5 calls per 60 seconds. Subject to depth guard (see below).
-
----
-
-#### LLM Tool Call Enablement
-
-Not all models are permitted to use tool calls by default. Control which models can use
-`llm_clean_text`, `llm_clean_tool`, and `at_llm` via:
-
-```
-!llm_call                       list models with tool_call_available status
-!llm_call <model> <true|false>  enable/disable for a specific model
-!llm_call <true|false>          set for ALL models
-```
+**Rate limited:** default 5 calls per 60 seconds. Subject to `max_agent_call_depth` (see below).
 
 ---
 
@@ -628,30 +611,19 @@ View and update limits without restarting the agent. Changes persist to `llm-mod
 only affect new sessions after restart.
 
 ```
-!limit_list                              show all limits with current values
-!limit_set max_at_llm_depth 2            set at_llm depth limit
-!limit_set max_agent_call_depth 1        set agent_call depth limit
+!limits_cfg read                         show all limits with current values
+!limits_cfg write max_at_llm_depth 2     set at_llm depth limit
+!limits_cfg write max_agent_call_depth 1 set agent_call depth limit
 ```
 
-These commands are also available as gated LLM tool calls:
-- `limit_list()` — read gate (controlled by `!limit_list_gate_read`, default: gated)
-- `limit_set(key, value)` — write gate (controlled by `!limit_set_gate_write`, default: gated)
-
-Set gate defaults for startup via `agentctl.py gate-set`:
-
-```bash
-python agentctl.py gate-set limit_list read true     # auto-allow reads
-python agentctl.py gate-set limit_set write false    # keep writes gated
-```
+These commands are also available as LLM tool calls via the `limits_cfg` tool. Tool access is controlled per-model via `llm_tools`.
 
 ### System Prompt
 
 ```
-!sysprompt                      show current assembled system prompt
-!sysprompt reload               reload all .system_prompt_* files from disk
-!read_system_prompt             show full cached prompt
-!read_system_prompt <index>     show section by index (0, 1, 2...)
-!read_system_prompt <name>      show section by name (e.g. "tool-url-extract")
+!sysprompt_cfg read                     show current assembled system prompt
+!sysprompt_cfg read <section>           show section by name (e.g. "tool-url-extract")
+!sysprompt reload                       reload all .system_prompt_* files from disk
 ```
 
 ### Direct SQL
@@ -664,7 +636,7 @@ python agentctl.py gate-set limit_set write false    # keep writes gated
 
 ## System Prompt Administration
 
-The system prompt is split into section files under the project directory. Edit them directly or via the `update_system_prompt` tool (if the write gate is open).
+The system prompt is split into section files under the project directory. Edit them directly or via the `sysprompt_cfg` tool.
 
 ### File structure
 
@@ -688,7 +660,7 @@ A section file that contains `[SECTIONS]` is a container — it declares child s
 
 ### LLM-editable sections
 
-The `update_system_prompt` tool (when gate is open) can perform surgical edits:
+The `sysprompt_cfg` tool can perform surgical edits:
 - `append` — add to end of a section
 - `prepend` — add to beginning
 - `replace` — find exact string and replace
@@ -820,7 +792,6 @@ All `test_*.sh` scripts verify client protocol compatibility. Run against a live
 ./test_ios_compatibility.sh      # OpenAI API for iOS apps
 ./test_openwebui.sh              # open-webui bare paths
 ./test_llama_proxy.sh            # llama proxy !commands
-./test_llama_proxy_gate.sh       # gate auto-rejection for proxy clients
 ./test_streaming_role_fix.sh     # first-chunk role field (OpenAI spec)
 ./test_history_ignore.sh         # server ignores client-sent history
 ./test_model_ignore.sh           # server ignores client-sent model
@@ -836,4 +807,4 @@ All `test_*.sh` scripts verify client protocol compatibility. Run against a live
 curl http://localhost:8765/health
 ```
 
-Returns: server status, loaded models, current gate state.
+Returns: server status and loaded models.

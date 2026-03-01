@@ -190,7 +190,7 @@ class PluginManager:
         print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
 
         # Show default model
-        default_model = self.config.get('default_model', 'unknown')
+        default_model = self.models.get('default_model', 'unknown')
         print(f"{Colors.BOLD}Default LLM:{Colors.RESET} {Colors.MAGENTA}{default_model}{Colors.RESET}")
 
         # Show quick status summary
@@ -536,7 +536,7 @@ class PluginManager:
         print(f"\n{Colors.BOLD}LLM Model Registry{Colors.RESET}")
         print(f"{Colors.CYAN}{'='*70}{Colors.RESET}\n")
 
-        default_model = self.config.get('default_model', 'unknown')
+        default_model = self.models.get('default_model', 'unknown')
         models = self.models.get('models', {})
 
         if not models:
@@ -591,7 +591,7 @@ class PluginManager:
             return
 
         model = models[model_name]
-        default_model = self.config.get('default_model')
+        default_model = self.models.get('default_model')
 
         print(f"\n{Colors.BOLD}{model_name}{Colors.RESET}")
         if model_name == default_model:
@@ -666,8 +666,8 @@ class PluginManager:
             print(f"{Colors.RED}Cannot set disabled model as default. Enable it first.{Colors.RESET}")
             return False
 
-        self.config['default_model'] = model_key
-        if self.save_config():
+        self.models['default_model'] = model_key
+        if self.save_models():
             print(f"{Colors.GREEN}✓ Set default model to: {model_key}{Colors.RESET}")
             print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
             return True
@@ -899,7 +899,7 @@ class PluginManager:
                 print(f"{Colors.RED}✗ Model '{name}' not found{Colors.RESET}")
                 return
             # Type coercion
-            if field == "llm_tools":
+            if field in ("llm_tools", "llm_tools_gates"):
                 coerced = [t.strip() for t in value.split(",") if t.strip()]
             elif field == "enabled":
                 coerced = value.lower() in ("true", "1", "yes")
@@ -1080,6 +1080,7 @@ class PluginManager:
         print(f"\n{Colors.BOLD}Unified Resource Commands:{Colors.RESET}")
         print("  llm-tools list|read|write|delete|add [name] [tools]")
         print("  model-cfg list|read|write|copy|delete|enable|disable [name] [field] [value]")
+        print("    field 'llm_tools_gates': comma-separated gate entries, e.g. 'db_query,model_cfg write'")
         print("  limits list|read|write [key] [value]")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
