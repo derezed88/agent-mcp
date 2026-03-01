@@ -5,25 +5,18 @@ import mysql.connector
 #from .config import log
 from config import log
 
-_db_conn: mysql.connector.MySQLConnection | None = None
-
-def _get_db():
-    global _db_conn
-    try:
-        if _db_conn and _db_conn.is_connected():
-            return _db_conn
-    except Exception:
-        pass
-    _db_conn = mysql.connector.connect(
+def _connect() -> mysql.connector.MySQLConnection:
+    return mysql.connector.connect(
         host="localhost",
         user=os.getenv("MYSQL_USER"),
         password=os.getenv("MYSQL_PASS"),
         database="mymcp",
     )
-    return _db_conn
 
 def _run_sql(sql: str) -> str:
-    conn = _get_db()
+    # Fresh connection per call — mysql.connector is not thread-safe with a
+    # shared connection when multiple asyncio.to_thread calls run concurrently.
+    conn = _connect()
     cursor = conn.cursor()
     try:
         cursor.execute(sql)
@@ -51,6 +44,10 @@ def _run_sql(sql: str) -> str:
         raise exc
     finally:
         cursor.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 async def execute_sql(sql: str) -> str:
     return await asyncio.to_thread(_run_sql, sql)
