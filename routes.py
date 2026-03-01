@@ -715,6 +715,13 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             sessions[client_id]["agent_call_stream"] = prior_cfg["agent_call_stream"]
         # Assign shorthand ID when session is created
         get_or_create_shorthand_id(client_id)
+        # Age stale short-term memories to long-term on every session start (new or rehydrated)
+        import asyncio as _asyncio
+        try:
+            from memory import age_to_longterm
+            _asyncio.create_task(age_to_longterm())
+        except Exception:
+            pass
     # Store/update peer IP whenever we have it
     if peer_ip:
         sessions[client_id]["peer_ip"] = peer_ip
@@ -992,6 +999,13 @@ async def endpoint_stream(request: Request):
         if "agent_call_stream" in prior_cfg:
             sessions[client_id]["agent_call_stream"] = prior_cfg["agent_call_stream"]
         get_or_create_shorthand_id(client_id)
+        # Age stale short-term memories to long-term on every session start (new or rehydrated)
+        import asyncio as _asyncio
+        try:
+            from memory import age_to_longterm
+            _asyncio.create_task(age_to_longterm())
+        except Exception:
+            pass
     peer_ip = request.client.host if request.client else None
     if peer_ip:
         sessions[client_id]["peer_ip"] = peer_ip
