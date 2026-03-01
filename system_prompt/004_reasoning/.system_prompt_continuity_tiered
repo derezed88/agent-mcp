@@ -1,75 +1,32 @@
-## SESSION STARTUP — TIERED CONTINUITY LOADING
+## SESSION STARTUP — TIERED CONTINUITY
 
-### Tier 1: Structural Data (Always Load on Session Start)
+### Tier 1: Short-Term Memory (Auto-injected — no action needed)
 
-Execute immediately before processing user input:
+Short-term memories are automatically prepended to every request under
+"## Active Memory (short-term recall)". Read and use them. Do not re-query
+`samaritan_memory_shortterm` manually on startup — it has already been loaded.
 
-```sql
--- Load active tasks
-SELECT task_id, assignee, description, status, priority, due_date 
-FROM samaritan_tasks 
-WHERE status IN ('pending','in_progress') 
-ORDER BY priority DESC, due_date ASC;
+### Tier 2: Long-Term Memory (On-demand)
 
--- Load active initiatives
-SELECT id, name, goal, status, priority, target_completion 
-FROM samaritan_initiatives 
-WHERE status IN ('planning','active') 
-ORDER BY priority DESC;
+If a topic seems like it should have prior context but nothing appears in Tier 1,
+delegate a recall to samaritan-execution:
 
--- Load critical assets
-SELECT asset_id, asset_name, asset_type, status, risk_level 
-FROM samaritan_assets 
-WHERE status != 'archived' 
-ORDER BY risk_level DESC;
+```
+llm_call("samaritan-execution", "recall memories about: <topic> tier=long")
 ```
 
-**Report to admin:** "Tier 1 continuity loaded: [X tasks], [Y initiatives], [Z assets]"
+### Tier 3: Full Session Summaries (On-demand)
 
----
+To retrieve recent session summaries:
 
-### Tier 2: Strategic Decisions (Load Only Active Decisions)
-
-Execute if continuity_load_decisions flag is set:
-
-```sql
-SELECT decision_id, objective, rationale, decision_type, status, initiative_id 
-FROM samaritan_decision_log 
-WHERE status = 'ACTIVE' 
-ORDER BY timestamp DESC 
-LIMIT 10;
+```
+llm_call("samaritan-execution",
+  "SELECT summary, created_at FROM samaritan_chat_summaries ORDER BY created_at DESC LIMIT 5")
 ```
 
-**Integrate into context:** Reference relevant decisions when processing tasks in same initiative.
+### What NOT to do on startup
 
----
-
-### Decision Logging Protocol
-
-When admin marks decision as strategic or system detects pivot:
-
-```sql
-INSERT INTO samaritan_decision_log 
-(initiative_id, objective, rationale, decision_type, status, related_task_id) 
-VALUES (?, ?, ?, 'STRATEGIC', 'ACTIVE', ?);
-```
-
-**Example trigger phrase:** "DECISION POINT:" or "STRATEGIC PIVOT:" — auto-logs to Tier 2.
-
----
-
-### On Reset Command
-
-- Tier 1 auto-reloads via continuity_load_decisions
-- Tier 2 auto-reloads if initiative is active
-- Tier 3 (full reasoning) remains in session DB, retrievable on demand
-- **Zero token cost** for context restoration beyond structural queries
-
----
-
-### Token Efficiency Gains
-
-- Tier 1 load: ~200 tokens (once per session)
-- Tier 2 load: ~150 tokens (per active initiative, on-demand)
-- Total overhead: <400 tokens per session startup
-- Result: ~70% reduction in context bloat vs. full history loading
+Do not attempt to query dropped tables. The following no longer exist:
+`samaritan_tasks`, `samaritan_initiatives`, `samaritan_assets`, `samaritan_decision_log`,
+`samaritan_session_log`, `samaritan_knowledge`, `samaritan_prime_directives`.
+Querying them will error. Use the memory tables instead.
