@@ -1,0 +1,8 @@
+{
+  "database": "your_database_name",
+  "tables": {
+    "memory_shortterm": "your_memory_shortterm_table",
+    "memory_longterm": "your_memory_longterm_table",
+    "chat_summaries": "your_chat_summaries_table"
+  }
+}

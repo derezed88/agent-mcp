@@ -1,10 +1,10 @@
 """
-memory.py — Tiered memory system for Samaritan
+memory.py — Tiered memory system
 
 Tiers:
-  Short-term  : MySQL samaritan_memory_shortterm  (hot, injected every request)
-  Long-term   : MySQL samaritan_memory_longterm   (aged-out, on-demand recall)
-  Archive     : Google Drive                      (bulk export, future)
+  Short-term  : MySQL (hot, injected every request)
+  Long-term   : MySQL (aged-out, on-demand recall)
+  Archive     : Google Drive (bulk export, future)
 
 Public API:
   save_memory(topic, content, importance, source, session_id)
@@ -17,11 +17,34 @@ Public API:
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
 from database import execute_sql
 
 log = logging.getLogger("memory")
+
+# ---------------------------------------------------------------------------
+# Load table names from db-config.json (instance-specific, gitignored)
+# ---------------------------------------------------------------------------
+
+def _load_db_config() -> dict:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "db-config.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        log.warning("db-config.json not found — using default table names")
+        return {}
+    except Exception as e:
+        log.warning(f"db-config.json load failed: {e} — using default table names")
+        return {}
+
+_db_cfg = _load_db_config()
+_tables = _db_cfg.get("tables", {})
+_ST  = _tables.get("memory_shortterm", "memory_shortterm")
+_LT  = _tables.get("memory_longterm",  "memory_longterm")
+_SUM = _tables.get("chat_summaries",   "chat_summaries")
 
 # ---------------------------------------------------------------------------
 # Short-term: save
@@ -44,14 +67,14 @@ async def save_memory(
     # Dedup: skip insert if identical topic+content exists in shortterm or longterm
     try:
         dup_check = (
-            f"SELECT 1 FROM samaritan_memory_shortterm "
+            f"SELECT 1 FROM {_ST} "
             f"WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
         )
         dup_result = await execute_sql(dup_check)
         if dup_result.strip() and "1" in dup_result:
             return 0
         dup_check_lt = (
-            f"SELECT 1 FROM samaritan_memory_longterm "
+            f"SELECT 1 FROM {_LT} "
             f"WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
         )
         dup_result_lt = await execute_sql(dup_check_lt)
@@ -61,7 +84,7 @@ async def save_memory(
         log.warning(f"save_memory dedup check failed: {e}")
 
     sql = (
-        f"INSERT INTO samaritan_memory_shortterm "
+        f"INSERT INTO {_ST} "
         f"(topic, content, importance, source, session_id) "
         f"VALUES ('{topic}', '{content}', {importance}, '{source}', '{session_id}')"
     )
@@ -86,7 +109,7 @@ async def load_short_term(limit: int = 20, min_importance: int = 1) -> list[dict
     sql = (
         f"SELECT id, topic, content, importance, source, session_id, "
         f"created_at, last_accessed "
-        f"FROM samaritan_memory_shortterm "
+        f"FROM {_ST} "
         f"WHERE importance >= {min_importance} "
         f"ORDER BY importance DESC, created_at DESC "
         f"LIMIT {limit}"
@@ -100,6 +123,27 @@ async def load_short_term(limit: int = 20, min_importance: int = 1) -> list[dict
 
 
 # ---------------------------------------------------------------------------
+# Long-term: load (returns list of dicts, most important first)
+# ---------------------------------------------------------------------------
+
+async def load_long_term(limit: int = 20, topic: str = "") -> list[dict]:
+    """Load long-term memories, optionally filtered by topic substring."""
+    where = f"WHERE topic LIKE '%{topic}%'" if topic else ""
+    sql = (
+        f"SELECT id, topic, content, importance, created_at "
+        f"FROM {_LT} {where} "
+        f"ORDER BY importance DESC, created_at DESC "
+        f"LIMIT {limit}"
+    )
+    try:
+        raw = await execute_sql(sql)
+        return _parse_table(raw)
+    except Exception as e:
+        log.error(f"load_long_term failed: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Aging: move old low-importance rows to long-term
 # ---------------------------------------------------------------------------
 
@@ -109,7 +153,7 @@ async def age_to_longterm(older_than_hours: int = 48, max_rows: int = 100) -> in
     Returns number of rows moved.
     """
     select_sql = (
-        f"SELECT * FROM samaritan_memory_shortterm "
+        f"SELECT * FROM {_ST} "
         f"WHERE created_at < NOW() - INTERVAL {older_than_hours} HOUR "
         f"ORDER BY importance ASC, created_at ASC "
         f"LIMIT {max_rows}"
@@ -130,13 +174,13 @@ async def age_to_longterm(older_than_hours: int = 48, max_rows: int = 100) -> in
             sid = row.get("session_id", "").replace("'", "''")
 
             insert = (
-                f"INSERT INTO samaritan_memory_longterm "
+                f"INSERT INTO {_LT} "
                 f"(topic, content, importance, source, session_id, shortterm_id) "
                 f"VALUES ('{topic}', '{content}', {imp}, '{src}', '{sid}', {rid})"
             )
             await execute_sql(insert)
             await execute_sql(
-                f"DELETE FROM samaritan_memory_shortterm WHERE id = {rid}"
+                f"DELETE FROM {_ST} WHERE id = {rid}"
             )
             moved += 1
 
@@ -270,7 +314,7 @@ async def summarize_and_save(
     model_key_safe = model_key.replace("'", "''")
     sid_safe = session_id.replace("'", "''")
     await execute_sql(
-        f"INSERT INTO samaritan_chat_summaries "
+        f"INSERT INTO {_SUM} "
         f"(session_id, summary, message_count, model_used) "
         f"VALUES ('{sid_safe}', '{summary_text[:4000]}', {msg_count}, '{model_key_safe}')"
     )
