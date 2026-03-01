@@ -629,7 +629,10 @@ def try_force_tool_calls(text: str, valid_tool_names: set[str] | None = None) ->
 
 # --- Enrichment ---
 
-_PERSON_QUERY_RE = re.compile(r"(?:\b(?:describe|tell\s+me\s+about|who\s+is|what\s+is|profile\s+of|details?\s+(?:about|on|for)|info(?:rmation)?\s+(?:about|on|for)|about)\b.{0,50}\b(?:mark|lee|person|people|user|jimenez)\b)|(?:\b(?:mark|lee|jimenez)\b.{0,50}\b(?:person|details?|info|describe|birthday|born|relation|wife|husband|age|nickname|name|who|what|profile)\b)|\b(?:my\s+(?:details?|info|profile|person)|person\s+table)\b", re.IGNORECASE | re.VERBOSE)
+_PERSON_QUERY_RE = re.compile(
+    r"\b(?:person\s+table|my\s+(?:details?|info|profile|person)|who\s+am\s+i|tell\s+me\s+about\s+(?:my)?self|profile\s+of\s+(?:the\s+)?(?:admin|user|owner))\b",
+    re.IGNORECASE
+)
 
 async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict]:
     if not messages: return messages
