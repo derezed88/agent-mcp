@@ -589,6 +589,27 @@ def sp_resolve_model(model_key_or_self: str, current_model: str) -> str:
     return model_key_or_self
 
 
+def sp_list_directories() -> str:
+    """
+    List all subdirectories in the system_prompt/ base directory.
+    Returns a formatted string showing each directory name and its file count.
+    """
+    if not os.path.isdir(SYSTEM_PROMPT_BASE):
+        return f"System prompt base directory does not exist: {SYSTEM_PROMPT_BASE}"
+    entries = sorted(
+        e for e in os.listdir(SYSTEM_PROMPT_BASE)
+        if os.path.isdir(os.path.join(SYSTEM_PROMPT_BASE, e))
+    )
+    if not entries:
+        return f"No directories found in {SYSTEM_PROMPT_BASE}"
+    lines = [f"System prompt directories in {SYSTEM_PROMPT_BASE}:"]
+    for name in entries:
+        dpath = os.path.join(SYSTEM_PROMPT_BASE, name)
+        files = [f for f in os.listdir(dpath) if f.startswith(".system_prompt")]
+        lines.append(f"  {name}  ({len(files)} prompt file(s))")
+    return "\n".join(lines)
+
+
 def sp_list_files(model_key: str, llm_registry: dict) -> str:
     """
     List all .system_prompt* files in the model's folder.

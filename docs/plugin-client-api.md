@@ -167,8 +167,8 @@ health = await client.health()              # {"status": "ok", ...}
 ## Port Configuration
 
 ```bash
-python plugin-manager.py port-list
-python plugin-manager.py port-set plugin_client_api 8777
+python agentctl.py port-list
+python agentctl.py port-set plugin_client_api 8777
 ```
 
 ---

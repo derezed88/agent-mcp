@@ -1,0 +1,4 @@
+## tools: Available Tool Definitions
+
+[SECTIONS]
+tool-db-query: db_query tool definition

@@ -10,14 +10,8 @@ tool-search-google: search_google tool definition
 tool-google-drive: google_drive tool definition
 tool-url-extract: url_extract tool definition
 tool-llm-list: llm_list tool definition
-tool-llm-call-clean: llm_clean_text tool definition
-tool-llm-clean-tool: llm_clean_tool tool definition
-tool-at-llm: at_llm tool definition
+tool-llm-delegation: llm_call and stream tool definitions
 tool-agent-call: agent_call tool definition
-tool-gate-list: gate_list tool definition
+tool-vscode-sessions: vscode_sessions_list and vscode_sessions_read tool definitions
 tool-sysprompt: sysprompt tool definitions
 tool-session-model-reset: session, model, and reset tool definitions
-tool-llm-delegation: llm_call, llm_timeout, and stream tool definitions
-tool-limits: limit_list and limit_set tool definitions
-tool-tool-preview-length: tool_preview_length tool definition
-tool-outbound-agent-filters: outbound_agent_filters tool definition

@@ -264,6 +264,25 @@ Prefix any prompt with `@ModelName` to temporarily use a different model for tha
 !reset                          clear conversation history for current session
 ```
 
+#### Session Idle-Timeout Reaper
+
+Sessions that have been inactive longer than the configured timeout are automatically evicted.
+The reaper runs every 60 seconds and checks each session's `last_active` timestamp.
+
+```
+!sessiontimeout                 show current setting
+!sessiontimeout <n>             set timeout to n minutes (runtime only, lost on restart)
+!sessiontimeout 0               disable reaping entirely (runtime only)
+```
+
+**Default:** 60 minutes. To persist the change across restarts, use `agentctl`:
+
+```bash
+python agentctl.py session-timeout <minutes>   # 0 = disabled
+```
+
+This writes `session_idle_timeout_minutes` to `plugins-enabled.json`.
+
 ### Tool Preview Control
 
 Tool results are always sent in full to the LLM. This controls what is displayed in the chat:
@@ -373,6 +392,16 @@ Two filter lists in `plugin_config.plugin_tmux` control which commands can be se
 Additionally, `OUTBOUND_AGENT_BLOCKED_COMMANDS` (from `plugin_client_api`) is also applied
 inside `tmux_exec` — so the same patterns that block outbound agent messages also block PTY
 commands when configured.
+
+#### Security: Gate Bypass via Shell Access
+
+> **Critical security consideration.** If the tmux gate is set to auto-allow (`!tmux_gate_write true` / `!tmux_exec_gate_write true`), an LLM with shell access can execute arbitrary shell commands — including editing `gate-defaults.json`, `plugins-enabled.json`, and `llm-models.json` directly. This means every other gate in the system becomes bypassable without human approval.
+>
+> **When tmux auto-allow is enabled, all other security gates are effectively advisory.** An LLM that can run `sed` or `python` can rewrite any config file on the host.
+>
+> This is considered out of scope for the gate system. The gate system protects against unintended LLM actions under normal operation; it is not designed to defend against a fully-trusted shell session. If you enable tmux auto-allow, you are granting the LLM root-equivalent control over the agent's configuration — treat it accordingly.
+>
+> **Recommendation:** Keep all tmux tools write-gated (the default) unless you are actively in a supervised session and understand the consequences. Use the per-tool overrides to allow only what is needed.
 
 #### Advanced: PTY Session Semantics
 
@@ -608,11 +637,11 @@ These commands are also available as gated LLM tool calls:
 - `limit_list()` — read gate (controlled by `!limit_list_gate_read`, default: gated)
 - `limit_set(key, value)` — write gate (controlled by `!limit_set_gate_write`, default: gated)
 
-Set gate defaults for startup via `agentctl.py llm-allow`:
+Set gate defaults for startup via `agentctl.py gate-set`:
 
 ```bash
-python agentctl.py llm-allow limit_list read true     # auto-allow reads
-python agentctl.py llm-allow limit_set write false    # keep writes gated
+python agentctl.py gate-set limit_list read true     # auto-allow reads
+python agentctl.py gate-set limit_set write false    # keep writes gated
 ```
 
 ### System Prompt

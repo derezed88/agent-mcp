@@ -12,13 +12,15 @@
     "plugin_proxy_llama",
     "plugin_client_slack",
     "plugin_urlextract_tavily",
-    "plugin_tmux"
+    "plugin_tmux",
+    "plugin_claude_vscode_sessions"
   ],
   "plugin_config": {
     "plugin_history_default": {
       "agent_max_ctx": 200,
       "chain": [
-        "plugin_history_default"
+        "plugin_history_default",
+        "plugin_history_sec_sync"
       ]
     },
     "plugin_proxy_llama": {
@@ -43,6 +45,26 @@
       "api_host": "0.0.0.0",
       "OUTBOUND_AGENT_ALLOWED_COMMANDS": [],
       "OUTBOUND_AGENT_BLOCKED_COMMANDS": []
+    },
+    "plugin_history_sec_sync": {
+      "enabled": true,
+      "airs_url": "http://localhost:8900",
+      "airs_profile": "ai-sec-security",
+      "timeout_seconds": 10,
+      "block_session": true,
+      "violation_log": "airs-violations.log"
+    },
+    "plugin_history_sec_async": {
+      "enabled": false,
+      "airs_url": "http://localhost:8900",
+      "airs_profile": "ai-sec-security",
+      "poll_interval": 3,
+      "poll_max_attempts": 5,
+      "block_on_violation": true,
+      "violation_log": "airs-violations.log"
+    },
+    "plugin_claude_vscode_sessions": {
+      "enabled": true
     },
     "plugin_tmux": {
       "enabled": true,
@@ -71,8 +93,8 @@
   },
   "rate_limits": {
     "llm_call": {
-      "calls": 3,
-      "window_seconds": 20,
+      "calls": 4,
+      "window_seconds": 5,
       "auto_disable": true
     },
     "search": {
@@ -101,8 +123,8 @@
       "auto_disable": false
     },
     "agent_call": {
-      "calls": 5,
-      "window_seconds": 60,
+      "calls": 10,
+      "window_seconds": 15,
       "auto_disable": false
     },
     "tmux": {
@@ -115,7 +137,7 @@
     "last_modified": "2026-02-21",
     "notes": "Configuration for enabled plugins. Modified by agentctl.py"
   },
-  "default_model": "gemini25fl",
+  "default_model": "gemini25f",
   "max_users": 50,
   "session_idle_timeout_minutes": 60
 }

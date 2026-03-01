@@ -66,31 +66,45 @@ SUBMIT_URL          = f"{SERVER_HOST}/submit"
 STREAM_URL          = f"{SERVER_HOST}/stream"
 GATE_RESPONSE_URL   = f"{SERVER_HOST}/gate_response"
 
-SESSION_FILE        = ".aiops_session_id"
 DEFAULT_INPUT_LINES = 3
 BORDER_CHAR         = "─"
 
 # ---------------------------------------------------------------------------
-# Session Persistence
+# Session Persistence — per-tty so each terminal window has its own session
 # ---------------------------------------------------------------------------
 
+def _session_file_for_tty() -> str:
+    """
+    Return a session-file path that is unique to the current terminal device.
+    Uses /dev/pts/N (or /dev/ttyN) sanitised into a filename so that two
+    shell.py instances running in different terminal windows never share an ID.
+    Falls back to a generic name when stdin is not a real tty (e.g. piped).
+    """
+    try:
+        tty = os.ttyname(sys.stdin.fileno())          # e.g. "/dev/pts/3"
+        safe = tty.lstrip("/").replace("/", "_")       # "dev_pts_3"
+        return f".aiops_session_{safe}"
+    except OSError:
+        return ".aiops_session_id"                     # fallback (piped/non-tty)
+
+SESSION_FILE = _session_file_for_tty()
+
 def load_or_create_client_id() -> str:
-    """Load CLIENT_ID from file, or create new one if file doesn't exist."""
+    """Load CLIENT_ID from the tty-specific file, or create a new one."""
     if os.path.exists(SESSION_FILE):
         try:
             with open(SESSION_FILE, 'r') as f:
                 client_id = f.read().strip()
-                if client_id:  # Validate non-empty
+                if client_id:
                     return client_id
         except Exception:
-            pass  # Fall through to generate new ID
-    # Generate new ID
+            pass
     client_id = str(uuid.uuid4())
     save_client_id(client_id)
     return client_id
 
 def save_client_id(client_id: str):
-    """Save CLIENT_ID to file for persistence across restarts."""
+    """Save CLIENT_ID to the tty-specific session file."""
     with open(SESSION_FILE, 'w') as f:
         f.write(client_id)
 
@@ -371,7 +385,7 @@ async def sse_listener():
                         if line.startswith("event:"):
                             ev = line[6:]
                             current_event = (ev[1:] if ev.startswith(" ") else ev).strip()
-                            if current_event == "done":
+                            if current_event in ("done", "flush"):
                                 if current_reply:
                                     await state.append_output("")
                                     current_reply.clear()

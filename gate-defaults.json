@@ -59,11 +59,26 @@
     "gate_list": {
       "read": true
     },
+    "sleep": {
+      "read": true
+    },
     "agent_call": {
       "write": false
     },
     "at_llm": {
       "write": true
+    },
+    "model_copy": {
+      "write": false
+    },
+    "model_delete": {
+      "write": false
+    },
+    "model_enable": {
+      "write": false
+    },
+    "model_disable": {
+      "write": false
     }
   }
 }

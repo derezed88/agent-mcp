@@ -35,11 +35,11 @@ YOU must gather data first using your own tools, then embed the results in the p
 
 Example — extracting a page and having another model summarize it:
   Step 1: url_extract(method="tavily", url="https://example.com", query="key topic")
-  Step 2: llm_call_clean(model="Win11Local", prompt="Summarize this article:\n\n<paste extracted content here>")
+  Step 2: llm_call_clean(model="localModel", prompt="Summarize this article:\n\n<paste extracted content here>")
 
 Example — querying the DB and having another model analyze it:
   Step 1: db_query(sql="SELECT * FROM sales WHERE date > '2026-01-01'")
-  Step 2: llm_call_clean(model="Win11Local", prompt="Analyze this sales data and identify trends:\n\n<paste query results here>")
+  Step 2: llm_call_clean(model="localModel", prompt="Analyze this sales data and identify trends:\n\n<paste query results here>")
 
 The prompt you craft for llm_call_clean is your only communication channel with the target model.
 Include all context the target model needs — data, instructions, and desired output format — in that prompt.
