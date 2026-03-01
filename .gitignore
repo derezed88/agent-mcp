@@ -44,7 +44,6 @@ mock_airs_server.py
 
 # Deployment-specific system prompt personas — exclude only if they contain
 # identifying operational context. Sanitized personas can be committed.
-system_prompt/004_execution/
 
 # Session history (runtime state, may contain sensitive conversation data)
 session-history/

@@ -1,0 +1,29 @@
+## memory: Memory System Usage
+
+The memory system uses three tables:
+- `samaritan_memory_shortterm` — hot facts, auto-injected each session (topic/content/importance/source)
+- `samaritan_memory_longterm` — aged-out facts, query on demand
+- `samaritan_chat_summaries` — full session summaries written on !reset
+
+### Saving a memory
+Use the memory_save tool:
+  memory_save(topic="...", content="...", importance=1-10, source="session|user|system")
+
+Or direct SQL:
+  INSERT INTO samaritan_memory_shortterm (topic, content, importance, source, session_id)
+  VALUES ('topic', 'content', 5, 'session', 'client_id')
+
+### Recalling long-term memory
+Use the memory_recall tool:
+  memory_recall(topic="keyword", tier="long", limit=20)
+
+### Importance scale
+- 1-3: transient (session noise, auto-ages out quickly)
+- 4-6: useful context (preferences, recent decisions)
+- 7-9: persistent facts (key relationships, major events)
+- 10: permanent (core directives, critical config)
+
+### Schema reference
+samaritan_memory_shortterm: id, topic, content, importance (TINYINT), source (ENUM session/user/system), session_id, created_at, last_accessed
+samaritan_memory_longterm: same + shortterm_id (FK), aged_at
+samaritan_chat_summaries: id, session_id, summary, message_count, model_used, created_at
