@@ -737,6 +737,7 @@ to `llm-models.json` for any models served via that tunnel.
 | `.system_prompt` | Root system prompt file | Admin manually or LLM via tool |
 | `.system_prompt_*` | Individual section files | Admin manually or LLM via tool |
 | `.aiops_session_id` | shell.py session persistence | shell.py automatically |
+| `auto-enrich.json` | Instance-specific context auto-enrichment rules (gitignored) | Admin manually — see below |
 
 ### `plugin-manifest.json` vs `plugins-enabled.json`
 
@@ -776,6 +777,64 @@ or edit `plugins-enabled.json`.  Never add enable/disable logic to `plugin-manif
 It intentionally does *not* copy `plugins-enabled.json` — the repo's version is
 the authoritative default for new installs, and port assignments are adjusted
 per-instance afterward with `agentctl.py port-set`.
+
+---
+
+## Context Auto-Enrichment (`auto-enrich.json`)
+
+When a user message arrives, `auto_enrich_context()` in `agents.py` can automatically
+query the database and inject the results into the system message — before the LLM ever
+sees the request. This gives the LLM instant, grounded context without requiring a tool call.
+
+This is instance-specific configuration: the tables queried and the trigger phrases that
+activate them are personal to each deployment and must **not** be hardcoded into the server.
+They are stored in `auto-enrich.json` in the project root, which is gitignored.
+
+### Why it exists
+
+Some data is so fundamental to every interaction that waiting for the LLM to decide to
+query it wastes a round-trip and tokens. A `person` table with admin identity, a `config`
+table with deployment settings, a `contacts` table — these are best injected automatically
+when the user's message suggests they are relevant.
+
+### Format
+
+`auto-enrich.json` is a JSON array. Each rule has three fields:
+
+```json
+[
+  {
+    "pattern": "\\b(?:my\\s+(?:details?|info|profile)|who\\s+am\\s+i)\\b",
+    "sql": "SELECT * FROM person",
+    "label": "person table"
+  }
+]
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `pattern` | Yes | Python regex (case-insensitive) tested against the last user message. If it matches, the SQL is executed. |
+| `sql` | Yes | SQL query to run against your MySQL database when the pattern matches. |
+| `label` | No | Human-readable label shown in the `[context] Auto-queried: <label>` status message. Defaults to the SQL string if omitted. |
+
+Multiple rules are evaluated independently — all matching rules fire for a given message.
+
+### Setup
+
+1. Copy the template:
+   ```bash
+   cp auto-enrich.json.example auto-enrich.json
+   ```
+2. Edit `auto-enrich.json` with your patterns and queries.
+3. No restart required — rules are loaded fresh on each request.
+
+### Security note
+
+`auto-enrich.json` is gitignored. Do not commit it. It may contain table names, column
+names, and trigger patterns that are specific to your deployment and should not be public.
+
+If `auto-enrich.json` is absent, `auto_enrich_context()` skips the enrichment step silently —
+the server starts and runs normally without it.
 
 ---
 
