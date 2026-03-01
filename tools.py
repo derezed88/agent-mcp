@@ -14,7 +14,7 @@ mcp_server = FastMCP("AIOps-DB-Tools")
 
 @mcp_server.tool()
 async def db_query(sql: str) -> str:
-    """Execute SQL against the agent-mcp MySQL database."""
+    """Execute SQL against the configured MySQL database."""
     return await execute_sql(sql)
 
 
@@ -565,13 +565,9 @@ async def _memory_save_exec(topic: str, content: str, importance: int = 5, sourc
 
 
 async def _memory_recall_exec(topic: str = "", tier: str = "short", limit: int = 20) -> str:
-    from memory import load_short_term, _parse_table
-    from database import execute_sql
+    from memory import load_short_term, load_long_term, _parse_table
     if tier == "long":
-        where = f"WHERE topic LIKE '%{topic}%'" if topic else ""
-        sql = f"SELECT id, topic, content, importance, created_at FROM samaritan_memory_longterm {where} ORDER BY importance DESC, created_at DESC LIMIT {limit}"
-        raw = await execute_sql(sql)
-        rows = _parse_table(raw)
+        rows = await load_long_term(limit=limit, topic=topic)
     else:
         rows = await load_short_term(limit=limit, min_importance=1)
         if topic:
@@ -1253,7 +1249,7 @@ def _make_core_lc_tools() -> list:
             coroutine=_memory_save_exec,
             name="memory_save",
             description=(
-                "Save a fact to short-term memory (samaritan_memory_shortterm). "
+                "Save a fact to short-term memory. "
                 "Use topic labels like 'user-preferences', 'project-status', 'tasks', 'technical-decisions'. "
                 "importance: 1=low, 5=medium, 10=critical. "
                 "Short-term memories are auto-injected into every future request."
@@ -1275,7 +1271,7 @@ def _make_core_lc_tools() -> list:
             name="memory_age",
             description=(
                 "Age old short-term memories into long-term storage. "
-                "Moves rows older than older_than_hours to samaritan_memory_longterm. "
+                "Moves rows older than older_than_hours to long-term memory storage. "
                 "Run periodically to keep short-term context lean."
             ),
             args_schema=_MemoryAgeArgs,

@@ -54,3 +54,6 @@ start_pinggy_tunnel.sh
 
 # Instance-specific auto-enrichment rules (may contain table names, patterns)
 auto-enrich.json
+
+# Instance-specific database configuration (table names, database name)
+db-config.json

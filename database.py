@@ -1,3 +1,4 @@
+import json
 import os
 import asyncio
 import re
@@ -5,12 +6,26 @@ import mysql.connector
 #from .config import log
 from config import log
 
+def _load_database_name() -> str:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "db-config.json")
+    try:
+        with open(path) as f:
+            return json.load(f).get("database", "")
+    except FileNotFoundError:
+        log.warning("db-config.json not found — database name not set")
+        return ""
+    except Exception as e:
+        log.warning(f"db-config.json load failed: {e}")
+        return ""
+
+_DATABASE = _load_database_name()
+
 def _connect() -> mysql.connector.MySQLConnection:
     return mysql.connector.connect(
         host="localhost",
         user=os.getenv("MYSQL_USER"),
         password=os.getenv("MYSQL_PASS"),
-        database="mymcp",
+        database=_DATABASE,
     )
 
 def _run_sql(sql: str) -> str:
