@@ -650,6 +650,18 @@ _MEMORY_SAVE_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# xAI XML tool-call format: <xai:function_call name="memory_save"><parameter name="topic">...</parameter>...
+_XML_TOOL_CALL_RE = re.compile(
+    r'<(?:\w+:)?function_call\s+name=["\'](?P<fn>\w+)["\'][^>]*>'
+    r'(?P<body>.*?)'
+    r'</(?:\w+:)?function_call>',
+    re.DOTALL | re.IGNORECASE,
+)
+_XML_PARAM_RE = re.compile(
+    r'<(?:\w+:)?parameter\s+name=["\'](?P<name>\w+)["\'][^>]*>(?P<value>.*?)</(?:\w+:)?parameter>',
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 async def _scan_and_save_memories(text: str, client_id: str, model_key: str) -> int:
     """Scan a final text response for memory_save() calls and execute any found.
@@ -708,6 +720,32 @@ async def _scan_and_save_memories(text: str, client_id: str, model_key: str) -> 
                     )
             except Exception as exc:
                 log.warning(f"memory_scan: JSON-form save failed for topic={topic!r}: {exc}")
+
+    # Pass 3: xAI XML format  <xai:function_call name="memory_save"><parameter name="topic">...</parameter>...
+    if not saved:
+        for m in _XML_TOOL_CALL_RE.finditer(text):
+            if m.group("fn") != "memory_save":
+                continue
+            params = {pm.group("name"): pm.group("value").strip()
+                      for pm in _XML_PARAM_RE.finditer(m.group("body"))}
+            topic = params.get("topic", "").strip()
+            content = params.get("content", "").strip()
+            importance = int(params.get("importance", 5))
+            source = params.get("source", "session")
+            if not topic or not content:
+                continue
+            try:
+                result = await _memory_save_exec(
+                    topic=topic, content=content, importance=importance, source=source
+                )
+                if "already persisted" not in result:
+                    saved += 1
+                    log.info(
+                        f"memory_scan: auto-saved (XML form) from {model_key} — "
+                        f"topic={topic!r} importance={importance}"
+                    )
+            except Exception as exc:
+                log.warning(f"memory_scan: XML-form save failed for topic={topic!r}: {exc}")
 
     return saved
 
@@ -1250,15 +1288,16 @@ async def llm_call(
                     if not ai_msg.tool_calls:
                         return _content_to_str(ai_msg.content)
 
-                    tc = ai_msg.tool_calls[0]
-                    tool_result = await execute_tool(client_id, tc["name"], tc["args"])
+                    # Execute ALL parallel tool calls — orphaning any yields a 400
+                    tool_msgs = []
+                    last_result = ""
+                    for tc in ai_msg.tool_calls:
+                        last_result = str(await execute_tool(client_id, tc["name"], tc["args"]))
+                        tool_msgs.append(ToolMessage(content=last_result, tool_call_id=tc["id"]))
 
-                    turn2_msgs = messages + [
-                        ai_msg,
-                        ToolMessage(content=str(tool_result), tool_call_id=tc["id"]),
-                    ]
+                    turn2_msgs = messages + [ai_msg] + tool_msgs
                     final_msg: AIMessage = await llm.ainvoke(turn2_msgs)
-                    return _content_to_str(final_msg.content) or str(tool_result)
+                    return _content_to_str(final_msg.content) or last_result
 
                 result = await asyncio.wait_for(_run_tool(), timeout=timeout)
 

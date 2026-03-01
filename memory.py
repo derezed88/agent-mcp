@@ -122,8 +122,11 @@ async def load_short_term(limit: int = 20, min_importance: int = 1) -> list[dict
 # ---------------------------------------------------------------------------
 
 async def load_long_term(limit: int = 20, topic: str = "") -> list[dict]:
-    """Load long-term memories, optionally filtered by topic substring."""
-    where = f"WHERE topic LIKE '%{topic}%'" if topic else ""
+    """Load long-term memories, optionally filtered by topic or content substring."""
+    where = (
+        f"WHERE topic LIKE '%{topic}%' OR content LIKE '%{topic}%'"
+        if topic else ""
+    )
     sql = (
         f"SELECT id, topic, content, importance, created_at "
         f"FROM {_LT} {where} "
@@ -136,6 +139,45 @@ async def load_long_term(limit: int = 20, topic: str = "") -> list[dict]:
     except Exception as e:
         log.error(f"load_long_term failed: {e}")
         return []
+
+
+# ---------------------------------------------------------------------------
+# Update: change fields on an existing short-term or long-term row
+# ---------------------------------------------------------------------------
+
+async def update_memory(
+    row_id: int,
+    tier: str = "short",
+    importance: int | None = None,
+    content: str | None = None,
+    topic: str | None = None,
+) -> str:
+    """
+    Update one or more fields on an existing memory row.
+    tier: 'short' (default) or 'long'.
+    Returns a status string.
+    """
+    table = _ST if tier == "short" else _LT
+    sets = []
+    if importance is not None:
+        importance = max(1, min(10, int(importance)))
+        sets.append(f"importance = {importance}")
+    if content is not None:
+        sets.append(f"content = '{content.replace(chr(39), chr(39)*2)}'")
+    if topic is not None:
+        sets.append(f"topic = '{topic.replace(chr(39), chr(39)*2)[:255]}'")
+    if not sets:
+        return "Nothing to update — provide at least one of: importance, content, topic."
+    sql = f"UPDATE {table} SET {', '.join(sets)} WHERE id = {int(row_id)}"
+    try:
+        result = await execute_sql(sql)
+        # Verify the row actually exists (rows affected: 0 can mean no row OR same value)
+        check = await execute_sql(f"SELECT id FROM {table} WHERE id = {int(row_id)} LIMIT 1")
+        if not check.strip() or str(row_id) not in check:
+            return f"No row found with id={row_id} in {tier}-term memory."
+        return f"Memory id={row_id} updated ({tier}): {', '.join(sets)}"
+    except Exception as e:
+        return f"update_memory failed: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -214,15 +256,17 @@ async def load_topic_list() -> list[str]:
         return []
 
 
-async def load_context_block(limit: int = 15, min_importance: int = 3) -> str:
+async def load_context_block(min_importance: int = 3) -> str:
     """
     Return a formatted string of short-term memories for prompt injection.
+    Returns all rows meeting min_importance — no row-count cap, so important
+    facts are never silently dropped as the table grows.
     Includes the full list of known topics so the model can reuse existing
     categories rather than inventing new ones each turn.
     Returns empty string if no memories and no topics.
     """
     rows, topics = await asyncio.gather(
-        load_short_term(limit=limit, min_importance=min_importance),
+        load_short_term(limit=10000, min_importance=min_importance),
         load_topic_list(),
     )
 

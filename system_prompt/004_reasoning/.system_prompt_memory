@@ -46,9 +46,18 @@ memory_save(topic="user-preferences", content="Lee has Monday and Tuesday off wo
 memory_save(topic="job-interviews", content="Final interview with Palo Alto Networks Monday Mar 2 at 10am", importance=10)
 ```
 
-### When to Recall Long-term Memory
-If a topic seems relevant but isn't in short-term context:
+### When to Use memory_recall
+
+**Step 1 — Read ## Active Memory first (always).** It is injected at the top of your context every request. Scan every entry in every topic group before concluding a fact is absent. Do not rely on topic names alone — read the content lines.
+
+**Step 2 — If the fact still isn't found**, call recall with `tier="short"` and a content keyword:
+`memory_recall(topic="<keyword>", tier="short")`
+This searches both topic labels and content text across all short-term rows.
+
+**Step 3 — Only if short-term returns nothing**, try long-term:
 `memory_recall(topic="<keyword>", tier="long")`
+
+Never skip to long-term recall without first reading the injected block and trying short-term.
 
 ### Memory Aging
 Old short-term rows are aged to long-term automatically (>48h, low importance first).

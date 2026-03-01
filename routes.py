@@ -121,6 +121,12 @@ async def cmd_help(client_id: str):
         "Database:\n"
         "  !db_query <sql>                           - run SQL directly (no LLM)\n"
         "\n"
+        "Memory:\n"
+        "  !memory                                   - list all short-term memories\n"
+        "  !memory list [short|long]                 - list by tier\n"
+        "  !memory show <id> [short|long]            - show one row in full\n"
+        "  !memory update <id> [tier=short] [importance=N] [content=text] [topic=label]\n"
+        "\n"
         "Search & Extract:\n"
         "  !search_ddgs <query>                      - search via DuckDuckGo\n"
         "  !search_google <query>                    - search via Google (Gemini grounding)\n"
@@ -211,6 +217,101 @@ async def cmd_db_query(client_id: str, sql: str):
         await push_tok(client_id, result)
     except Exception as exc:
         await push_tok(client_id, f"ERROR: Database query failed\n{exc}")
+    await conditional_push_done(client_id)
+
+
+async def cmd_memory(client_id: str, arg: str):
+    """
+    !memory                         - list all short-term memories
+    !memory list [short|long]       - list short or long-term memories
+    !memory show <id> [short|long]  - show one row in full
+    !memory update <id> [tier=short] [importance=N] [content=...] [topic=...]
+    """
+    from memory import load_short_term, load_long_term, update_memory
+    parts = arg.split(maxsplit=1)
+    subcmd = parts[0].lower() if parts else "list"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd in ("list", "short", "long", ""):
+        tier = "long" if subcmd == "long" else "short"
+        if subcmd == "list" and rest in ("long", "short"):
+            tier = rest
+        rows = await (load_long_term(limit=100) if tier == "long" else load_short_term(limit=100, min_importance=1))
+        if not rows:
+            await push_tok(client_id, f"No {tier}-term memories.")
+        else:
+            lines = [f"{tier}-term memory ({len(rows)} rows):\n"]
+            for r in rows:
+                imp = r.get("importance", "?")
+                lines.append(f"  [{r['id']:>3}] imp={imp} [{r.get('topic','')}] {r.get('content','')}")
+            await push_tok(client_id, "\n".join(lines))
+
+    elif subcmd == "show":
+        tparts = rest.split()
+        if not tparts:
+            await push_tok(client_id, "Usage: !memory show <id> [short|long]")
+            await conditional_push_done(client_id)
+            return
+        try:
+            row_id = int(tparts[0])
+        except ValueError:
+            await push_tok(client_id, f"Invalid id: {tparts[0]}")
+            await conditional_push_done(client_id)
+            return
+        tier = tparts[1] if len(tparts) > 1 and tparts[1] in ("short", "long") else "short"
+        rows = await (load_long_term(limit=1000) if tier == "long" else load_short_term(limit=1000, min_importance=1))
+        row = next((r for r in rows if str(r.get("id")) == str(row_id)), None)
+        if not row:
+            await push_tok(client_id, f"No {tier}-term row with id={row_id}.")
+        else:
+            await push_tok(client_id, "\n".join(f"  {k}: {v}" for k, v in row.items()))
+
+    elif subcmd == "update":
+        tparts = rest.split(maxsplit=1)
+        if not tparts:
+            await push_tok(client_id, "Usage: !memory update <id> [tier=short] [importance=N] [content=...] [topic=...]")
+            await conditional_push_done(client_id)
+            return
+        try:
+            row_id = int(tparts[0])
+        except ValueError:
+            await push_tok(client_id, f"Invalid id: {tparts[0]}")
+            await conditional_push_done(client_id)
+            return
+        kwargs_str = tparts[1] if len(tparts) > 1 else ""
+        # Parse key=value pairs; content/topic may contain spaces so grab them last
+        import re as _re
+        tier = "short"
+        importance = None
+        content = None
+        topic = None
+        m = _re.search(r'\btier=(short|long)\b', kwargs_str)
+        if m:
+            tier = m.group(1)
+            kwargs_str = kwargs_str[:m.start()] + kwargs_str[m.end():]
+        m = _re.search(r'\bimportance=(\d+)\b', kwargs_str)
+        if m:
+            importance = int(m.group(1))
+            kwargs_str = kwargs_str[:m.start()] + kwargs_str[m.end():]
+        m = _re.search(r'\btopic=(\S+)', kwargs_str)
+        if m:
+            topic = m.group(1)
+            kwargs_str = kwargs_str[:m.start()] + kwargs_str[m.end():]
+        m = _re.search(r'\bcontent=(.+)', kwargs_str, _re.DOTALL)
+        if m:
+            content = m.group(1).strip()
+        result = await update_memory(row_id=row_id, tier=tier,
+                                     importance=importance, content=content, topic=topic)
+        await push_tok(client_id, result)
+
+    else:
+        await push_tok(client_id,
+            "Usage:\n"
+            "  !memory                              - list short-term memories\n"
+            "  !memory list [short|long]            - list by tier\n"
+            "  !memory show <id> [short|long]       - show one row\n"
+            "  !memory update <id> [tier=short] [importance=N] [content=text] [topic=label]")
+
     await conditional_push_done(client_id)
 
 
@@ -805,6 +906,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_limits_cfg(client_id, arg)
                 elif cmd == "vscode":
                     await cmd_vscode(client_id, arg)
+                elif cmd == "memory":
+                    await cmd_memory(client_id, arg)
                 elif get_plugin_command(cmd) is not None:
                     await cmd_plugin_command(client_id, cmd, arg)
                 else:
@@ -889,6 +992,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "vscode":
             await cmd_vscode(client_id, arg)
+            return
+        if cmd == "memory":
+            await cmd_memory(client_id, arg)
             return
         if cmd == "stop":
             await cmd_stop(client_id)
