@@ -131,24 +131,63 @@ The JSON value takes precedence over `.env` if both are set.
 python agentctl.py models                              # list all models
 python agentctl.py model-info <model_name>            # detailed model info
 python agentctl.py model-add                          # interactive wizard
-python agentctl.py model-remove <model_name>          # remove a model
-python agentctl.py model-enable <model_name>          # enable a model
-python agentctl.py model-disable <model_name>         # disable a model
 python agentctl.py model <model_name>                 # set as default model
-python agentctl.py model-timeout <model_name> <secs> # set llm_call_timeout
+python agentctl.py model-cfg list                     # list all models (compact)
+python agentctl.py model-cfg read <name>              # show full model config
+python agentctl.py model-cfg write <name> <field> <value>  # update a field
+python agentctl.py model-cfg copy <source> <new_name>      # clone a model
+python agentctl.py model-cfg enable <name>            # enable a model
+python agentctl.py model-cfg disable <name>           # disable a model
+python agentctl.py model-cfg delete <name>            # remove a model
 ```
 
 **Safety rules:** The default model cannot be disabled or removed. Change the default first with `model <name>`.
 
-### Rate Limit Commands
+### Rate and Depth Limit Commands
 
 ```bash
-python agentctl.py ratelimit-list                     # show current limits
-python agentctl.py ratelimit-set <type> <n> <secs>   # set limit
-python agentctl.py ratelimit-autodisable <type> <t|f> # set auto-disable
+python agentctl.py limits list                        # show all limits
+python agentctl.py limits read <key>                  # read a specific limit
+python agentctl.py limits write <key> <value>         # update a limit
 ```
 
-Tool types: `llm_call`, `search`, `extract`, `drive`, `db`, `system`, `tmux`
+Limit keys: `max_at_llm_depth`, `max_agent_call_depth`, `max_tool_iterations`,
+`session_idle_timeout_minutes`, `max_users`, `rate_<type>_calls`, `rate_<type>_window`
+
+Tool rate types: `llm_call`, `search`, `extract`, `drive`, `db`, `system`, `tmux`
+
+### Memory System Commands
+
+The tiered memory system is optional and can be toggled per-feature without restarting the server configuration. Changes take effect after a server restart.
+
+```bash
+python agentctl.py memory status                      # show all feature states
+python agentctl.py memory enable                      # enable the memory system
+python agentctl.py memory disable                     # disable everything
+python agentctl.py memory enable <feature>            # enable one feature
+python agentctl.py memory disable <feature>           # disable one feature
+```
+
+Features: `context_injection`, `reset_summarize`, `post_response_scan`
+
+| Feature | What it controls |
+|---|---|
+| `context_injection` | Short-term memories + Known topics injected into every request |
+| `reset_summarize` | Session summarized to memory automatically on `!reset` |
+| `post_response_scan` | Regex scan of final response text for narrated `memory_save()` calls |
+
+Configuration is stored in `plugins-enabled.json` under `plugin_config.memory`. Manual JSON equivalent:
+
+```json
+"memory": {
+  "enabled": true,
+  "context_injection": true,
+  "reset_summarize": true,
+  "post_response_scan": true
+}
+```
+
+> For the full memory system design, database setup, save paths, topic lifecycle, and bug history, see [MEMORY_PROJECT1.md](MEMORY_PROJECT1.md).
 
 ---
 
@@ -738,6 +777,7 @@ to `llm-models.json` for any models served via that tunnel.
 | `.system_prompt_*` | Individual section files | Admin manually or LLM via tool |
 | `.aiops_session_id` | shell.py session persistence | shell.py automatically |
 | `auto-enrich.json` | Instance-specific context auto-enrichment rules (gitignored) | Admin manually — see below |
+| `db-config.json` | Instance-specific DB name and table name overrides for memory system (gitignored) | Admin manually |
 
 ### `plugin-manifest.json` vs `plugins-enabled.json`
 
