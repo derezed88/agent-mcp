@@ -143,6 +143,9 @@ def _build_lc_llm(model_key: str):
                 # extra_body forwards top_k as a top-level JSON field in the request.
                 # llama.cpp accepts it; real OpenAI API ignores unknown extra_body fields.
                 kwargs["extra_body"] = {"top_k": int(top_k)}
+        max_tokens = cfg.get("max_tokens")
+        if max_tokens is not None:
+            kwargs["max_tokens"] = int(max_tokens)
         return ChatOpenAI(**kwargs)
 
     if cfg["type"] == "GEMINI":
@@ -157,6 +160,9 @@ def _build_lc_llm(model_key: str):
             top_k = cfg.get("top_k")
             if top_k is not None:
                 kwargs["top_k"] = int(top_k)
+        max_tokens = cfg.get("max_tokens")
+        if max_tokens is not None:
+            kwargs["max_output_tokens"] = int(max_tokens)
         return ChatGoogleGenerativeAI(**kwargs)
 
     raise ValueError(f"Unsupported model type '{cfg['type']}' for model '{model_key}'")
@@ -820,11 +826,11 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
     if _memory_feature("context_injection"):
         try:
             from memory import load_context_block
-            mem_block = await load_context_block(limit=15, min_importance=3)
+            mem_block = await load_context_block(min_importance=3)
             if mem_block:
                 enrichments.append(mem_block)
         except Exception as _mem_err:
-            log.debug(f"auto_enrich_context: memory load skipped: {_mem_err}")
+            log.warning(f"auto_enrich_context: memory load failed: {_mem_err}")
 
     if not enrichments: return messages
 
