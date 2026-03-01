@@ -2,6 +2,9 @@
 
 Automatic, topic-aware, tiered memory with cross-session recall for the Samaritan agent persona.
 
+> **Optional feature.** The entire memory system — or individual sub-features — can be toggled
+> without touching source code. See [Enabling / Disabling](#enabling--disabling).
+
 ---
 
 ## Overview
@@ -9,6 +12,18 @@ Automatic, topic-aware, tiered memory with cross-session recall for the Samarita
 By default, LLM sessions are stateless — each `!reset` or reconnect starts from a blank slate. This feature adds a persistent memory layer beneath all sessions: facts distilled from conversations survive resets, accumulate across weeks of use, and are automatically injected back into future requests with zero manual overhead.
 
 ```
+Every request
+        │
+        ▼
+auto_enrich_context()
+  ├── injects ## Active Memory block (short-term rows, importance ≥ 3)
+  └── injects Known topics list (DISTINCT topics from both memory tables)
+        │
+        ▼
+Grok reasons and responds
+  ├── Path A: issues memory_save tool call directly → DB write
+  └── Path B: narrates memory_save() in text → post-response scanner saves to DB
+
 Session ends (!reset)
         │
         ▼
@@ -241,11 +256,14 @@ The prompt is a tree of files. The root `.system_prompt` assembles the tree via 
 **`.system_prompt_behavior`** — tells Grok how to behave:
 - Rule 6: Delegate DB writes and tool chains to `samaritan-execution` via `llm_call`
 - Rule 7: Treat injected `## Active Memory` as ground truth; do not ask about known facts
+- Rule 8: Mandatory memory capture — scan every user message for saveable facts; call `memory_save` before completing response if any of: future events, people, preferences, decisions, life facts, or explicit "remember this" are present
 
 **`.system_prompt_continuity`** — describes the three-tier model and what triggers each tier
 
 **`.system_prompt_memory`** — detailed procedures:
-- When to save explicitly (user preference, key decision, "remember this")
+- When to save (every turn, behavior rule 8 categories)
+- Topics are dynamic: use the **Known topics** list injected in `## Active Memory`; create new topics only when none fit
+- Importance scale (6=useful context, 7-8=concrete plans, 9=high-stakes, 10=imminent/critical)
 - How to trigger long-term recall via delegation
 - How to trigger memory aging
 
@@ -253,14 +271,15 @@ The prompt is a tree of files. The root `.system_prompt` assembles the tree via 
 
 ### What Triggers Memory Features
 
-| Trigger | What Happens |
-|---|---|
-| Any request (≥1 memory row, importance≥3) | `auto_enrich_context()` prepends `## Active Memory` block to system message |
-| `!reset` with ≥4 messages in history | `cmd_reset()` calls `summarize_and_save()` before clearing |
-| Grok sees user preference or key decision | Behavior rule 6: delegates `memory_save` call to `samaritan-execution` |
-| User says "remember this" | Grok delegates explicit save with importance=8-10 |
-| Topic present but not in active memory | Grok delegates `memory_recall(topic, tier="long")` to `samaritan-execution` |
-| Session created or rehydrated from disk | `age_to_longterm()` runs as background task — rows >48h moved to long-term |
+| Trigger | What Happens | Feature flag |
+|---|---|---|
+| Every request | `auto_enrich_context()` prepends `## Active Memory` + Known topics list to system message | `context_injection` |
+| `!reset` with ≥4 messages in history | `cmd_reset()` calls `summarize_and_save()` before clearing | `reset_summarize` |
+| Grok response contains `memory_save(...)` text | Post-response scanner regex extracts and writes to DB | `post_response_scan` |
+| Grok issues actual `memory_save` tool call | `execute_tool()` → `_memory_save_exec()` → DB write | *(no separate flag — inherits master switch via tool availability)* |
+| Any message: fact detected (rule 8 trigger) | Behavior rule 8 mandates Grok calls `memory_save` before completing response | *(system prompt — disable by editing behavior rule 8)* |
+| Topic present but not in active memory | Grok delegates `memory_recall(topic, tier="long")` to `samaritan-execution` | *(on-demand — not auto)* |
+| Session created or rehydrated from disk | `age_to_longterm()` runs as background task — rows >48h moved to long-term | *(always runs; no separate flag)* |
 
 ---
 
@@ -272,21 +291,78 @@ The prompt is a tree of files. The root `.system_prompt` assembles the tree via 
 User message arrives
         │
         ▼
-dispatch_llm() called
+dispatch_llm() → agentic_lc()
         │
         ▼
-auto_enrich_context()
-  ├── load_context_block(limit=15, min_importance=3)
-  ├── queries samaritan_memory_shortterm
-  └── if rows exist → injects "## Active Memory" system message before user message
+auto_enrich_context()   [feature: context_injection]
+  ├── load_short_term(limit=15, min_importance=3)
+  ├── load_topic_list() — DISTINCT topics from both memory tables
+  └── injects "## Active Memory" system message:
+        ├── grouped memory rows by topic  (if any rows)
+        └── Known topics list             (always, if any topics exist)
         │
         ▼
-agentic_lc() — LLM called with enriched context
-  └── Grok sees memory block; responds with continuity
+agentic_lc() — Grok sees enriched context
+  ├── Behavior rule 8: scans user message for saveable facts
+  │     └── if found → calls memory_save tool (Path A)
+  └── Grok responds
+        │
+        ▼
+Post-response scanner   [feature: post_response_scan]
+  └── regex scan of final text for memory_save(topic=...) syntax (Path B)
+        └── if matched → _memory_save_exec() → DB write (dedup checked)
 ```
 
-Token cost of injection: **~200–400 tokens** for 15 rows, regardless of how many sessions
-have accumulated in storage.
+Token cost of injection: **~200–400 tokens** for 15 rows + topic list, regardless of how many sessions have accumulated in storage.
+
+### Save Path A: Direct Tool Call
+
+Grok or samaritan-execution issues a `memory_save` tool call in the normal agentic loop:
+
+```
+Grok/gpt-4o-mini turn
+  └── memory_save(topic="X", content="Y", importance=8)   ← tool call
+            │
+            ▼
+      execute_tool() → _memory_save_exec() in tools.py
+        └── save_memory() in memory.py
+              ├── dedup check (shortterm + longterm)
+              └── execute_insert() → cursor.lastrowid → DB row
+```
+
+### Save Path B: Post-Response Scanner
+
+For models that narrate instead of calling tools (observed with Grok), the scanner catches `memory_save(...)` text in the final response:
+
+```
+Grok final response text:
+  "...memory_save(topic='family', content='Lee has Monday off', importance=7)..."
+        │
+        ▼
+_scan_and_save_memories()   [agents.py, fires after response streams]
+  ├── Pass 1: regex match on memory_save(topic=..., content=...) syntax
+  └── Pass 2: JSON-blob form fallback (if pass 1 finds nothing)
+        │
+        ▼
+  _memory_save_exec() → save_memory() → DB (same dedup + insert path as Path A)
+```
+
+Activated per-model via `"memory_scan": true` in `llm-models.json`. Currently set on `samaritan-reasoning` only.
+
+### Save Path C: Delegation Flow (Grok → gpt-4o-mini)
+
+Grok can also delegate saves explicitly via `llm_call`:
+
+```
+Grok reasoning turn
+  └── llm_call("samaritan-execution", "save memory: topic=X content=Y importance=8")
+            │
+            ▼
+      samaritan-execution (gpt-4o-mini) receives prompt
+        └── calls memory_save tool (Path A)
+```
+
+gpt-4o-mini at temp=0.1 reliably translates natural-language delegation prompts into precise tool calls.
 
 ### Reset Flow (Summarize → Save → Clear)
 
@@ -294,7 +370,7 @@ have accumulated in storage.
 User sends !reset
         │
         ▼
-cmd_reset() in routes.py
+cmd_reset() in routes.py   [feature: reset_summarize]
   ├── if history ≥ 4 messages:
   │     ├── push "[memory] Summarizing session to memory..."
   │     ├── summarize_and_save(session_id, history, "summarizer-anthropic")
@@ -308,41 +384,25 @@ cmd_reset() in routes.py
   └── push "Conversation history cleared."
 ```
 
-### Delegation Flow (Grok → gpt-4o-mini)
+### Topic Lifecycle
 
-The preferred path for memory writes: Grok delegates to `samaritan-execution` via `llm_call`.
-
-```
-Grok reasoning turn
-  └── llm_call("samaritan-execution", "save memory: topic=X content=Y importance=8")
-            │
-            ▼
-      samaritan-execution (gpt-4o-mini) receives prompt
-        └── calls memory_save(topic="X", content="Y", importance=8)
-                │
-                ▼
-          INSERT INTO samaritan_memory_shortterm
-```
-
-gpt-4o-mini at temp=0.1 reliably translates natural-language delegation prompts into precise tool calls.
-
-### Direct Memory Call (Grok → tool)
-
-Grok also has the `memory` toolset bound directly. If it issues a proper tool call (not just narrates), it succeeds:
+Topics are not configured anywhere — they emerge from use and persist in the DB:
 
 ```
-Grok reasoning turn
-  └── memory_save(topic="X", content="Y", importance=8)   ← direct tool call
-            │
-            ▼
-      _memory_save_exec() in tools.py
-        └── save_memory() in memory.py
-                │
-                ▼
-          INSERT INTO samaritan_memory_shortterm
+First save with topic="travel-plans"
+  └── INSERT INTO samaritan_memory_shortterm (topic='travel-plans', ...)
+        │
+        ▼
+Next request: load_topic_list() queries DISTINCT topic from both tables
+  └── "travel-plans" appears in Known topics list in ## Active Memory
+        │
+        ▼
+Grok sees "travel-plans" in Known topics → reuses it for new saves
+  (no config change, no restart needed)
 ```
 
-**Reliability note:** `grok-4-1-fast-non-reasoning` frequently generates text narrating a tool call instead of issuing one. Direct calls succeed when they happen; delegation is the more reliable path.
+Adding a topic: save any memory with a new topic name — it auto-appears in future injections.
+Removing a topic: delete all rows with that topic from both memory tables.
 
 ### Aging Flow
 
@@ -369,6 +429,65 @@ routes.py session init block
 ```
 
 Manual override: ask Grok to delegate `memory_age(older_than_hours=24)` to age more aggressively.
+
+---
+
+## Enabling / Disabling
+
+The memory system is an optional feature. Configuration lives in `plugins-enabled.json`
+under `plugin_config.memory`. Changes take effect after a server restart.
+
+### Via agentctl
+
+```bash
+# Show current state
+python3 agentctl.py memory status
+
+# Disable everything (master switch)
+python3 agentctl.py memory disable
+
+# Re-enable everything
+python3 agentctl.py memory enable
+
+# Disable a specific sub-feature only
+python3 agentctl.py memory disable context_injection
+python3 agentctl.py memory disable reset_summarize
+python3 agentctl.py memory disable post_response_scan
+
+# Re-enable a sub-feature
+python3 agentctl.py memory enable reset_summarize
+```
+
+### Via JSON (manual)
+
+`plugins-enabled.json` → `plugin_config.memory`:
+
+```json
+"memory": {
+  "enabled": true,
+  "context_injection": true,
+  "reset_summarize": true,
+  "post_response_scan": true
+}
+```
+
+### Feature flags
+
+| Key | Default | Controls |
+|---|---|---|
+| `enabled` | `true` | Master switch — disabling this overrides all sub-features |
+| `context_injection` | `true` | `## Active Memory` + Known topics injected into every request |
+| `reset_summarize` | `true` | Session summarized to memory on `!reset` |
+| `post_response_scan` | `true` | Regex scan of final response text for `memory_save(...)` narration |
+
+The `memory_scan` flag in `llm-models.json` is a **per-model** gate for post-response scanning.
+Both `post_response_scan` (global) and `memory_scan` (per-model) must be `true` for scanning to fire.
+
+### What is NOT gated
+
+- The `memory_save` / `memory_recall` / `memory_age` **tools** remain registered regardless of these flags — they can still be called via direct tool use or delegation. The flags only suppress the *automatic* behaviors (injection, reset summarize, scan).
+- Memory aging (`age_to_longterm`) is a background maintenance task; it always runs when sessions are created.
+- The behavior rule 8 mandatory-save instruction lives in the system prompt. To suppress it, edit `system_prompt/004_reasoning/.system_prompt_behavior` and remove rule 8, or set the model's `system_prompt_folder` to a folder without that rule.
 
 ---
 

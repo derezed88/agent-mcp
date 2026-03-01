@@ -65,6 +65,12 @@
     "plugin_claude_vscode_sessions": {
       "enabled": true
     },
+    "memory": {
+      "enabled": true,
+      "context_injection": true,
+      "reset_summarize": true,
+      "post_response_scan": true
+    },
     "plugin_tmux": {
       "enabled": true,
       "TMUX_HISTORY_LIMIT": 200,

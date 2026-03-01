@@ -464,7 +464,8 @@ async def cmd_reset(client_id: str, session: dict):
     history_len = len(history)
 
     # Summarize departing history into short-term memory before clearing
-    if history_len >= 4:
+    from agents import _memory_feature
+    if history_len >= 4 and _memory_feature("reset_summarize"):
         try:
             from memory import summarize_and_save
             await push_tok(client_id, "[memory] Summarizing session to memory...\n")

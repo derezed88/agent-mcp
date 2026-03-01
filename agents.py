@@ -728,6 +728,31 @@ def _load_enrich_rules() -> list[dict]:
         log.warning(f"auto-enrich.json load failed: {e}")
         return []
 
+
+def _memory_cfg() -> dict:
+    """Return the memory config block from plugins-enabled.json.
+    Defaults to all-enabled if the key is absent (backward-compatible)."""
+    import json as _json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins-enabled.json")
+    try:
+        with open(path) as f:
+            data = _json.load(f)
+        return data.get("plugin_config", {}).get("memory", {})
+    except Exception:
+        return {}
+
+
+def _memory_feature(feature: str) -> bool:
+    """Return True if a specific memory feature is enabled.
+    Master switch: 'enabled' (default True).
+    Feature switches: 'context_injection', 'reset_summarize', 'post_response_scan' (all default True).
+    A feature is only active when both the master switch and the feature switch are True.
+    """
+    cfg = _memory_cfg()
+    if not cfg.get("enabled", True):
+        return False
+    return cfg.get(feature, True)
+
 async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict]:
     if not messages: return messages
     last_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
@@ -752,13 +777,14 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
             pass
 
     # Inject short-term memory context block
-    try:
-        from memory import load_context_block
-        mem_block = await load_context_block(limit=15, min_importance=3)
-        if mem_block:
-            enrichments.append(mem_block)
-    except Exception as _mem_err:
-        log.debug(f"auto_enrich_context: memory load skipped: {_mem_err}")
+    if _memory_feature("context_injection"):
+        try:
+            from memory import load_context_block
+            mem_block = await load_context_block(limit=15, min_importance=3)
+            if mem_block:
+                enrichments.append(mem_block)
+        except Exception as _mem_err:
+            log.debug(f"auto_enrich_context: memory load skipped: {_mem_err}")
 
     if not enrichments: return messages
 
@@ -812,7 +838,11 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         _is_gemini = (LLM_REGISTRY.get(model_key, {}).get("type") == "GEMINI")
         # Post-response memory scan: for models that narrate tool calls instead of
         # issuing them, scan the final text for memory_save() syntax and execute saves.
-        _memory_scan = bool(LLM_REGISTRY.get(model_key, {}).get("memory_scan", False))
+        # Gated by both the model-level "memory_scan" flag and the global feature switch.
+        _memory_scan = (
+            bool(LLM_REGISTRY.get(model_key, {}).get("memory_scan", False))
+            and _memory_feature("post_response_scan")
+        )
         # Tool-call loop detection: track the last N consecutive tool-call fingerprints.
         # If the same set of tool+args repeats >= _TOOL_LOOP_THRESHOLD times in a row,
         # the model is stuck in a deterministic loop (Qwen3, Hermes, etc.).

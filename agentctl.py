@@ -1055,6 +1055,57 @@ class PluginManager:
         else:
             print(f"{Colors.RED}✗ Unknown action '{action}'. Valid: list, read, write{Colors.RESET}")
 
+    def memory_cmd(self, args: list):
+        """Handle: agentctl memory status|enable|disable [feature]
+
+        Features: context_injection, reset_summarize, post_response_scan
+        Master switch: 'all' (or no feature arg) toggles the 'enabled' key.
+        """
+        FEATURES = ("context_injection", "reset_summarize", "post_response_scan")
+        action = args[0] if args else "status"
+        feature = args[1] if len(args) > 1 else "all"
+
+        mem_cfg = self.config.setdefault("plugin_config", {}).setdefault("memory", {
+            "enabled": True,
+            "context_injection": True,
+            "reset_summarize": True,
+            "post_response_scan": True,
+        })
+
+        def _bool_str(val: bool) -> str:
+            return f"{Colors.GREEN}enabled{Colors.RESET}" if val else f"{Colors.RED}disabled{Colors.RESET}"
+
+        if action == "status":
+            master = mem_cfg.get("enabled", True)
+            print(f"\n{Colors.BOLD}Memory system{Colors.RESET}  (plugins-enabled.json → plugin_config.memory)")
+            print(f"  master switch       : {_bool_str(master)}")
+            for feat in FEATURES:
+                val = mem_cfg.get(feat, True)
+                active = master and val
+                note = "" if active else f"  {Colors.GRAY}(inactive — {'master off' if not master else 'feature off'}){Colors.RESET}"
+                print(f"  {feat:<24}: {_bool_str(val)}{note}")
+
+        elif action in ("enable", "disable"):
+            new_val = (action == "enable")
+            if feature == "all":
+                mem_cfg["enabled"] = new_val
+                label = "Master switch"
+            elif feature in FEATURES:
+                mem_cfg[feature] = new_val
+                label = feature
+            else:
+                print(f"{Colors.RED}✗ Unknown feature '{feature}'. "
+                      f"Valid: all, {', '.join(FEATURES)}{Colors.RESET}")
+                return
+            self._save_plugins_enabled()
+            state_str = "enabled" if new_val else "disabled"
+            print(f"{Colors.GREEN}✓{Colors.RESET} {label}: {state_str} (persisted)")
+            print(f"  Restart the server for changes to take effect.")
+
+        else:
+            print(f"{Colors.RED}✗ Unknown action '{action}'. "
+                  f"Valid: status, enable, disable{Colors.RESET}")
+
     def show_help(self):
         """Print all available commands."""
         print(f"\n{Colors.BOLD}Plugin Commands:{Colors.RESET}")
@@ -1082,6 +1133,11 @@ class PluginManager:
         print("  model-cfg list|read|write|copy|delete|enable|disable [name] [field] [value]")
         print("    field 'llm_tools_gates': comma-separated gate entries, e.g. 'db_query,model_cfg write'")
         print("  limits list|read|write [key] [value]")
+        print(f"\n{Colors.BOLD}Memory Commands:{Colors.RESET}")
+        print("  memory status                     - Show memory feature on/off state")
+        print("  memory enable [feature]           - Enable memory (or a specific feature)")
+        print("  memory disable [feature]          - Disable memory (or a specific feature)")
+        print(f"    features: context_injection, reset_summarize, post_response_scan")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
         print("  quit                              - Exit plugin manager")
@@ -1185,6 +1241,8 @@ class PluginManager:
                 self.model_cfg_cmd(arg.split() if arg else [])
             elif action == "limits":
                 self.limits_cfg_cmd(arg.split() if arg else [])
+            elif action == "memory":
+                self.memory_cmd(arg.split() if arg else [])
             else:
                 print(f"{Colors.RED}Unknown command: {action}{Colors.RESET}")
 
@@ -1455,6 +1513,8 @@ def main():
             manager.model_cfg_cmd(sys.argv[2:])
         elif cmd == "limits":
             manager.limits_cfg_cmd(sys.argv[2:])
+        elif cmd == "memory":
+            manager.memory_cmd(sys.argv[2:])
 
         else:
             print(f"{Colors.RED}Unknown command: {cmd}{Colors.RESET}")
