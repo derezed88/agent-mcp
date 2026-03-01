@@ -2,8 +2,8 @@
 
 This document defines the complete contract for writing plugins that integrate
 with the MCP agent system. Any plugin that follows this spec will be automatically
-discovered, loaded, gated, and surfaced in `!help` — with no changes required to
-mainline code (`agent-mcp.py`, `routes.py`, `gate.py`).
+discovered, loaded, and surfaced in `!help` — with no changes required to
+mainline code (`agent-mcp.py`, `routes.py`).
 
 ---
 
@@ -74,7 +74,7 @@ Every plugin must have an entry in `plugin-manifest.json`:
 
 **Fields:**
 - `type` — `"data_tool"` or `"client_interface"`
-- `file` — filename relative to the mymcp working directory
+- `file` — filename relative to the agent-mcp working directory
 - `description` — shown in `python agentctl.py list`
 - `dependencies` — pip package names (validated at startup; use `>=` for minimum version)
 - `env_vars` — environment variable names required from `.env`; validated at startup
@@ -84,7 +84,7 @@ Every plugin must have an entry in `plugin-manifest.json`:
   - 100–199: database plugins
   - 200–299: storage plugins
   - 300–399: search plugins
-- `tools` — list of tool names this plugin provides (for reference / agentctl display)
+- `tools` — list of tool names this plugin provides (for reference / plugin-manager display)
 
 ---
 
@@ -186,46 +186,6 @@ def get_tools(self) -> Dict[str, Any]:
 
 ---
 
-### `get_gate_tools()` — **Required if tool needs human approval**
-
-Declares which tools require human gate approval before execution.
-If omitted (returns `{}`), tools are **auto-allowed** (no gate).
-
-```python
-def get_gate_tools(self) -> Dict[str, Any]:
-    return {
-        "example_search": {
-            "type": "search",          # gate group; see Gate Types table below
-            "operations": ["read"],    # ["read"], ["write"], or ["read", "write"]
-            "description": "web search via Example API (read-only)"  # shown in !help
-        }
-    }
-```
-
-**Gate Types:**
-
-| `type` value | `!autogate` alias | Typical operations | Examples                        |
-|--------------|-------------------|--------------------|---------------------------------|
-| `"search"`   | `search`          | `["read"]`         | ddgs_search, tavily_search      |
-| `"extract"`  | `extract`         | `["read"]`         | url_extract                     |
-| `"drive"`    | `drive`           | `["read","write"]` | google_drive                    |
-| `"db"`       | *(per-table)*     | `["read","write"]` | db_query (uses `!autoAIdb`)     |
-
-**Rules:**
-- Search and extract tools must declare `"operations": ["read"]` only.
-- Drive-style tools declare both `["read", "write"]` so the user can gate them separately.
-- DB tools use a separate `!autoAIdb` command with per-table granularity; declare them
-  as `"type": "db"`.
-- The `"description"` field appears verbatim in the `!help` AI tools section.
-
-**What the gate registry powers:**
-- `gate.py`: dynamically checks `get_gate_tools_by_type("search")` to decide which
-  tool calls need approval — no hardcoded tool names.
-- `routes.py !autogate`: `search` alias expands to all registered `type="search"` tools.
-- `routes.py !help`: AI tools section built from registry; new plugins appear automatically.
-
----
-
 ## `client_interface` Plugin — Additional Methods
 
 ### `get_routes()` — **Required**
@@ -315,7 +275,6 @@ for each plugin in plugins-enabled.json:
         tools_module.register_plugin_tools(name, plugin.get_tools())
         # → extends _PLUGIN_TOOLS_LC with the plugin's StructuredTool list
         # → auto-extracts executors from StructuredTool.coroutine
-        tools_module.register_gate_tools(name, plugin.get_gate_tools())
 
     elif PLUGIN_TYPE == "client_interface":
         mount plugin.get_routes() on Starlette app
@@ -342,7 +301,7 @@ Models live in `llm-models.json`. No code changes are needed for standard backen
   "max_context": 100,
   "enabled": true,
   "description": "My custom model",
-  "tool_call_available": false,
+  "llm_tools": "all",
   "llm_call_timeout": 60
 }
 ```
@@ -359,13 +318,12 @@ Models live in `llm-models.json`. No code changes are needed for standard backen
 2. Add `EXAMPLE_API_KEY=...` to `.env` (if required)
 3. Restart the server
 
-The model is immediately available as `!model mymodel`. Set `tool_call_available: true`
-and use `!llm_call mymodel true` to enable it as a delegation target for `llm_clean_text`
-and `llm_clean_tool`.
+The model is immediately available as `!model mymodel`. Set `llm_tools` to `"all"` for
+full tool access, or provide a specific list of tool names the model should use.
 
 **Local models (llama.cpp / Ollama):**
 - Set `type: "OPENAI"`, `host` to the local server URL, `env_key: null`
-- Set `tool_call_available: true` only if the model reliably calls tools
+- Set `llm_tools` to only the tools the model reliably handles
 - Increase `llm_call_timeout` for slow hardware (e.g., 120s)
 
 ---
@@ -383,10 +341,10 @@ and `llm_clean_tool`.
 5. **Restart** `python agent-mcp.py`.
 6. **Verify** with `python agentctl.py list` — plugin should show `✓` (green,
    all deps and env vars present) or `–` (yellow, if you shipped it with `enabled: false`).
-7. **Test** with `!help` in the client — new tool should appear automatically
-   in the AI tools section if `get_gate_tools()` is implemented.
+7. **Test** with `!help` in the client — new tool should appear automatically.
+8. **Grant access** — add the new tool name to the `llm_tools` list for models that should use it in `llm-models.json`, or set `llm_tools` to `"all"`.
 
-No changes to `routes.py`, `gate.py`, or `agent-mcp.py` are needed for
+No changes to `routes.py` or `agent-mcp.py` are needed for
 standard `data_tool` search/drive/storage plugins.
 
 ---
@@ -449,15 +407,6 @@ class SearchExamplePlugin(BasePlugin):
     def shutdown(self) -> None:
         self._api_key = None
         self.enabled  = False
-
-    def get_gate_tools(self) -> Dict[str, Any]:
-        return {
-            "example_search": {
-                "type": "search",
-                "operations": ["read"],
-                "description": "web search via Example API (read-only)"
-            }
-        }
 
     def get_tools(self) -> Dict[str, Any]:
         return {
@@ -525,11 +474,10 @@ def get_tools(self) -> Dict[str, Any]:
 | `plugin-manifest.json`   | Plugin metadata registry                                      |
 | `plugins-enabled.json`   | Which plugins are active; per-plugin config; rate limits      |
 | `llm-models.json`        | LLM model registry (add new models here)                      |
-| `agent-mcp.py`           | Startup orchestration; registers tools and gates              |
-| `tools.py`               | `StructuredTool` registry; `register_plugin_tools()`; `_lc_tool_to_openai_dict()` |
+| `agent-mcp.py`           | Startup orchestration; registers tools                        |
+| `tools.py`               | `StructuredTool` registry; `register_plugin_tools()`; per-model toolset filtering |
 | `agents.py`              | `agentic_lc()` loop; `_build_lc_llm()`; `execute_tool()`; `_content_to_str()` |
-| `gate.py`                | Human approval logic; uses gate registry dynamically          |
-| `routes.py`              | `!autogate`, `!help` — both driven by gate registry           |
+| `routes.py`              | `!help`, unified `!command` dispatch                          |
 | `agentctl.py`      | CLI tool for system administration (plugins, models, config)  |
 | `.env`                   | API keys and credentials                                      |
 | `.system_prompt_tools`   | LLM-facing tool documentation (update manually for new tools) |

@@ -37,7 +37,6 @@ from tools import get_core_tools
 import tools as tools_module
 import agents as agents_module
 from tools import register_plugin_commands
-import plugin_sec_airs_cmd  # registers !airs command at import time
 
 
 def _check_port_available(host: str, port: int) -> bool:
@@ -192,11 +191,17 @@ async def run_agent(host: str = "0.0.0.0"):
     log.info("="*70)
     log.info("")
 
+    # Ensure session-history directory exists for persisted histories
+    from state import SESSION_HISTORY_DIR
+    import os as _os
+    _os.makedirs(SESSION_HISTORY_DIR, exist_ok=True)
+    log.info(f"Session history directory: {SESSION_HISTORY_DIR}")
+
     # Session idle-timeout reaper: periodically evict sessions that have been
     # inactive longer than session_idle_timeout_minutes.  A timeout of 0 disables.
     async def _session_reaper():
         import time
-        from state import sessions, remove_shorthand_mapping
+        from state import sessions, remove_shorthand_mapping, save_history
         while True:
             await asyncio.sleep(60)  # check every minute
             try:
@@ -210,7 +215,9 @@ async def run_agent(host: str = "0.0.0.0"):
                     if data.get("last_active", 0) < cutoff
                 ]
                 for cid in stale:
-                    sessions.pop(cid, None)
+                    data = sessions.pop(cid, None)
+                    if data:
+                        save_history(cid, data.get("history", []))
                     remove_shorthand_mapping(cid)
                     log.info(f"Session reaped (idle timeout): {cid}")
             except Exception as e:

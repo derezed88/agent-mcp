@@ -5,8 +5,6 @@ Shell.py terminal client interface. Always keep this enabled — it is the prima
 ## What it provides
 
 - SSE streaming endpoint at `POST /submit` and `GET /stream`
-- Gate approval UI (pop-up prompts for tool call approval)
-- `!gate_preview_length` command to control pop-up truncation
 - Persistent session via `.aiops_session_id` file
 
 ## Port

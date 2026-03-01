@@ -1,10 +1,10 @@
 ## tool-llm-list: llm_list tool definition
 
-### llm_list() → str
+### llm_list() -> str
 List all registered LLM models with their full details.
 
 Returns for each model: name, type (OPENAI/GEMINI), model_id, host, max_context,
-tool_call_available (YES/NO), llm_call_timeout, and description.
+llm_call_timeout, and description.
 
 When to use:
-- Before calling llm_clean_text or llm_clean_tool, to find a model with tool_call_available=YES.
+- Before calling llm_call, to find a suitable model for delegation.

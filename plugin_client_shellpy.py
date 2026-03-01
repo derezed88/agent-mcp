@@ -4,7 +4,6 @@ Shell.py Client Interface Plugin for MCP Agent
 Provides MCP endpoints for shell.py client:
 - /submit - Submit user messages
 - /stream - SSE streaming for responses
-- /gate_response - Gate approval responses
 - /health - Health check
 - /sessions - List sessions
 - /session/{sid} - Delete session
@@ -16,11 +15,11 @@ from plugin_loader import BasePlugin
 from routes import (
     endpoint_submit,
     endpoint_stream,
-    endpoint_gate_response,
     endpoint_stop,
     endpoint_health,
     endpoint_list_sessions,
-    endpoint_delete_session
+    endpoint_delete_session,
+    endpoint_gate_respond,
 )
 
 
@@ -30,7 +29,7 @@ class ShellpyClientPlugin(BasePlugin):
     PLUGIN_NAME = "plugin_client_shellpy"
     PLUGIN_VERSION = "1.0.0"
     PLUGIN_TYPE = "client_interface"
-    DESCRIPTION = "shell.py client with SSE streaming and gate approval UI"
+    DESCRIPTION = "shell.py client with SSE streaming"
     DEPENDENCIES = ["sse-starlette"]
     ENV_VARS = []
 
@@ -63,11 +62,11 @@ class ShellpyClientPlugin(BasePlugin):
         return [
             Route("/submit", endpoint_submit, methods=["POST"]),
             Route("/stream", endpoint_stream, methods=["GET"]),
-            Route("/gate_response", endpoint_gate_response, methods=["POST"]),
             Route("/stop", endpoint_stop, methods=["POST"]),
             Route("/health", endpoint_health, methods=["GET"]),
             Route("/sessions", endpoint_list_sessions, methods=["GET"]),
             Route("/session/{sid}", endpoint_delete_session, methods=["DELETE"]),
+            Route("/gate_respond", endpoint_gate_respond, methods=["POST"]),
         ]
 
     def get_config(self) -> dict:

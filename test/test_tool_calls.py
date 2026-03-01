@@ -4,7 +4,7 @@ Comprehensive LLM tool-call tests for agent-mcp.
 Exercises every core LLM-callable tool. Strategy:
   - LLM tool-call path: used where Gemini 2.5 Flash reliably invokes the tool.
   - Direct !command path: fallback for tools Gemini answers from knowledge
-    (get_system_info, help, llm_list, model, sysprompt_list_dir, limit_depth_list).
+    (get_system_info, help, llm_list, model, sysprompt_list_dir).
   - sysprompt write/read/delete: direct commands against gemini25f folder
     (003_test dir exists for isolation; write tests use 003_test via a temp
      model entry, or fall back to !command with gemini25f + cleanup).
@@ -12,7 +12,7 @@ Exercises every core LLM-callable tool. Strategy:
 
 Requires:
   - agent-mcp server running on port 8767 (API plugin)
-  - autogate db_query read+write = true
+  - Model must have db tools in its llm_tools list
   - 003_test system prompt directory (auto-created if missing)
 
 Usage:
@@ -43,7 +43,6 @@ class TestRunner:
             base_url=self.base_url,
             client_id=f"tc-{suffix}",
             api_key=self.api_key,
-            auto_approve_gates=True,
         )
         kw.update(kwargs)
         return AgentClient(**kw)
@@ -107,17 +106,17 @@ async def test_llm_list(runner: TestRunner):
         runner.record("llm_list", False, str(e))
 
 
-async def test_gate_list(runner: TestRunner):
-    """gate_list — LLM tool call."""
+async def test_llm_tools_list(runner: TestRunner):
+    """llm_tools — LLM tool call."""
     try:
-        c = runner.client("gatelist")
+        c = runner.client("llmtools")
         result = await c.send(
-            "Call gate_list and show me the current gate settings.", timeout=30
+            "Call llm_tools with action='list' and show me all toolsets.", timeout=30
         )
-        ok = _has(result, "gate", "read", "write", "allow", "db_query", "search")
-        runner.record("gate_list", ok, result[:80].replace("\n", " "))
+        ok = _has(result, "core", "admin", "db", "search")
+        runner.record("llm_tools(list)", ok, result[:80].replace("\n", " "))
     except Exception as e:
-        runner.record("gate_list", False, str(e))
+        runner.record("llm_tools(list)", False, str(e))
 
 
 async def test_model_tool_list(runner: TestRunner):
@@ -416,7 +415,7 @@ async def run_all(base_url: str, api_key: str = None):
     await test_get_system_info(runner)
     await test_help_tool(runner)
     await test_llm_list(runner)
-    await test_gate_list(runner)
+    await test_llm_tools_list(runner)
     await test_model_tool_list(runner)
     await test_session_tool_list(runner)
     await test_sysprompt_list_dir(runner)

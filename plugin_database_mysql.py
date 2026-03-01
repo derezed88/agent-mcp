@@ -57,16 +57,6 @@ class MysqlPlugin(BasePlugin):
             pass
         self.enabled = False
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare db_query as a gated tool with per-table read/write gates."""
-        return {
-            "db_query": {
-                "type": "db",
-                "operations": ["read", "write"],
-                "description": "SQL against mymcp (per-table read/write gates)"
-            }
-        }
-
     def get_tools(self) -> Dict[str, Any]:
         """Return MySQL tool definitions in LangChain StructuredTool format."""
         return {
@@ -74,7 +64,7 @@ class MysqlPlugin(BasePlugin):
                 StructuredTool.from_function(
                     coroutine=db_query_executor,
                     name="db_query",
-                    description="Execute a SQL query against the mymcp MySQL database.",
+                    description="Execute a SQL query against the agent-mcp MySQL database.",
                     args_schema=_DbQueryArgs,
                 )
             ]

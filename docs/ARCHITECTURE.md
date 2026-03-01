@@ -2,7 +2,7 @@
 
 ## Overview
 
-The MCP Agent is a multi-client AI agent server. It maintains persistent sessions with conversation history, routes all client requests through a central LLM dispatch loop, enforces human-approval gates on tool calls, and exposes a modular plugin system for data tools and client interfaces.
+The MCP Agent is a multi-client AI agent server. It maintains persistent sessions with conversation history, routes all client requests through a central LLM dispatch loop, controls tool access via per-model toolsets, and exposes a modular plugin system for data tools and client interfaces.
 
 ```
 Clients                 Server                          Backends
@@ -20,8 +20,8 @@ Slack  ─Socket Mode──►  │  (process_request)   │
                        │  loop               │
                        │    │                 │
                        │    ▼                 │
-                       │  execute_tool()      │──► gate.py ──► shell.py
-                       │    │                 │                (approval)
+                       │  execute_tool()      │
+                       │    │                 │
                        │    ▼                 │
                        │  Plugin executors    │──► MySQL
                        │  (db, drive, search) │──► Google Drive
@@ -34,11 +34,10 @@ Slack  ─Socket Mode──►  │  (process_request)   │
 |---|---|
 | `agent-mcp.py` | Entry point. Initialises plugins, builds Starlette app, starts uvicorn |
 | `config.py` | LLM registry (loaded from `llm-models.json`), environment loading, rate limit config |
-| `state.py` | In-memory session store, SSE queues, gate state, context vars |
+| `state.py` | In-memory session store, SSE queues, context vars |
 | `routes.py` | HTTP endpoints, `!command` routing, `@model` switching, `process_request()` |
 | `agents.py` | LangChain-based LLM dispatch loop (`agentic_lc`), `execute_tool()`, rate limiter |
-| `gate.py` | Human approval gate logic per tool type |
-| `tools.py` | Core tool definitions as LangChain `StructuredTool` objects; plugin tool registry |
+| `tools.py` | Core tool definitions as LangChain `StructuredTool` objects; plugin tool registry; per-model toolset filtering |
 | `prompt.py` | Recursive system prompt loader, section tree, `apply_prompt_operation()` |
 | `plugin_loader.py` | `BasePlugin` ABC, dynamic plugin loading from manifest |
 | `database.py` | MySQL connection and SQL execution helpers |
@@ -78,11 +77,6 @@ dispatch_llm(model, history, client_id)
         execute_tool(tool_name, tool_args, client_id)
                │
                ├── check_rate_limit()
-               │
-               ├── check_human_gate()
-               │       ├── _temp_model_active? ──► auto-allow
-               │       ├── llama/slack client? ──► auto-reject
-               │       └── shell.py client ──► push gate to SSE ──► await approval
                │
                └── executor(**tool_args) ──► result ──► ToolMessage ──► back to LLM context
                │
@@ -132,7 +126,6 @@ tool = StructuredTool.from_function(
 
 `_lc_tool_to_openai_dict()` converts StructuredTool to OpenAI dict format on the fly for:
 - `try_force_tool_calls()` — bare/XML tool call fallback for local models
-- `get_openai_tool_schema()` — used by `llm_clean_tool`
 
 No separate OpenAI or Gemini tool definitions are maintained.
 
@@ -174,11 +167,11 @@ SLACK_APP_TOKEN=xapp-...    # Socket Mode connection (inbound events)
 
 Sessions are keyed by `client_id`:
 
-| Client type | client_id format | Gate support |
-|---|---|---|
-| shell.py | read from `.aiops_session_id` | Full interactive approval |
-| llama proxy | `llama-<client-ip>` | Auto-reject (non-interactive) |
-| Slack | `slack-<channel_id>-<thread_ts>` | Auto-reject (non-interactive) |
+| Client type | client_id format |
+|---|---|
+| shell.py | read from `.aiops_session_id` |
+| llama proxy | `llama-<client-ip>` |
+| Slack | `slack-<channel_id>-<thread_ts>` |
 
 Each session stores: `model`, `history`, `tool_preview_length`, `_temp_model_active`.
 
@@ -213,9 +206,8 @@ Plugins are declared in `plugin-manifest.json` and enabled/disabled in `plugins-
 3. Import each enabled plugin module dynamically
 4. Call `plugin.init(config)` — connects to DB, authenticates, opens ports
 5. Call `plugin.get_tools()` — returns `{'lc': [StructuredTool, ...]}` list
-6. Call `plugin.get_gate_tools()` — registers gate types per tool
-7. Register plugin routes with Starlette
-8. Call `agents_module.update_tool_definitions()` — rebuilds `_CURRENT_LC_TOOLS` from core + all plugins
+6. Register plugin routes with Starlette
+7. Call `agents_module.update_tool_definitions()` — rebuilds `_CURRENT_LC_TOOLS` from core + all plugins
 
 ### BasePlugin contract
 
@@ -227,29 +219,31 @@ class BasePlugin(ABC):
     def init(self, config: dict) -> bool: ...    # return False to abort load
     def shutdown(self) -> None: ...
     def get_tools(self) -> dict: ...             # {"lc": [StructuredTool, ...]}
-    def get_gate_tools(self) -> dict: ...        # {"tool_name": {"type": "search"|"drive"|..., ...}}
     def get_routes(self) -> list[Route]: ...     # client_interface only
 ```
 
-## Gate System
+## Toolset Architecture
 
-Gates are per-tool human approval checkpoints. `check_human_gate()` in `gate.py` runs before every tool execution.
+Tool access is controlled per-model via the `llm_tools` field in `llm-models.json`. Each model declares which tools it may use. The server filters the tool list before each LLM invocation so the model only sees its permitted tools.
 
-**Gate types and state:**
+**`llm_tools` field:**
+- `"all"` — model sees every registered tool (core + plugin)
+- `["tool_a", "tool_b"]` — model sees only the listed tools
+- `[]` (empty list) — model sees no tools (text-only)
 
-| Gate type | State dict | Controls |
+**Runtime management via unified resource tools:**
+
+The 24 individual tool/gate/config commands have been replaced by 5 unified resource tools:
+
+| Tool | Purpose | Example |
 |---|---|---|
-| `db`      | `auto_aidb_state[table][read\|write]` | Per-table SQL approval |
-| `search`  | `tool_gate_state[tool_name][read]` | Search tool approval |
-| `extract` | `tool_gate_state[tool_name][read]` | URL extraction approval |
-| `drive`   | `tool_gate_state["google_drive"][read\|write]` | Drive operation approval |
-| `system`  | `tool_gate_state["update_system_prompt"][write]` | System prompt write approval |
+| `llm_tools` | View/edit per-model tool access lists | `!llm_tools list`, `!llm_tools read gemini25f` |
+| `model_cfg` | View/edit model configuration fields | `!model_cfg read gemini25f` |
+| `sysprompt_cfg` | View/edit system prompt sections | `!sysprompt_cfg read` |
+| `config_cfg` | View/edit server configuration | `!config_cfg read` |
+| `limits_cfg` | View/edit depth and rate limits | `!limits_cfg read` |
 
-**Wildcard defaults:** `auto_aidb_state["*"]` and `tool_gate_state["*"]` set defaults for all tables/tools without specific entries.
-
-**Auto-bypass conditions:**
-- `session["_temp_model_active"] = True` — set by `@model` prefix, bypasses all gates for that turn
-- `client_id.startswith("llama-")` or `client_id.startswith("slack-")` — auto-rejects (non-interactive)
+These tools are also available as LLM tool calls with the same names.
 
 ## Swarm / Multi-Agent Coordination
 
@@ -358,9 +352,9 @@ Each model entry:
 | `env_key` | `.env` key holding the API key (`null` for keyless local models) |
 | `max_context` | Max messages retained in session history |
 | `enabled` | `true`/`false` — disabled models are excluded from the registry entirely |
-| `tool_call_available` | Whether `llm_clean_text`/`llm_clean_tool` may delegate to this model |
+| `llm_tools` | `"all"`, or a list of tool names the model may use (e.g. `["ddgs_search", "db_query"]`) |
 | `llm_call_timeout` | Timeout in seconds for delegation calls |
-| `description` | Human-readable label shown in `!model` and `!llm_call` |
+| `description` | Human-readable label shown in `!model` |
 
 ### Adding a new model
 
@@ -374,17 +368,17 @@ No code changes are needed for models that use the standard `OPENAI` or `GEMINI`
 
 Three mechanisms for the session LLM to delegate work:
 
-| Tool | Context sent | Tools available | Gates | Use case |
-|---|---|---|---|---|
-| `llm_clean_text(model, prompt)` | None (prompt only) | None (text only) | N/A | Summarization, analysis of embedded data |
-| `llm_clean_tool(model, tool, arguments)` | Tool def only | One named tool | Honored | Isolated tool call via target model |
-| `@model <prompt>` (user-initiated) | Full session | All tools | Bypassed | Full turn delegation to free/local model |
+| Tool | Context sent | Tools available | Use case |
+|---|---|---|---|
+| `llm_clean_text(model, prompt)` | None (prompt only) | None (text only) | Summarization, analysis of embedded data |
+| `llm_clean_tool(model, tool, arguments)` | Tool def only | One named tool | Isolated tool call via target model |
+| `@model <prompt>` (user-initiated) | Full session | Model's `llm_tools` set | Full turn delegation to free/local model |
 
-Both `llm_clean_text` and `llm_clean_tool` require `tool_call_available: true` on the target model. Enable with `!llm_call <model> true`.
+Tool access for delegation targets is controlled by the target model's `llm_tools` field in `llm-models.json`. Manage with `!llm_tools read <model>` and `!llm_tools write <model> <tools>`.
 
 ## Rate Limiting
 
-Universal rate limiter in `agents.py` runs before the gate check. Configured per tool type in `plugins-enabled.json`:
+Universal rate limiter in `agents.py` runs before tool execution. Configured per tool type in `plugins-enabled.json`:
 
 ```json
 "rate_limits": {

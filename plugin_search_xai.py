@@ -60,16 +60,6 @@ class SearchXaiPlugin(BasePlugin):
         self._api_key = None
         self.enabled = False
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare search_xai as a read-only gated search tool."""
-        return {
-            "search_xai": {
-                "type": "search",
-                "operations": ["read"],
-                "description": "web/X search via xAI Grok x_search (read-only)"
-            }
-        }
-
     def get_tools(self) -> Dict[str, Any]:
         """Return xAI search tool definitions in LangChain StructuredTool format."""
         api_key = self._api_key

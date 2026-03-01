@@ -2,7 +2,7 @@
 
 ### db_query(sql: str) → str
 Execute any MySQL statement and receive the formatted result.
-Database: agentdb on localhost (configure in .env).
+Database: mymcp on localhost.
 
 When to use:
 - BEFORE answering any question about data the user may have shared previously → query first.

@@ -15,11 +15,10 @@ Tests:
     5.  Basic LLM chat
     6.  @model per-turn model switch syntax
     7.  !reset history clear
-    8.  !autoAIdb read true (gate config command)
+    8.  !llm_tools list (toolset listing)
     9.  Multi-client isolation (two separate sessions)
-    10. Gate auto-approve (client with db_query approval policy)
-    11. Gate auto-reject (default client, no gate policy)
-    12. Swarm simulation (client sends agent_call prompt)
+    10. Swarm simulation (client sends agent_call prompt)
+    11. SSE stream API
 """
 
 import asyncio
@@ -150,16 +149,14 @@ async def test_reset(runner: TestRunner):
         runner.record("!reset history clear", False, str(e))
 
 
-async def test_gate_config_command(runner: TestRunner):
+async def test_llm_tools_list(runner: TestRunner):
     try:
-        c = runner.client("gatecfg")
-        result = await c.send("!autoAIdb read true", timeout=10)
-        ok = len(result) > 0
-        runner.record("!autoAIdb gate config command", ok, result[:80].strip().replace("\n", " "))
-        # Reset wildcard to gated (OFF) so subsequent gate tests start from a known state
-        await c.send("!autoAIdb read false", timeout=10)
+        c = runner.client("llmtools")
+        result = await c.send("!llm_tools list", timeout=10)
+        ok = "core" in result.lower() or "admin" in result.lower() or "toolset" in result.lower()
+        runner.record("!llm_tools list", ok, result[:80].strip().replace("\n", " "))
     except Exception as e:
-        runner.record("!autoAIdb gate config command", False, str(e))
+        runner.record("!llm_tools list", False, str(e))
 
 
 async def test_multi_client_isolation(runner: TestRunner):
@@ -183,64 +180,6 @@ async def test_multi_client_isolation(runner: TestRunner):
         runner.record("Multi-client isolation", False, str(e))
 
 
-async def test_gate_auto_approve(runner: TestRunner):
-    """
-    Client configured to approve db_query gates automatically.
-    Reset autoAIdb to require gates first, then verify the tool runs.
-    """
-    try:
-        # Use a client with no gate policy to set gate ON for DB reads
-        setup = runner.client("gasetup")
-        await setup.send("!autoAIdb read false", timeout=10)
-
-        # Now use a client that auto-approves db_query
-        c = AgentClient(
-            runner.base_url,
-            client_id="api-test-gateapprove",
-            api_key=runner.api_key,
-            auto_approve_gates={"db_query": True},
-        )
-        # Ask something that will trigger db_query
-        result = await c.send(
-            "Run this exact SQL and return only the result: SELECT 1+1 AS answer",
-            timeout=45,
-        )
-        ok = "2" in result or "answer" in result.lower()
-        runner.record("Gate auto-approve (db_query)", ok, result[:80].strip().replace("\n", " "))
-    except Exception as e:
-        runner.record("Gate auto-approve (db_query)", False, str(e))
-
-
-async def test_gate_auto_reject(runner: TestRunner):
-    """
-    Default client (no gate policy) should receive rejection feedback from LLM.
-    The LLM should report it couldn't execute the tool.
-    """
-    try:
-        # Ensure gate is required
-        setup = runner.client("grsetup")
-        await setup.send("!autoAIdb read false", timeout=10)
-
-        c = runner.client("gatereject")  # no auto_approve_gates
-        result = await c.send(
-            "Run this exact SQL: SELECT 1+1 AS answer. Do not ask me for permission.",
-            timeout=45,
-        )
-        # LLM should report rejection (not the actual SQL result)
-        # The execute_tool rejection message tells LLM "TOOL CALL REJECTED"
-        ok = len(result) > 0 and (
-            "reject" in result.lower()
-            or "denied" in result.lower()
-            or "unable" in result.lower()
-            or "cannot" in result.lower()
-            or "can't" in result.lower()
-            or "approve" in result.lower()
-        )
-        runner.record("Gate auto-reject (default policy)", ok, result[:80].strip().replace("\n", " "))
-    except Exception as e:
-        runner.record("Gate auto-reject (default policy)", False, str(e))
-
-
 async def test_swarm_agent_call(runner: TestRunner):
     """
     Test the agent_call tool by asking the LLM to call the local agent.
@@ -259,7 +198,7 @@ async def test_swarm_agent_call(runner: TestRunner):
         ok = len(result) > 0
         note = "response received" if ok else "no response"
         if "agent_call" in result.lower() and "unknown" in result.lower():
-            note = "agent_call tool not available on this model (expected if tool_call_available=false)"
+            note = "agent_call tool not available on this model (expected if not in model's llm_tools)"
         runner.record("Swarm agent_call", ok, result[:80].strip().replace("\n", " "))
     except Exception as e:
         runner.record("Swarm agent_call", False, str(e))
@@ -293,11 +232,9 @@ async def run_all(base_url: str, api_key: str = None):
     await test_basic_llm(runner)
     await test_at_model_syntax(runner)
     await test_reset(runner)
-    await test_gate_config_command(runner)
+    await test_llm_tools_list(runner)
     await test_multi_client_isolation(runner)
     await test_stream_api(runner)
-    await test_gate_auto_reject(runner)
-    await test_gate_auto_approve(runner)
     await test_swarm_agent_call(runner)
 
     return runner.summary()

@@ -13,7 +13,7 @@ import asyncio
 import sys
 
 # Add parent directory to path for imports
-sys.path.insert(0, '.')
+import os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from state import (
     sessions,
@@ -51,18 +51,18 @@ async def test_session_shorthand():
 
     # Create test sessions
     print("Step 1: Creating test sessions...")
-    sessions["slack-CTEST123456-1234567890.123456"] = {
+    sessions["slack-C0AE37B3PC4-1771220031.371579"] = {
         "model": "test-model",
         "history": [{"role": "user", "content": f"msg {i}"} for i in range(18)]
     }
-    sessions["llama-192.168.1.100"] = {
+    sessions["llama-69.181.17.177"] = {
         "model": "test-model",
         "history": [{"role": "user", "content": "msg 1"}, {"role": "assistant", "content": "msg 2"}]
     }
 
     # Assign shorthand IDs
-    slack_id = get_or_create_shorthand_id("slack-CTEST123456-1234567890.123456")
-    llama_id = get_or_create_shorthand_id("llama-192.168.1.100")
+    slack_id = get_or_create_shorthand_id("slack-C0AE37B3PC4-1771220031.371579")
+    llama_id = get_or_create_shorthand_id("llama-69.181.17.177")
 
     print(f"  Slack session: ID [{slack_id}]")
     print(f"  Llama session: ID [{llama_id}]")
@@ -70,7 +70,7 @@ async def test_session_shorthand():
 
     # Test 1: List sessions
     print("Step 2: Testing !session (list all sessions)...")
-    test_client_id = "slack-CTEST123456-1234567890.123456"
+    test_client_id = "slack-C0AE37B3PC4-1771220031.371579"
     await cmd_session(test_client_id, "")
     output = await capture_output(test_client_id)
     print(output)
@@ -92,8 +92,8 @@ async def test_session_shorthand():
 
     # Verify deletion message
     assert f"Deleted session ID [{llama_id}]:" in output, f"Expected deletion confirmation"
-    assert "llama-192.168.1.100" in output, "Expected full session ID in confirmation"
-    assert "llama-192.168.1.100" not in sessions, "Session should be deleted from sessions dict"
+    assert "llama-69.181.17.177" in output, "Expected full session ID in confirmation"
+    assert "llama-69.181.17.177" not in sessions, "Session should be deleted from sessions dict"
     print("✓ Session deletion works correctly")
     print()
 
@@ -106,7 +106,7 @@ async def test_session_shorthand():
 
     assert f"ID [{slack_id}]" in output, "Slack session should still exist"
     assert f"ID [{llama_id}]" not in output, "Llama session should be gone"
-    assert "llama-192.168.1.100" not in output, "Llama session should not appear"
+    assert "llama-69.181.17.177" not in output, "Llama session should not appear"
     print("✓ Deleted session removed from list")
     print()
 

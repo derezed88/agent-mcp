@@ -32,8 +32,7 @@ Point any OpenAI or Ollama-compatible app at `http://localhost:11434`.
 ```
 !model                  list available LLMs (current marked with *)
 !model gemini25         switch to a different model
-!autoAIdb read true     auto-allow all DB reads (no gate pop-ups)
-!autogate search true   auto-allow all web searches
+!llm_tools list         show per-model tool access
 !tool_preview_length 0  show full tool results (no truncation)
 !reset                  clear conversation history
 !help                   full command reference
@@ -41,7 +40,7 @@ Point any OpenAI or Ollama-compatible app at `http://localhost:11434`.
 
 ## Per-turn model switch
 
-Prefix any message with `@ModelName` to use a different model for one turn (bypasses all gates):
+Prefix any message with `@ModelName` to use a different model for one turn:
 
 ```
 @Win11Local extract https://www.example.com and summarize it

@@ -383,7 +383,7 @@ class SlackClientPlugin(BasePlugin):
     # Both the tag line and its body are removed because the LLM always writes its
     # own summary of the result afterwards.
     _STATUS_OWNED_RE = re.compile(
-        r'\[(?:agent_call|tool_call|llm_clean_text|llm_clean_tool'
+        r'\[(?:agent_call|tool_call|llm_call'
         r'|db|search\s+\w+|sysprompt|sysinfo|drive)[^\]]*\]'
         r'[^\n]*(?::|◀)[^\n]*\n'
         r'(?:(?!\[)[^\n]+\n?)*',
@@ -392,7 +392,7 @@ class SlackClientPlugin(BasePlugin):
     # Pass 2 — standalone bracket tag lines (▶ progress lines, bare ◀, ✗ errors,
     # [Max iterations], [RATE LIMITED], [REJECTED], [catcher], [context], etc.)
     _STATUS_STANDALONE_RE = re.compile(
-        r'^\[(?:agent_call|tool_call|llm_clean_text|llm_clean_tool'
+        r'^\[(?:agent_call|tool_call|llm_call'
         r'|db|search\s+\w+|sysprompt|sysinfo|drive|catcher|context'
         r'|RATE\s+LIMITED|REJECTED|Max\s+iterations)[^\]]*\][^\n]*\n?',
         re.MULTILINE,

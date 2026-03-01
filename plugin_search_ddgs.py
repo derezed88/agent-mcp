@@ -47,16 +47,6 @@ class SearchDdgsPlugin(BasePlugin):
         """Cleanup DuckDuckGo search resources."""
         self.enabled = False
 
-    def get_gate_tools(self) -> Dict[str, Any]:
-        """Declare search_ddgs as a read-only gated search tool."""
-        return {
-            "search_ddgs": {
-                "type": "search",
-                "operations": ["read"],
-                "description": "web search via DuckDuckGo (read-only)"
-            }
-        }
-
     def get_tools(self) -> Dict[str, Any]:
         """Return DuckDuckGo search tool definitions in LangChain StructuredTool format."""
         return {

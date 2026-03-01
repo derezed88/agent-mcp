@@ -9,5 +9,3 @@ Follow PDDS chain (see memory-hierarchy section). Call search_ddgs when:
 - You cannot answer from your training knowledge.
 
 Use search_ddgs as the first web search option (no API key required, fast, broad coverage).
-
-This tool always requires human gate approval before it executes.

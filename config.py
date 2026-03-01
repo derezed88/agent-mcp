@@ -27,23 +27,23 @@ log = logging.getLogger("AISvc")
 
 
 def load_default_model():
-    """Load default model from plugins-enabled.json."""
+    """Load default model from llm-models.json."""
     try:
-        with open(PLUGINS_ENABLED_FILE, 'r') as f:
+        with open(LLM_MODELS_FILE, 'r') as f:
             data = json.load(f)
         return data.get('default_model', '')
     except (FileNotFoundError, Exception) as e:
-        log.warning(f"Could not load default_model from plugins-enabled.json: {e}")
+        log.warning(f"Could not load default_model from llm-models.json: {e}")
         return ''
 
 
 def save_default_model(model_key: str) -> bool:
-    """Persist default_model to plugins-enabled.json. Returns True on success."""
+    """Persist default_model to llm-models.json. Returns True on success."""
     try:
-        with open(PLUGINS_ENABLED_FILE, 'r') as f:
+        with open(LLM_MODELS_FILE, 'r') as f:
             data = json.load(f)
         data['default_model'] = model_key
-        with open(PLUGINS_ENABLED_FILE, 'w') as f:
+        with open(LLM_MODELS_FILE, 'w') as f:
             json.dump(data, f, indent=2)
         return True
     except Exception as e:
@@ -80,7 +80,7 @@ def load_llm_registry():
                 "key": api_key,
                 "max_context": config.get('max_context', 50),
                 "description": config.get('description', ''),
-                "tool_call_available": config.get('tool_call_available', False),
+
                 "llm_call_timeout": config.get('llm_call_timeout', 60),
                 "system_prompt_folder": config.get('system_prompt_folder', ''),
                 "temperature": config.get('temperature', 1.0),

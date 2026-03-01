@@ -5,5 +5,3 @@ Search the web using Google Search (Gemini grounding). Returns answer text and s
 
 Use search_google as a third-level web search option, after search_ddgs and search_tavily,
 or when Gemini grounding is specifically needed.
-
-This tool always requires human gate approval before it executes.
