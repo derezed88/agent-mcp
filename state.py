@@ -318,6 +318,38 @@ def resolve_gate(client_id: str, approved: bool) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Gate state — used by gate.py
+# ---------------------------------------------------------------------------
+
+# Per-client pending gate events: gate_id -> {"event": asyncio.Event, "decision": str|None}
+pending_gates: dict[str, dict] = {}
+
+# Per-table db gate permissions: table_name -> {"read": bool, "write": bool}
+# Populated by !autoAIdb commands in routes.py
+auto_aidb_state: dict[str, dict] = {}
+
+# Per-tool gate permissions: tool_name -> {"read": bool, "write": bool}
+# Populated by !autogate commands in routes.py
+tool_gate_state: dict[str, dict] = {}
+
+# Per-client active gate data (for shell.py display): client_id -> gate_data dict
+_client_active_gates: dict[str, dict] = {}
+
+
+async def push_gate(client_id: str, gate_data: dict) -> None:
+    """Push a gate event to the client's SSE queue."""
+    import json as _json
+    q = await get_queue(client_id)
+    q.put_nowait({"t": "gate", "d": _json.dumps(gate_data)})
+    _client_active_gates[client_id] = gate_data
+
+
+def clear_client_gate(client_id: str) -> None:
+    """Remove the active gate record for a client after it is resolved."""
+    _client_active_gates.pop(client_id, None)
+
+
 async def cancel_active_task(client_id: str) -> bool:
     """
     Cancel any in-flight request task for this client and drain its output queue.

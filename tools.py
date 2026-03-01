@@ -14,7 +14,7 @@ mcp_server = FastMCP("AIOps-DB-Tools")
 
 @mcp_server.tool()
 async def db_query(sql: str) -> str:
-    """Execute SQL against mymcp MySQL database."""
+    """Execute SQL against the agent-mcp MySQL database."""
     return await execute_sql(sql)
 
 
@@ -1285,3 +1285,26 @@ def _make_core_lc_tools() -> list:
 
 # Populated by agent-mcp.py after plugin registration via update_tool_definitions()
 CORE_LC_TOOLS: list = []
+
+
+def get_all_gate_tools() -> dict:
+    """
+    Return a merged dict of all gate-declared tools from all loaded plugins.
+    Each entry: tool_name -> {type, operations, description}
+    """
+    try:
+        from plugin_loader import loaded_plugins
+        result = {}
+        for plugin in loaded_plugins:
+            try:
+                result.update(plugin.get_gate_tools())
+            except Exception:
+                pass
+        return result
+    except Exception:
+        return {}
+
+
+def get_gate_tools_by_type(gate_type: str) -> set:
+    """Return the set of tool names that have the given gate type (e.g. 'tmux', 'search')."""
+    return {name for name, meta in get_all_gate_tools().items() if meta.get("type") == gate_type}
