@@ -253,6 +253,7 @@ The prompt is a tree of files. The root `.system_prompt` assembles the tree via 
 | Grok sees user preference or key decision | Behavior rule 6: delegates `memory_save` call to `samaritan-execution` |
 | User says "remember this" | Grok delegates explicit save with importance=8-10 |
 | Topic present but not in active memory | Grok delegates `memory_recall(topic, tier="long")` to `samaritan-execution` |
+| Session created or rehydrated from disk | `age_to_longterm()` runs as background task — rows >48h moved to long-term |
 
 ---
 
@@ -320,19 +321,29 @@ gpt-4o-mini at temp=0.1 reliably translates natural-language delegation prompts 
 
 ### Aging Flow
 
-Rows older than 48 hours with low importance are moved to `samaritan_memory_longterm`:
+Rows older than 48 hours with low importance are moved to `samaritan_memory_longterm`.
+
+Aging fires automatically as a background task whenever a session is created or rehydrated from
+disk (including after an idle reap/reconnect). No manual trigger or cron job is needed.
 
 ```
-memory_age(older_than_hours=48, max_rows=100)
-  ├── SELECT from shortterm WHERE created_at < NOW() - INTERVAL 48 HOUR
-  │   ORDER BY importance ASC (lowest first)
-  ├── for each row:
-  │     ├── INSERT INTO longterm (copying all fields + shortterm_id)
-  │     └── DELETE FROM shortterm WHERE id = row.id
-  └── returns count of rows moved
+Client connects (new session or rehydrated after idle reap)
+        │
+        ▼
+routes.py session init block
+  └── asyncio.create_task(age_to_longterm())   ← non-blocking background task
+            │
+            ▼
+      memory_age(older_than_hours=48, max_rows=100)
+        ├── SELECT from shortterm WHERE created_at < NOW() - INTERVAL 48 HOUR
+        │   ORDER BY importance ASC (lowest first)
+        ├── for each row:
+        │     ├── INSERT INTO longterm (copying all fields + shortterm_id)
+        │     └── DELETE FROM shortterm WHERE id = row.id
+        └── returns count of rows moved (logged only)
 ```
 
-Trigger manually: `!db_query CALL memory_age` (or ask Grok to delegate it).
+Manual override: ask Grok to delegate `memory_age(older_than_hours=24)` to age more aggressively.
 
 ---
 
@@ -492,7 +503,7 @@ memory_age(
 | Feature | Status | Notes |
 |---|---|---|
 | Google Drive archival | Not built | Bulk export of `samaritan_memory_longterm` to Drive as cold tier |
-| Scheduled aging | Not built | Currently manual or Grok-delegated; needs a cron job or background task |
+| Scheduled aging | **Built** | Auto-fires on session start/rehydration; Grok can also delegate `memory_age` for custom thresholds |
 | Importance decay | Not built | High-importance facts from months ago don't auto-downgrade; stale facts persist |
 | Semantic/vector search | Not built | Recall is `LIKE '%topic%'`; no embedding-based similarity search |
 | Deduplication | Not built | Repeated resets on same topic accumulate duplicate rows |
