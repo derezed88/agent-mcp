@@ -533,6 +533,64 @@ async def _sleep_exec(seconds: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Memory tools: memory_save, memory_recall, memory_age
+# ---------------------------------------------------------------------------
+
+class _MemorySaveArgs(BaseModel):
+    topic: str = Field(description="Short topic label, e.g. 'user-preferences', 'project-status', 'tasks'.")
+    content: str = Field(description="One concise sentence describing the fact to remember.")
+    importance: int = Field(default=5, description="Importance 1 (low) to 10 (critical). Default 5.")
+    source: str = Field(default="user", description="Source: 'user', 'session', or 'directive'.")
+
+class _MemoryRecallArgs(BaseModel):
+    topic: str = Field(default="", description="Topic to search for. Leave empty for all short-term memories.")
+    tier: str = Field(default="short", description="'short' (default) or 'long' for long-term memory.")
+    limit: int = Field(default=20, description="Max rows to return.")
+
+class _MemoryAgeArgs(BaseModel):
+    older_than_hours: int = Field(default=48, description="Move rows older than this many hours to long-term.")
+    max_rows: int = Field(default=100, description="Max rows to age per call.")
+
+
+async def _memory_save_exec(topic: str, content: str, importance: int = 5, source: str = "user") -> str:
+    from memory import save_memory
+    from state import current_client_id
+    session_id = current_client_id.get("") or ""
+    row_id = await save_memory(
+        topic=topic, content=content,
+        importance=importance, source=source,
+        session_id=session_id,
+    )
+    return f"Memory saved (id={row_id}): [{topic}] {content} (importance={importance})"
+
+
+async def _memory_recall_exec(topic: str = "", tier: str = "short", limit: int = 20) -> str:
+    from memory import load_short_term, _parse_table
+    from database import execute_sql
+    if tier == "long":
+        where = f"WHERE topic LIKE '%{topic}%'" if topic else ""
+        sql = f"SELECT id, topic, content, importance, created_at FROM samaritan_memory_longterm {where} ORDER BY importance DESC, created_at DESC LIMIT {limit}"
+        raw = await execute_sql(sql)
+        rows = _parse_table(raw)
+    else:
+        rows = await load_short_term(limit=limit, min_importance=1)
+        if topic:
+            rows = [r for r in rows if topic.lower() in r.get("topic", "").lower() or topic.lower() in r.get("content", "").lower()]
+    if not rows:
+        return f"No memories found (tier={tier}, topic='{topic}')."
+    lines = [f"Memories (tier={tier}, {len(rows)} rows):"]
+    for r in rows:
+        lines.append(f"  [{r.get('topic','')}] imp={r.get('importance','')} — {r.get('content','')}")
+    return "\n".join(lines)
+
+
+async def _memory_age_exec(older_than_hours: int = 48, max_rows: int = 100) -> str:
+    from memory import age_to_longterm
+    moved = await age_to_longterm(older_than_hours=older_than_hours, max_rows=max_rows)
+    return f"Aged {moved} memories from short-term to long-term (threshold: {older_than_hours}h)."
+
+
+# ---------------------------------------------------------------------------
 # Unified resource tools: llm_tools, model_cfg, sysprompt_cfg, config_cfg, limits_cfg
 # These consolidate multiple individual tools into single CRUD-style resources.
 # ---------------------------------------------------------------------------
@@ -1189,6 +1247,38 @@ def _make_core_lc_tools() -> list:
                 "Changes persist to JSON."
             ),
             args_schema=_LimitsCfgArgs,
+        ),
+        # --- Memory tools ---
+        StructuredTool.from_function(
+            coroutine=_memory_save_exec,
+            name="memory_save",
+            description=(
+                "Save a fact to short-term memory (samaritan_memory_shortterm). "
+                "Use topic labels like 'user-preferences', 'project-status', 'tasks', 'technical-decisions'. "
+                "importance: 1=low, 5=medium, 10=critical. "
+                "Short-term memories are auto-injected into every future request."
+            ),
+            args_schema=_MemorySaveArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_memory_recall_exec,
+            name="memory_recall",
+            description=(
+                "Recall memories from short-term or long-term storage. "
+                "tier='short' (default): recent hot memories. tier='long': aged-out facts. "
+                "topic: filter by topic keyword. limit: max rows returned."
+            ),
+            args_schema=_MemoryRecallArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_memory_age_exec,
+            name="memory_age",
+            description=(
+                "Age old short-term memories into long-term storage. "
+                "Moves rows older than older_than_hours to samaritan_memory_longterm. "
+                "Run periodically to keep short-term context lean."
+            ),
+            args_schema=_MemoryAgeArgs,
         ),
     ]
 

@@ -41,3 +41,15 @@ Thumbs.db
 
 # Local test utilities (not for public repo)
 mock_airs_server.py
+
+# Deployment-specific system prompt personas (contain operational context)
+# Copy system_prompt/000_default/ as a starting template for your own persona.
+system_prompt/004_reasoning/
+system_prompt/004_execution/
+
+# Session history (runtime state, may contain sensitive conversation data)
+session-history/
+
+# Pinggy tunnel URLs and other local infra scripts
+pinggy_urls.sh
+start_pinggy_tunnel.sh

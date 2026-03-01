@@ -49,10 +49,15 @@
       "tmux_history",
       "tmux_history_limit",
       "tmux_call_limit"
+    ],
+    "memory": [
+      "memory_save",
+      "memory_recall",
+      "memory_age"
     ]
   },
   "metadata": {
-    "last_modified": "2026-02-24",
+    "last_modified": "2026-02-25",
     "notes": "Named toolsets for per-model tool binding. Each model references toolset names in its llm_tools array."
   }
 }

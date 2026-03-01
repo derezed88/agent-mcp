@@ -638,7 +638,7 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
 
     text = last_user.get("content", "")
     enrichments = []
-    
+
     if _PERSON_QUERY_RE.search(text):
         sql = "SELECT * FROM person"
         try:
@@ -647,11 +647,20 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
             await push_tok(client_id, f"\n[context] Auto-queried: {sql}\n")
         except Exception: pass
 
+    # Inject short-term memory context block
+    try:
+        from memory import load_context_block
+        mem_block = await load_context_block(limit=15, min_importance=3)
+        if mem_block:
+            enrichments.append(mem_block)
+    except Exception as _mem_err:
+        log.debug(f"auto_enrich_context: memory load skipped: {_mem_err}")
+
     if not enrichments: return messages
 
     inject = {
         "role": "system",
-        "content": "## Auto-retrieved database context\nBase answer on this data:\n\n" + "\n\n".join(enrichments)
+        "content": "## Auto-retrieved context\nBase answer on this data:\n\n" + "\n\n".join(enrichments)
     }
     return list(messages[:-1]) + [inject, messages[-1]]
 
@@ -1252,6 +1261,21 @@ async def agent_call(
     finally:
         calling_session["_agent_call_depth"] = agent_call_depth
 
+
+
+async def _call_llm_text(model_key: str, prompt: str) -> str:
+    """
+    Minimal fire-and-forget LLM call with no tools, no history, no streaming.
+    Used internally by the memory summarizer. Returns plain text response.
+    """
+    if model_key not in LLM_REGISTRY:
+        raise ValueError(f"Unknown model: {model_key}")
+    cfg = LLM_REGISTRY[model_key]
+    timeout = cfg.get("llm_call_timeout", 60)
+    llm = _build_lc_llm(model_key)
+    msgs = [SystemMessage(content="You are a concise assistant."), HumanMessage(content=prompt)]
+    response = await asyncio.wait_for(llm.ainvoke(msgs), timeout=timeout)
+    return _content_to_str(response.content)
 
 
 async def dispatch_llm(model_key: str, messages: list[dict], client_id: str) -> str:

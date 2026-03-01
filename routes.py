@@ -458,11 +458,26 @@ async def cmd_set_model(client_id: str, key: str, session: dict):
 
 
 async def cmd_reset(client_id: str, session: dict):
-    """Clear conversation history for current session."""
+    """Clear conversation history for current session, summarizing to memory first."""
     from state import delete_history
-    history_len = len(session.get("history", []))
+    history = list(session.get("history", []))
+    history_len = len(history)
+
+    # Summarize departing history into short-term memory before clearing
+    if history_len >= 4:
+        try:
+            from memory import summarize_and_save
+            await push_tok(client_id, "[memory] Summarizing session to memory...\n")
+            status = await summarize_and_save(
+                session_id=client_id,
+                history=history,
+                model_key="summarizer-anthropic",
+            )
+            await push_tok(client_id, f"[memory] {status}\n")
+        except Exception as _mem_err:
+            log.warning(f"cmd_reset: memory summarize failed: {_mem_err}")
+
     session["history"] = []
-    # Recompute history_max_ctx in case it was not set
     model_cfg = LLM_REGISTRY.get(session.get("model", ""), {})
     import plugin_history_default as _phd
     session["history_max_ctx"] = _phd.compute_effective_max_ctx(model_cfg)
