@@ -629,10 +629,19 @@ def try_force_tool_calls(text: str, valid_tool_names: set[str] | None = None) ->
 
 # --- Enrichment ---
 
-_PERSON_QUERY_RE = re.compile(
-    r"\b(?:person\s+table|my\s+(?:details?|info|profile|person)|who\s+am\s+i|tell\s+me\s+about\s+(?:my)?self|profile\s+of\s+(?:the\s+)?(?:admin|user|owner))\b",
-    re.IGNORECASE
-)
+def _load_enrich_rules() -> list[dict]:
+    """Load instance-specific auto-enrichment rules from auto-enrich.json."""
+    import json as _json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto-enrich.json")
+    try:
+        with open(path) as f:
+            rules = _json.load(f)
+        return rules if isinstance(rules, list) else []
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        log.warning(f"auto-enrich.json load failed: {e}")
+        return []
 
 async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict]:
     if not messages: return messages
@@ -642,13 +651,20 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
     text = last_user.get("content", "")
     enrichments = []
 
-    if _PERSON_QUERY_RE.search(text):
-        sql = "SELECT * FROM person"
+    # Instance-specific enrichment rules from auto-enrich.json
+    for rule in _load_enrich_rules():
+        pattern = rule.get("pattern", "")
+        sql = rule.get("sql", "")
+        label = rule.get("label", sql)
+        if not pattern or not sql:
+            continue
         try:
-            result = await execute_sql(sql)
-            enrichments.append(f"[auto-retrieved via: {sql}]\n{result}")
-            await push_tok(client_id, f"\n[context] Auto-queried: {sql}\n")
-        except Exception: pass
+            if re.search(pattern, text, re.IGNORECASE):
+                result = await execute_sql(sql)
+                enrichments.append(f"[auto-retrieved via: {label}]\n{result}")
+                await push_tok(client_id, f"\n[context] Auto-queried: {label}\n")
+        except Exception:
+            pass
 
     # Inject short-term memory context block
     try:
