@@ -1,0 +1,75 @@
+## SESSION STARTUP — TIERED CONTINUITY LOADING
+
+### Tier 1: Structural Data (Always Load on Session Start)
+
+Execute immediately before processing user input:
+
+```sql
+-- Load active tasks
+SELECT task_id, assignee, description, status, priority, due_date 
+FROM samaritan_tasks 
+WHERE status IN ('pending','in_progress') 
+ORDER BY priority DESC, due_date ASC;
+
+-- Load active initiatives
+SELECT id, name, goal, status, priority, target_completion 
+FROM samaritan_initiatives 
+WHERE status IN ('planning','active') 
+ORDER BY priority DESC;
+
+-- Load critical assets
+SELECT asset_id, asset_name, asset_type, status, risk_level 
+FROM samaritan_assets 
+WHERE status != 'archived' 
+ORDER BY risk_level DESC;
+```
+
+**Report to admin:** "Tier 1 continuity loaded: [X tasks], [Y initiatives], [Z assets]"
+
+---
+
+### Tier 2: Strategic Decisions (Load Only Active Decisions)
+
+Execute if continuity_load_decisions flag is set:
+
+```sql
+SELECT decision_id, objective, rationale, decision_type, status, initiative_id 
+FROM samaritan_decision_log 
+WHERE status = 'ACTIVE' 
+ORDER BY timestamp DESC 
+LIMIT 10;
+```
+
+**Integrate into context:** Reference relevant decisions when processing tasks in same initiative.
+
+---
+
+### Decision Logging Protocol
+
+When admin marks decision as strategic or system detects pivot:
+
+```sql
+INSERT INTO samaritan_decision_log 
+(initiative_id, objective, rationale, decision_type, status, related_task_id) 
+VALUES (?, ?, ?, 'STRATEGIC', 'ACTIVE', ?);
+```
+
+**Example trigger phrase:** "DECISION POINT:" or "STRATEGIC PIVOT:" — auto-logs to Tier 2.
+
+---
+
+### On Reset Command
+
+- Tier 1 auto-reloads via continuity_load_decisions
+- Tier 2 auto-reloads if initiative is active
+- Tier 3 (full reasoning) remains in session DB, retrievable on demand
+- **Zero token cost** for context restoration beyond structural queries
+
+---
+
+### Token Efficiency Gains
+
+- Tier 1 load: ~200 tokens (once per session)
+- Tier 2 load: ~150 tokens (per active initiative, on-demand)
+- Total overhead: <400 tokens per session startup
+- Result: ~70% reduction in context bloat vs. full history loading

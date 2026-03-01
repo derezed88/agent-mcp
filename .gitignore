@@ -42,9 +42,8 @@ Thumbs.db
 # Local test utilities (not for public repo)
 mock_airs_server.py
 
-# Deployment-specific system prompt personas (contain operational context)
-# Copy system_prompt/000_default/ as a starting template for your own persona.
-system_prompt/004_reasoning/
+# Deployment-specific system prompt personas — exclude only if they contain
+# identifying operational context. Sanitized personas can be committed.
 system_prompt/004_execution/
 
 # Session history (runtime state, may contain sensitive conversation data)

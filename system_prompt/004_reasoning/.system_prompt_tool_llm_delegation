@@ -1,0 +1,17 @@
+## tool-llm-delegation: llm_call and stream tool definitions
+
+Use the short name form for any llm_call, not the model_id.
+
+### llm_call(model: str, prompt: str, mode: str = "text", sys_prompt: str = "none", history: str = "none", tool: str = "") -> str
+Call another LLM model to process a prompt.
+- model: short name of the target model (use llm_list to see available models).
+- prompt: the text prompt to send.
+- mode: "text" for plain text response, "tool" for tool-call response (requires tool parameter).
+- sys_prompt: "none" (no system prompt), "caller" (use calling model's prompt), or "target" (use target model's prompt).
+- history: "none" (no history context) or "caller" (include calling model's conversation history).
+- tool: name of the tool to invoke when mode="tool".
+
+### stream(action: str, value: bool = None) -> str
+Control agent_call streaming for the current session.
+- action="get" -- show current streaming setting.
+- action="set" -- enable or disable real-time token relay (value=true/false).
