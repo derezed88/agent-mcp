@@ -189,27 +189,65 @@ async def age_to_longterm(older_than_hours: int = 48, max_rows: int = 100) -> in
 # Context block: formatted string ready to inject into system prompt
 # ---------------------------------------------------------------------------
 
+async def load_topic_list() -> list[str]:
+    """Return distinct topic names from both short-term and long-term memory, sorted."""
+    try:
+        raw_st = await execute_sql(f"SELECT DISTINCT topic FROM {_ST} ORDER BY topic")
+        raw_lt = await execute_sql(f"SELECT DISTINCT topic FROM {_LT} ORDER BY topic")
+        topics: set[str] = set()
+        for raw in (raw_st, raw_lt):
+            for line in raw.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("topic") or line.startswith("(") or line.startswith("--"):
+                    continue
+                if set(line) <= set("-+|"):
+                    continue
+                # Only accept lines that look like valid topic names (no spaces, no parens)
+                if " " in line or "(" in line or ")" in line:
+                    continue
+                topics.add(line)
+        return sorted(topics)
+    except Exception as e:
+        log.debug(f"load_topic_list failed: {e}")
+        return []
+
+
 async def load_context_block(limit: int = 15, min_importance: int = 3) -> str:
     """
     Return a formatted string of short-term memories for prompt injection.
-    Returns empty string if no memories.
+    Includes the full list of known topics so the model can reuse existing
+    categories rather than inventing new ones each turn.
+    Returns empty string if no memories and no topics.
     """
-    rows = await load_short_term(limit=limit, min_importance=min_importance)
-    if not rows:
+    rows, topics = await asyncio.gather(
+        load_short_term(limit=limit, min_importance=min_importance),
+        load_topic_list(),
+    )
+
+    if not rows and not topics:
         return ""
 
     lines = ["## Active Memory (short-term recall)\n"]
-    # Group by topic
-    by_topic: dict[str, list[dict]] = {}
-    for row in rows:
-        t = row.get("topic", "general")
-        by_topic.setdefault(t, []).append(row)
 
-    for topic, items in by_topic.items():
-        lines.append(f"**{topic}**")
-        for item in items:
-            imp = item.get("importance", 5)
-            lines.append(f"  [imp={imp}] {item.get('content', '')}")
+    if rows:
+        # Group by topic
+        by_topic: dict[str, list[dict]] = {}
+        for row in rows:
+            t = row.get("topic", "general")
+            by_topic.setdefault(t, []).append(row)
+
+        for topic, items in by_topic.items():
+            lines.append(f"**{topic}**")
+            for item in items:
+                imp = item.get("importance", 5)
+                lines.append(f"  [imp={imp}] {item.get('content', '')}")
+            lines.append("")
+
+    if topics:
+        lines.append(f"**Known topics** (reuse these for new saves; add new ones only when needed):")
+        lines.append(f"  {', '.join(topics)}")
         lines.append("")
 
     return "\n".join(lines)
