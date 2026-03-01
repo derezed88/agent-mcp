@@ -55,13 +55,16 @@ Gemini (`GEMINI_API_KEY`) is optional — `summarizer-gemini` is a fallback summ
 
 | File | Role |
 |---|---|
-| `memory.py` | Core memory module — all read/write/age/summarize logic |
-| `agents.py` | Modified: `auto_enrich_context()` injects short-term block; `_call_llm_text()` added |
-| `routes.py` | Modified: `cmd_reset()` triggers summarize-before-clear |
-| `tools.py` | Modified: three new tools registered (`memory_save`, `memory_recall`, `memory_age`) |
-| `llm-models.json` | Modified: `samaritan-reasoning` and `samaritan-execution` rewired |
-| `llm-tools.json` | Modified: `"memory"` toolset added |
-| `system_prompt/004_reasoning/` | Modified: behavior, continuity, memory sections updated |
+| `memory.py` | Core memory module — all read/write/age/summarize logic; `_parse_table()` fixed for pipe-separated output |
+| `database.py` | Added `execute_insert()` — returns `cursor.lastrowid` in same connection (fixes LAST_INSERT_ID race) |
+| `agents.py` | `auto_enrich_context()` injects short-term block; loop guard fixed (resolves tool_calls before HumanMessage injection); threshold 2→3 |
+| `routes.py` | `cmd_reset()` triggers summarize-before-clear |
+| `tools.py` | Memory tools registered in both `CORE_LC_TOOLS` and `core_executors` (previously only in CORE_LC_TOOLS); `memory` toolset added |
+| `llm-models.json` | `samaritan-reasoning`: `memory` toolset added, temp 0.7→0.2, top_p 0.9→0.7; `samaritan-execution` unchanged |
+| `llm-tools.json` | `"memory"` toolset added |
+| `db-config.json` | Instance-specific (gitignored): database name + table names; loaded by `memory.py` and `database.py` at startup |
+| `system_prompt/004_reasoning/.system_prompt_memory` | Rewritten: direct tool call instructions + CRITICAL hallucination warning |
+| `system_prompt/004_execution/.system_prompt_memory` | Removed hardcoded table names |
 
 ---
 
@@ -127,10 +130,10 @@ The memory system depends on three models working together. Here is the relevant
   "host": "https://api.x.ai/v1",
   "env_key": "XAI_API_KEY",
   "max_context": 5000,
-  "llm_tools": ["get_system_info", "llm_call", "llm_list", "search_tavily", "search_xai"],
+  "llm_tools": ["get_system_info", "llm_call", "llm_list", "search_tavily", "search_xai", "memory"],
   "system_prompt_folder": "system_prompt/004_reasoning",
-  "temperature": 0.7,
-  "top_p": 0.9,
+  "temperature": 0.2,
+  "top_p": 0.7,
   "token_selection_setting": "custom"
 }
 ```
@@ -138,14 +141,18 @@ The memory system depends on three models working together. Here is the relevant
 | Parameter | Value | Why |
 |---|---|---|
 | `model_id` | `grok-4-1-fast-non-reasoning` | Grok without chain-of-thought overhead; better for chat turns |
-| `llm_tools` | minimal set | Grok is inconsistent at tool calling; it reasons and delegates, not executes |
-| `temperature` | `0.7` | Creative and expressive for natural conversation |
-| `top_p` | `0.9` | Slight nucleus sampling to prevent repetition |
+| `llm_tools` | minimal set + `memory` | Memory tools added so Grok can call them directly if it issues a proper tool call |
+| `temperature` | `0.2` | Lowered from 0.7 to encourage tool call generation over narration |
+| `top_p` | `0.7` | Tightened from 0.9; reduces divergent token selection during tool decisions |
 | `token_selection_setting` | `"custom"` | Applies the temperature/top_p above (vs. `"default"` which ignores them) |
 | `max_context` | `5000` | Short-term memory injection + conversation fits comfortably |
 | `system_prompt_folder` | `004_reasoning` | Loads the memory-aware Samaritan prompt tree |
 
-**Grok does not write to the database.** It reads injected memory and delegates tool execution to `samaritan-execution` via `llm_call`.
+> **Grok tool-calling caveat:** `grok-4-1-fast-non-reasoning` was observed to narrate tool execution
+> (write text claiming memory was saved) instead of issuing an actual tool call, even at temperature=0.2.
+> The `memory` toolset is bound so that *if* Grok does issue a tool call it will succeed. For reliability,
+> explicit memory saves should be delegated to `samaritan-execution` via `llm_call`. The system prompt
+> includes a CRITICAL warning: never claim a save without the tool call appearing in the response.
 
 #### `samaritan-execution` — The Obedient Executor (gpt-4o-mini)
 
@@ -205,7 +212,7 @@ The memory system depends on three models working together. Here is the relevant
 ]
 ```
 
-This toolset is assigned to `samaritan-execution` in its `llm_tools` array. It is **not** assigned to `samaritan-reasoning` — Grok does not call memory tools directly; it delegates to the execution model.
+This toolset is assigned to both `samaritan-execution` and `samaritan-reasoning`. `samaritan-execution` reliably calls these tools. `samaritan-reasoning` (Grok) has them bound so a direct call succeeds if Grok chooses to issue one; in practice Grok often narrates rather than calls, so delegation via `llm_call` remains the reliable path.
 
 ---
 
@@ -303,7 +310,7 @@ cmd_reset() in routes.py
 
 ### Delegation Flow (Grok → gpt-4o-mini)
 
-When Grok needs to write a memory or recall long-term facts:
+The preferred path for memory writes: Grok delegates to `samaritan-execution` via `llm_call`.
 
 ```
 Grok reasoning turn
@@ -317,7 +324,25 @@ Grok reasoning turn
           INSERT INTO samaritan_memory_shortterm
 ```
 
-gpt-4o-mini at temp=0.1 reliably translates natural-language delegation prompts into precise tool calls. Grok never touches the DB directly.
+gpt-4o-mini at temp=0.1 reliably translates natural-language delegation prompts into precise tool calls.
+
+### Direct Memory Call (Grok → tool)
+
+Grok also has the `memory` toolset bound directly. If it issues a proper tool call (not just narrates), it succeeds:
+
+```
+Grok reasoning turn
+  └── memory_save(topic="X", content="Y", importance=8)   ← direct tool call
+            │
+            ▼
+      _memory_save_exec() in tools.py
+        └── save_memory() in memory.py
+                │
+                ▼
+          INSERT INTO samaritan_memory_shortterm
+```
+
+**Reliability note:** `grok-4-1-fast-non-reasoning` frequently generates text narrating a tool call instead of issuing one. Direct calls succeed when they happen; delegation is the more reliable path.
 
 ### Aging Flow
 
@@ -495,6 +520,107 @@ memory_age(
   max_rows         = 100    # cap per invocation
 )
 ```
+
+---
+
+## Bugs Discovered and Fixed (2026-03-01)
+
+All three bugs were independently silent — no exceptions were raised; the system appeared functional while saving nothing.
+
+### Bug 1: Memory tools missing from `get_tool_executor()` — main culprit
+
+**File:** `tools.py` — `get_tool_executor()`
+
+`memory_save`, `memory_recall`, and `memory_age` were registered in `CORE_LC_TOOLS` (so the LLM could see them and issue calls) but were absent from the `core_executors` dict that `get_tool_executor()` uses to dispatch calls.
+
+Every tool call returned `"Unknown tool: memory_save"` as a ToolMessage result. The model (gpt-4o-mini) retried with identical args → loop guard fired → zero rows saved, while the model responded "Memory saved successfully."
+
+**Fix:** Added the three tools to `core_executors` in `get_tool_executor()`.
+
+```python
+# Before (missing):
+core_executors = { 'get_system_info': ..., 'llm_call': ..., ... }
+
+# After:
+core_executors = {
+    ...
+    'memory_save':   _memory_save_exec,
+    'memory_recall': _memory_recall_exec,
+    'memory_age':    _memory_age_exec,
+}
+```
+
+### Bug 2: `_parse_table()` split on wrong delimiter
+
+**File:** `memory.py` — `_parse_table()`
+
+`_parse_table()` split header and data lines on `\t` (tab character), but `execute_sql()` returns pipe-separated output:
+
+```
+id | topic         | content          | importance
+---+---------------+------------------+-----------
+16 | schedule      | Lee has Mon off  | 7
+```
+
+Every `load_short_term()` and `load_long_term()` call returned rows where all fields were `None`. Memory recall always said "No memories found" even when rows existed in the DB.
+
+**Fix:** Changed delimiters from `\t` to `|` and added a separator-line filter:
+
+```python
+# Before:
+headers = [h.strip() for h in lines[0].split("\t")]
+vals = line.split("\t")
+
+# After:
+headers = [h.strip() for h in lines[0].split("|")]
+if set(line.strip()) <= set("-+"):  # skip ---+--- separator lines
+    continue
+vals = line.split("|")
+```
+
+### Bug 3: `LAST_INSERT_ID()` race condition in `save_memory()`
+
+**File:** `database.py` + `memory.py`
+
+`save_memory()` ran the INSERT and `SELECT LAST_INSERT_ID()` as two separate `execute_sql()` calls. Each call opens and closes a fresh DB connection. `LAST_INSERT_ID()` is connection-scoped — calling it on a new connection always returns 0.
+
+Effect: the second `memory_save` call in any session always returned `row_id=0`, which the dedup check treated as "already exists". The first call saved correctly (row was actually inserted) but reported id=0, then the retry on the second call hit the dedup check and silently skipped.
+
+**Fix:** New `execute_insert()` in `database.py` that returns `cursor.lastrowid` before closing the connection:
+
+```python
+def _run_insert(sql: str) -> int:
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(sql)
+    conn.commit()
+    return cursor.lastrowid or 0   # same connection — correct value
+
+async def execute_insert(sql: str) -> int:
+    return await asyncio.to_thread(_run_insert, sql)
+```
+
+### Loop guard: OpenAI 400 on HumanMessage injection
+
+**File:** `agents.py` — `agentic_lc()`
+
+When the loop guard fired (same tool+args repeated `_TOOL_LOOP_THRESHOLD` times), it injected a `HumanMessage("stop, answer now")` into the context before resolving the current turn's `ai_msg.tool_calls`. OpenAI requires every `tool_calls` in an AIMessage to be followed by corresponding `ToolMessage` entries; the bare HumanMessage caused a 400 error.
+
+**Fix:** Execute all pending tool calls (add ToolMessages to ctx) before injecting the HumanMessage break. Threshold also raised from 2→3 to allow one retry after a legitimate dedup/no-op result.
+
+### Hallucination guard: system prompt CRITICAL warning
+
+**File:** `system_prompt/004_reasoning/.system_prompt_memory`
+
+Grok was narrating saves without calling the tool. Added an explicit CRITICAL instruction:
+
+```
+**CRITICAL**: You MUST actually invoke the `memory_save` tool. Never claim memory was saved
+without having called the tool. If the tool call does not appear in your response, memory
+was NOT saved.
+```
+
+This is an instruction, not a technical fix — Grok may still narrate. The reliable path remains delegation to `samaritan-execution`.
 
 ---
 
