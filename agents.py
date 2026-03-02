@@ -824,10 +824,18 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
             pass
 
     # Inject short-term memory context block
+    # Build a query string from the last few turns for semantic retrieval
     if _memory_feature("context_injection"):
         try:
             from memory import load_context_block
-            mem_block = await load_context_block(min_importance=3)
+            # Use last 3 messages (last user + up to 2 prior turns) as semantic query
+            recent = messages[-6:] if len(messages) >= 6 else messages
+            query_text = " ".join(
+                m.get("content", "")[:300]
+                for m in recent
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ).strip()
+            mem_block = await load_context_block(min_importance=3, query=query_text)
             if mem_block:
                 enrichments.append(mem_block)
         except Exception as _mem_err:

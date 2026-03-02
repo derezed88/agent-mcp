@@ -176,10 +176,28 @@ async def save_memory(
         f"VALUES ('{topic}', '{content}', {importance}, '{source}', '{session_id}')"
     )
     try:
-        return await execute_insert(sql)
+        row_id = await execute_insert(sql)
     except Exception as e:
         log.error(f"save_memory failed: {e}")
         return 0
+
+    # Upsert into Qdrant vector index (fire-and-forget, non-blocking)
+    if row_id:
+        try:
+            from plugin_memory_vector_qdrant import get_vector_api
+            vec = get_vector_api()
+            if vec:
+                asyncio.create_task(vec.upsert_memory(
+                    row_id=row_id,
+                    topic=topic,
+                    content=content,
+                    importance=importance,
+                    tier="short",
+                ))
+        except Exception as e:
+            log.warning(f"save_memory vector upsert skipped: {e}")
+
+    return row_id
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +312,14 @@ async def _move_rows_to_longterm(rows: list[dict]) -> int:
             )
             await execute_sql(f"DELETE FROM {_ST} WHERE id = {rid}")
             moved += 1
+            # Update Qdrant tier payload short→long (fire-and-forget)
+            try:
+                from plugin_memory_vector_qdrant import get_vector_api
+                vec = get_vector_api()
+                if vec:
+                    asyncio.create_task(vec.update_tier(int(rid), "long"))
+            except Exception:
+                pass
         except Exception as e:
             log.warning(f"_move_rows_to_longterm: failed for id={rid}: {e}")
     return moved
@@ -418,25 +444,67 @@ async def _update_last_accessed(row_ids: list) -> None:
         log.debug(f"_update_last_accessed failed: {e}")
 
 
-async def load_context_block(min_importance: int = 3) -> str:
+async def load_context_block(min_importance: int = 3, query: str = "") -> str:
     """
     Return a formatted string of short-term memories for prompt injection.
-    Returns all rows meeting min_importance — no row-count cap, so important
-    facts are never silently dropped as the table grows.
+
+    When a query string is provided and the vector plugin is available:
+      - Semantic search returns the top-K most relevant rows
+      - Rows with importance >= min_importance_always are always included
+      - Only semantically retrieved rows have last_accessed updated
+
+    When no query or vector plugin unavailable:
+      - Falls back to loading all rows meeting min_importance (original behaviour)
+      - last_accessed updated for all rows
+
     Includes the full list of known topics so the model can reuse existing
     categories rather than inventing new ones each turn.
     Returns empty string if no memories and no topics.
-    Updates last_accessed for all returned rows (background task, no await).
     """
-    rows, topics = await asyncio.gather(
-        load_short_term(limit=10000, min_importance=min_importance),
-        load_topic_list(),
-    )
+    from plugin_memory_vector_qdrant import get_vector_api
+    vec = get_vector_api()
 
-    # Update last_accessed for all injected rows (fire-and-forget)
-    row_ids = [row.get("id", "") for row in rows if row.get("id", "")]
-    if row_ids:
-        asyncio.create_task(_update_last_accessed(row_ids))
+    topics_task = asyncio.create_task(load_topic_list())
+
+    if vec and query:
+        # --- Semantic retrieval path ---
+        always_importance = vec.cfg().get("min_importance_always", 8)
+
+        # Run semantic search and high-importance fetch in parallel
+        semantic_task = asyncio.create_task(vec.search_memories(query, tier="short"))
+        always_task   = asyncio.create_task(
+            load_short_term(limit=10000, min_importance=always_importance)
+        )
+        semantic_hits, always_rows, topics = await asyncio.gather(
+            semantic_task, always_task, topics_task
+        )
+
+        # Merge: always_rows first (authoritative), then semantic hits not already included
+        seen_ids = {str(r.get("id", "")) for r in always_rows}
+        merged = list(always_rows)
+        for hit in semantic_hits:
+            if str(hit.get("id", "")) not in seen_ids:
+                merged.append(hit)
+                seen_ids.add(str(hit.get("id", "")))
+
+        rows = merged
+        # Only update last_accessed for semantically retrieved rows (not always-rows)
+        semantic_ids = [h.get("id") for h in semantic_hits if h.get("id")]
+        if semantic_ids:
+            asyncio.create_task(_update_last_accessed(semantic_ids))
+        log.debug(
+            f"load_context_block: semantic={len(semantic_hits)} "
+            f"always={len(always_rows)} merged={len(merged)}"
+        )
+    else:
+        # --- Fallback: load all rows meeting min_importance ---
+        rows, topics = await asyncio.gather(
+            load_short_term(limit=10000, min_importance=min_importance),
+            topics_task,
+        )
+        row_ids = [row.get("id", "") for row in rows if row.get("id", "")]
+        if row_ids:
+            asyncio.create_task(_update_last_accessed(row_ids))
 
     if not rows and not topics:
         return ""
