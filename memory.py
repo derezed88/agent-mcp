@@ -501,11 +501,21 @@ async def summarize_and_save(
     if not history_text.strip():
         return "History had no text content to summarize."
 
+    # Load known topics so the summarizer reuses existing labels
+    known_topics = await load_topic_list()
+    if known_topics:
+        topics_hint = (
+            "EXISTING TOPICS (reuse these exactly; only add a new topic if nothing fits):\n"
+            f"  {', '.join(known_topics)}\n\n"
+        )
+    else:
+        topics_hint = "Topic examples: user-preferences, project-status, technical-decisions, security, tasks.\n\n"
+
     prompt = (
         "You are a memory distillation engine. Given this conversation, extract the most important facts, "
         "decisions, preferences, and context. Output ONLY valid JSON — a list of objects with keys: "
-        "topic (short string), content (one concise sentence), importance (1-10 int). "
-        "Topic examples: user-preferences, project-status, technical-decisions, security, tasks. "
+        "topic (short kebab-case string), content (one concise sentence), importance (1-10 int). "
+        f"{topics_hint}"
         "Output 3-8 items maximum. No markdown, no explanation, just the JSON array.\n\n"
         f"CONVERSATION:\n{history_text}"
     )

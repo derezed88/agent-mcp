@@ -126,6 +126,7 @@ async def cmd_help(client_id: str):
         "  !memory list [short|long]                 - list by tier\n"
         "  !memory show <id> [short|long]            - show one row in full\n"
         "  !memory update <id> [tier=short] [importance=N] [content=text] [topic=label]\n"
+        "  !memstats                                 - memory system health dashboard\n"
         "\n"
         "Search & Extract:\n"
         "  !search_ddgs <query>                      - search via DuckDuckGo\n"
@@ -312,6 +313,178 @@ async def cmd_memory(client_id: str, arg: str):
             "  !memory show <id> [short|long]       - show one row\n"
             "  !memory update <id> [tier=short] [importance=N] [content=text] [topic=label]")
 
+    await conditional_push_done(client_id)
+
+
+async def cmd_memstats(client_id: str):
+    """
+    !memstats — memory system health dashboard.
+    Shows row counts, topic distribution, importance spread, aging history,
+    summarizer runs, dedup config, and last activity timestamps.
+    """
+    from database import execute_sql
+    from memory import _ST, _LT, _SUM, _age_cfg, _mem_plugin_cfg
+
+    lines = ["## Memory System Stats\n"]
+
+    async def q(sql: str) -> str:
+        try:
+            return await execute_sql(sql)
+        except Exception as e:
+            return f"(error: {e})"
+
+    def _int_from(raw: str) -> int:
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if line.isdigit():
+                return int(line)
+            parts = line.split()
+            if parts and parts[-1].isdigit():
+                return int(parts[-1])
+        return 0
+
+    def _rows_from(raw: str) -> list[list[str]]:
+        """Parse pipe-separated output into rows of stripped strings."""
+        result = []
+        for line in raw.strip().splitlines()[1:]:  # skip header
+            if not line.strip() or set(line.strip()) <= set("-+|"):
+                continue
+            result.append([c.strip() for c in line.split("|")])
+        return result
+
+    # ── Tier counts ──────────────────────────────────────────────────────────
+    st_count = _int_from(await q(f"SELECT COUNT(*) FROM {_ST}"))
+    lt_count = _int_from(await q(f"SELECT COUNT(*) FROM {_LT}"))
+    sum_count = _int_from(await q(f"SELECT COUNT(*) FROM {_SUM}"))
+    lines.append(f"**Tier counts**")
+    lines.append(f"  short-term : {st_count} rows")
+    lines.append(f"  long-term  : {lt_count} rows")
+    lines.append(f"  summaries  : {sum_count} rows\n")
+
+    # ── Short-term: topic breakdown ───────────────────────────────────────────
+    st_topics_raw = await q(
+        f"SELECT topic, COUNT(*) as n, ROUND(AVG(importance),1) as avg_imp "
+        f"FROM {_ST} GROUP BY topic ORDER BY n DESC LIMIT 20"
+    )
+    st_topic_rows = _rows_from(st_topics_raw)
+    if st_topic_rows:
+        lines.append(f"**Short-term by topic** (top {len(st_topic_rows)})")
+        for row in st_topic_rows:
+            if len(row) >= 3:
+                lines.append(f"  {row[0]:<30} {row[1]:>4} rows  avg_imp={row[2]}")
+        lines.append("")
+
+    # ── Long-term: topic breakdown ────────────────────────────────────────────
+    lt_topics_raw = await q(
+        f"SELECT topic, COUNT(*) as n, ROUND(AVG(importance),1) as avg_imp "
+        f"FROM {_LT} GROUP BY topic ORDER BY n DESC LIMIT 20"
+    )
+    lt_topic_rows = _rows_from(lt_topics_raw)
+    if lt_topic_rows:
+        lines.append(f"**Long-term by topic** (top {len(lt_topic_rows)})")
+        for row in lt_topic_rows:
+            if len(row) >= 3:
+                lines.append(f"  {row[0]:<30} {row[1]:>4} rows  avg_imp={row[2]}")
+        lines.append("")
+
+    # ── Importance distribution (short-term) ─────────────────────────────────
+    imp_raw = await q(
+        f"SELECT importance, COUNT(*) as n FROM {_ST} GROUP BY importance ORDER BY importance"
+    )
+    imp_rows = _rows_from(imp_raw)
+    if imp_rows:
+        lines.append("**Short-term importance distribution**")
+        dist = "  " + "  ".join(f"[{r[0]}]={r[1]}" for r in imp_rows if len(r) >= 2)
+        lines.append(dist)
+        lines.append("")
+
+    # ── Source breakdown (short-term) ─────────────────────────────────────────
+    src_raw = await q(
+        f"SELECT source, COUNT(*) as n FROM {_ST} GROUP BY source ORDER BY n DESC"
+    )
+    src_rows = _rows_from(src_raw)
+    if src_rows:
+        lines.append("**Short-term by source**")
+        for row in src_rows:
+            if len(row) >= 2:
+                lines.append(f"  {row[0]:<20} {row[1]:>4} rows")
+        lines.append("")
+
+    # ── Aging: long-term source of truth ─────────────────────────────────────
+    lt_from_st_raw = await q(
+        f"SELECT COUNT(*) FROM {_LT} WHERE shortterm_id IS NOT NULL AND shortterm_id > 0"
+    )
+    lt_aged = _int_from(lt_from_st_raw)
+    lt_direct_raw = await q(
+        f"SELECT COUNT(*) FROM {_LT} WHERE shortterm_id IS NULL OR shortterm_id = 0"
+    )
+    lt_direct = _int_from(lt_direct_raw)
+    lines.append("**Long-term origin**")
+    lines.append(f"  aged from short-term : {lt_aged} rows")
+    lines.append(f"  direct saves         : {lt_direct} rows\n")
+
+    # ── Last activity timestamps ──────────────────────────────────────────────
+    st_newest_raw = await q(f"SELECT MAX(created_at) FROM {_ST}")
+    st_oldest_raw = await q(f"SELECT MIN(created_at) FROM {_ST}")
+    st_lru_raw    = await q(f"SELECT MIN(last_accessed) FROM {_ST}")
+    lt_newest_raw = await q(f"SELECT MAX(created_at) FROM {_LT}")
+    sum_newest_raw = await q(f"SELECT MAX(created_at) FROM {_SUM}")
+
+    def _scalar(raw: str) -> str:
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if line and not line.startswith("MAX") and not line.startswith("MIN") and set(line) > set("-+|"):
+                return line
+        return "(none)"
+
+    lines.append("**Timestamps**")
+    lines.append(f"  ST newest created    : {_scalar(st_newest_raw)}")
+    lines.append(f"  ST oldest created    : {_scalar(st_oldest_raw)}")
+    lines.append(f"  ST least recently    : {_scalar(st_lru_raw)}")
+    lines.append(f"  LT newest created    : {_scalar(lt_newest_raw)}")
+    lines.append(f"  Summaries newest     : {_scalar(sum_newest_raw)}\n")
+
+    # ── Summarizer runs ───────────────────────────────────────────────────────
+    if sum_count > 0:
+        sum_model_raw = await q(
+            f"SELECT model_used, COUNT(*) as n FROM {_SUM} GROUP BY model_used ORDER BY n DESC"
+        )
+        sum_model_rows = _rows_from(sum_model_raw)
+        if sum_model_rows:
+            lines.append("**Summarizer runs by model**")
+            for row in sum_model_rows:
+                if len(row) >= 2:
+                    lines.append(f"  {row[0]:<30} {row[1]:>3} runs")
+            lines.append("")
+
+    # ── Config snapshot ───────────────────────────────────────────────────────
+    mem_cfg = _mem_plugin_cfg()
+    age_cfg = _age_cfg()
+    lines.append("**Config (plugins-enabled.json)**")
+    features = ("context_injection", "reset_summarize", "post_response_scan", "fuzzy_dedup")
+    for f in features:
+        val = mem_cfg.get(f, True)
+        lines.append(f"  {f:<28}: {'on' if val else 'OFF'}")
+    lines.append(f"  {'fuzzy_dedup_threshold':<28}: {mem_cfg.get('fuzzy_dedup_threshold', 0.78):.2f}")
+    lines.append(f"  {'summarizer_model':<28}: {mem_cfg.get('summarizer_model', 'summarizer-anthropic')}")
+    lines.append(f"  {'auto_memory_age':<28}: {'on' if age_cfg['auto_memory_age'] else 'OFF'}")
+    lines.append(f"  {'memory_age_entrycount':<28}: {age_cfg['memory_age_entrycount']}")
+
+    def _timer(v: int) -> str:
+        return "disabled" if v == -1 else f"{v} min"
+
+    lines.append(f"  {'memory_age_count_timer':<28}: {_timer(age_cfg['memory_age_count_timer'])}")
+    lines.append(f"  {'memory_age_trigger_minutes':<28}: {age_cfg['memory_age_trigger_minutes']} min ({age_cfg['memory_age_trigger_minutes']//60}h)")
+    lines.append(f"  {'memory_age_minutes_timer':<28}: {_timer(age_cfg['memory_age_minutes_timer'])}")
+
+    # Pressure indicator
+    if st_count > 0:
+        limit = age_cfg["memory_age_entrycount"]
+        pct = int(st_count / limit * 100) if limit > 0 else 0
+        bar = "#" * min(20, pct // 5) + "." * max(0, 20 - pct // 5)
+        lines.append(f"\n  ST pressure: [{bar}] {pct}% of {limit} row limit")
+
+    await push_tok(client_id, "\n".join(lines))
     await conditional_push_done(client_id)
 
 
@@ -914,6 +1087,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_vscode(client_id, arg)
                 elif cmd == "memory":
                     await cmd_memory(client_id, arg)
+                elif cmd == "memstats":
+                    await cmd_memstats(client_id)
                 elif get_plugin_command(cmd) is not None:
                     await cmd_plugin_command(client_id, cmd, arg)
                 else:
@@ -1001,6 +1176,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "memory":
             await cmd_memory(client_id, arg)
+            return
+        if cmd == "memstats":
+            await cmd_memstats(client_id)
             return
         if cmd == "stop":
             await cmd_stop(client_id)
