@@ -1073,6 +1073,11 @@ class PluginManager:
             "fuzzy_dedup": True,
             "fuzzy_dedup_threshold": 0.78,
             "summarizer_model": "summarizer-anthropic",
+            "auto_memory_age": True,
+            "memory_age_entrycount": 50,
+            "memory_age_count_timer": 60,
+            "memory_age_trigger_minutes": 2880,
+            "memory_age_minutes_timer": 360,
         })
 
         def _bool_str(val: bool) -> str:
@@ -1091,6 +1096,16 @@ class PluginManager:
                     extra = f"  (threshold={mem_cfg.get('fuzzy_dedup_threshold', 0.78):.2f})"
                 print(f"  {feat:<24}: {_bool_str(val)}{note}{extra}")
             print(f"  {'summarizer_model':<24}: {mem_cfg.get('summarizer_model', 'summarizer-anthropic')}")
+            # Aging config
+            age_on = mem_cfg.get("auto_memory_age", True)
+            print(f"\n  {Colors.BOLD}Background Aging:{Colors.RESET}")
+            print(f"  {'auto_memory_age':<28}: {_bool_str(age_on)}")
+            def _timer_str(val: int) -> str:
+                return f"{Colors.GRAY}disabled{Colors.RESET}" if val == -1 else f"{val} min"
+            print(f"  {'memory_age_entrycount':<28}: {mem_cfg.get('memory_age_entrycount', 50)} rows")
+            print(f"  {'memory_age_count_timer':<28}: {_timer_str(mem_cfg.get('memory_age_count_timer', 60))}")
+            print(f"  {'memory_age_trigger_minutes':<28}: {mem_cfg.get('memory_age_trigger_minutes', 2880)} min ({mem_cfg.get('memory_age_trigger_minutes', 2880)//60}h) staleness threshold")
+            print(f"  {'memory_age_minutes_timer':<28}: {_timer_str(mem_cfg.get('memory_age_minutes_timer', 360))}")
 
         elif action in ("enable", "disable"):
             new_val = (action == "enable")
@@ -1136,8 +1151,39 @@ class PluginManager:
                 self._save_plugins_enabled()
                 print(f"{Colors.GREEN}✓{Colors.RESET} summarizer_model set to '{value}' (persisted)")
                 print(f"  Takes effect on next !reset.")
+            elif key in ("memory_age_entrycount", "memory_age_count_timer",
+                         "memory_age_trigger_minutes", "memory_age_minutes_timer"):
+                try:
+                    v = int(value)
+                    if key == "memory_age_entrycount" and v < 1:
+                        raise ValueError("must be >= 1")
+                    if key != "memory_age_entrycount" and v != -1 and v < 1:
+                        raise ValueError("must be >= 1 or -1 (disable)")
+                    mem_cfg[key] = v
+                    self._save_plugins_enabled()
+                    note = " (disabled)" if v == -1 else f" min"
+                    print(f"{Colors.GREEN}✓{Colors.RESET} {key} set to {v}{note} (persisted)")
+                    print(f"  Takes effect on next timer cycle (no restart needed).")
+                except (ValueError, TypeError) as exc:
+                    print(f"{Colors.RED}✗ Invalid value '{value}': {exc}{Colors.RESET}")
+            elif key == "auto_memory_age":
+                if value.lower() in ("true", "1", "yes", "on"):
+                    mem_cfg["auto_memory_age"] = True
+                    self._save_plugins_enabled()
+                    print(f"{Colors.GREEN}✓{Colors.RESET} auto_memory_age enabled (persisted)")
+                elif value.lower() in ("false", "0", "no", "off"):
+                    mem_cfg["auto_memory_age"] = False
+                    self._save_plugins_enabled()
+                    print(f"{Colors.GREEN}✓{Colors.RESET} auto_memory_age disabled (persisted)")
+                else:
+                    print(f"{Colors.RED}✗ Invalid value '{value}'. Use: true/false{Colors.RESET}")
             else:
-                print(f"{Colors.RED}✗ Unknown key '{key}'. Settable: fuzzy_dedup_threshold, summarizer_model{Colors.RESET}")
+                settable = (
+                    "fuzzy_dedup_threshold, summarizer_model, auto_memory_age, "
+                    "memory_age_entrycount, memory_age_count_timer, "
+                    "memory_age_trigger_minutes, memory_age_minutes_timer"
+                )
+                print(f"{Colors.RED}✗ Unknown key '{key}'.{Colors.RESET}\n  Settable: {settable}")
 
         else:
             print(f"{Colors.RED}✗ Unknown action '{action}'. "
@@ -1175,8 +1221,13 @@ class PluginManager:
         print("  memory enable [feature]                   - Enable memory (or a specific feature)")
         print("  memory disable [feature]                  - Disable memory (or a specific feature)")
         print(f"    features: context_injection, reset_summarize, post_response_scan, fuzzy_dedup")
-        print("  memory set fuzzy_dedup_threshold <0.0-1.0> - Set similarity threshold (default 0.78)")
-        print("  memory set summarizer_model <model_key>    - Set model used on !reset summarization")
+        print("  memory set fuzzy_dedup_threshold <0.0-1.0>   - Set similarity threshold (default 0.78)")
+        print("  memory set summarizer_model <model_key>       - Set model used on !reset summarization")
+        print("  memory set auto_memory_age <true|false>       - Enable/disable background aging")
+        print("  memory set memory_age_entrycount <n>          - Max short-term rows before count aging")
+        print("  memory set memory_age_count_timer <min|-1>    - Count-pressure check interval (min)")
+        print("  memory set memory_age_trigger_minutes <min>   - Staleness threshold in minutes")
+        print("  memory set memory_age_minutes_timer <min|-1>  - Staleness check interval (min)")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
         print("  quit                              - Exit plugin manager")

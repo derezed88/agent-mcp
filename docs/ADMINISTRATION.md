@@ -168,13 +168,14 @@ every feature is independently togglable.
 
 ```sql
 CREATE TABLE IF NOT EXISTS <prefix>memory_shortterm (
-    id         INT AUTO_INCREMENT PRIMARY KEY,
-    topic      VARCHAR(255) NOT NULL,
-    content    TEXT NOT NULL,
-    importance TINYINT DEFAULT 5,
-    source     VARCHAR(50) DEFAULT 'session',
-    session_id VARCHAR(255) DEFAULT '',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    topic         VARCHAR(255) NOT NULL,
+    content       TEXT NOT NULL,
+    importance    TINYINT DEFAULT 5,
+    source        VARCHAR(50) DEFAULT 'session',
+    session_id    VARCHAR(255) DEFAULT '',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS <prefix>memory_longterm (
@@ -217,13 +218,18 @@ If absent, bare names `memory_shortterm`, `memory_longterm`, `chat_summaries` ar
 #### `agentctl.py` memory commands
 
 ```bash
-python agentctl.py memory status                             # show all feature states + settings
-python agentctl.py memory enable                             # enable master switch
-python agentctl.py memory disable                            # disable everything
-python agentctl.py memory enable <feature>                   # enable one feature
-python agentctl.py memory disable <feature>                  # disable one feature
-python agentctl.py memory set fuzzy_dedup_threshold <0-1>   # adjust similarity threshold
-python agentctl.py memory set summarizer_model <model_key>  # change summarizer model
+python agentctl.py memory status                                  # show all feature states + settings
+python agentctl.py memory enable                                  # enable master switch
+python agentctl.py memory disable                                 # disable everything
+python agentctl.py memory enable <feature>                        # enable one feature
+python agentctl.py memory disable <feature>                       # disable one feature
+python agentctl.py memory set fuzzy_dedup_threshold <0-1>        # adjust similarity threshold
+python agentctl.py memory set summarizer_model <model_key>       # change summarizer model
+python agentctl.py memory set auto_memory_age <true|false>       # enable/disable background aging
+python agentctl.py memory set memory_age_entrycount <n>          # max short-term rows
+python agentctl.py memory set memory_age_count_timer <min|-1>    # count-pressure interval (-1=off)
+python agentctl.py memory set memory_age_trigger_minutes <min>   # staleness threshold in minutes
+python agentctl.py memory set memory_age_minutes_timer <min|-1>  # staleness check interval (-1=off)
 ```
 
 #### Feature flags
@@ -238,7 +244,12 @@ All features default to `true`. Configuration lives in `plugins-enabled.json` un
   "post_response_scan": true,
   "fuzzy_dedup": true,
   "fuzzy_dedup_threshold": 0.78,
-  "summarizer_model": "summarizer-anthropic"
+  "summarizer_model": "summarizer-anthropic",
+  "auto_memory_age": true,
+  "memory_age_entrycount": 50,
+  "memory_age_count_timer": 60,
+  "memory_age_trigger_minutes": 2880,
+  "memory_age_minutes_timer": 360
 }
 ```
 
@@ -253,8 +264,13 @@ All features default to `true`. Configuration lives in `plugins-enabled.json` un
 
 | Key | Default | Restart required? | Description |
 |---|---|---|---|
-| `fuzzy_dedup_threshold` | `0.78` | No | Similarity ratio (0.0–1.0) above which a new save is treated as a duplicate of an existing row in the same topic. Read fresh each call. |
+| `fuzzy_dedup_threshold` | `0.78` | No | Similarity ratio (0.0–1.0) above which a new save is treated as a duplicate. Read fresh each call. |
 | `summarizer_model` | `"summarizer-anthropic"` | No | Model key used by `summarize_and_save()` on `!reset`. Must be a valid key in `llm-models.json`. |
+| `auto_memory_age` | `true` | No | Master switch for background aging tasks. When false, both timers are suppressed. |
+| `memory_age_entrycount` | `50` | No | Max short-term rows before count-pressure aging removes the overflow. |
+| `memory_age_count_timer` | `60` | No | How often (minutes) the count-pressure task runs. Set to `-1` to disable. |
+| `memory_age_trigger_minutes` | `2880` | No | Staleness threshold in minutes (2880 = 48h). Rows not accessed in this time are candidates for staleness aging. |
+| `memory_age_minutes_timer` | `360` | No | How often (minutes) the staleness task runs. Set to `-1` to disable. |
 
 **Choosing a threshold:** SequenceMatcher ratio on real paraphrased duplicates typically
 lands at 0.78–0.88. Genuinely distinct facts on the same topic land below 0.65. The
@@ -279,7 +295,23 @@ On any DB or config error in pass 2, the save proceeds rather than blocking.
 | Long-term | `*_memory_longterm` | Aged-out facts | On-demand via `memory_recall(tier="long")` |
 | Archive | Google Drive | Bulk summaries | Future / manual |
 
-Facts age from short-term to long-term automatically on session start (rows older than 48h, lowest importance aged first).
+Facts age from short-term to long-term via two independent background tasks (see below).
+
+#### Background Aging
+
+Two async tasks run continuously inside the server process. Both re-read config fresh on each cycle — no restart needed for config changes.
+
+**Count-pressure task** (`memory_age_count_timer`, default: every 60 min)
+
+Triggers when the short-term table exceeds `memory_age_entrycount` rows. Moves exactly the overflow rows — those with the lowest importance and oldest `last_accessed` time — to long-term. Has no age threshold; even recently saved rows can be moved if the table is over the cap.
+
+**Staleness task** (`memory_age_minutes_timer`, default: every 360 min)
+
+Moves all rows whose `last_accessed` is older than `memory_age_trigger_minutes` minutes (default: 2880 min = 48h). Safety ceiling: max 200 rows per pass. Also ordered by importance ASC, last_accessed ASC.
+
+**`last_accessed` semantics:** Updated automatically whenever `load_context_block()` injects memories into a request. This means memories that are actively recalled stay in short-term longer. MySQL's `ON UPDATE CURRENT_TIMESTAMP` alone is insufficient — the code issues an explicit `UPDATE` after each injection batch.
+
+**Disabling a timer:** Set the timer to `-1`. The task loop continues running (no restart needed) but skips the aging pass. The other timer remains active independently.
 
 #### Runtime memory commands (`!memory`)
 

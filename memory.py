@@ -9,7 +9,8 @@ Tiers:
 Public API:
   save_memory(topic, content, importance, source, session_id)
   load_short_term(limit, min_importance) -> list[dict]
-  age_to_longterm(older_than_hours, max_rows) -> int
+  age_by_count(max_rows) -> int
+  age_by_minutes(trigger_minutes, max_rows) -> int
   load_context_block(limit, min_importance) -> str   # ready to prepend to prompt
   summarize_and_save(session_id, history, model_key) -> str
 """
@@ -48,22 +49,46 @@ _LT  = _tables.get("memory_longterm",  "memory_longterm")
 _SUM = _tables.get("chat_summaries",   "chat_summaries")
 
 # ---------------------------------------------------------------------------
-# Fuzzy dedup config (read from plugins-enabled.json at call time)
+# Config helpers (read from plugins-enabled.json at call time)
 # ---------------------------------------------------------------------------
+
+def _mem_plugin_cfg() -> dict:
+    """Return the plugin_config.memory dict from plugins-enabled.json, or {}."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins-enabled.json")
+    try:
+        with open(path) as f:
+            return json.load(f).get("plugin_config", {}).get("memory", {})
+    except Exception:
+        return {}
+
+
+def _age_cfg() -> dict:
+    """
+    Return aging config with defaults. Keys:
+      auto_memory_age         bool  — master switch for background aging
+      memory_age_entrycount   int   — max shortterm rows before count-pressure aging
+      memory_age_count_timer  int   — minutes between count-pressure checks (-1 = disabled)
+      memory_age_trigger_minutes int — age threshold in minutes for staleness aging
+      memory_age_minutes_timer   int — minutes between staleness checks (-1 = disabled)
+    """
+    cfg = _mem_plugin_cfg()
+    return {
+        "auto_memory_age":          cfg.get("auto_memory_age",          True),
+        "memory_age_entrycount":    int(cfg.get("memory_age_entrycount",    50)),
+        "memory_age_count_timer":   int(cfg.get("memory_age_count_timer",   60)),
+        "memory_age_trigger_minutes": int(cfg.get("memory_age_trigger_minutes", 2880)),
+        "memory_age_minutes_timer": int(cfg.get("memory_age_minutes_timer", 360)),
+    }
+
 
 def _fuzzy_dedup_threshold() -> float | None:
     """
     Return fuzzy dedup threshold (0.0–1.0), or None if feature is disabled.
     Reads plugins-enabled.json each call so live config changes take effect
-    without restart (same pattern as _memory_feature in agents.py).
+    without restart.
     Default threshold: 0.78
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins-enabled.json")
-    try:
-        with open(path) as f:
-            mem_cfg = json.load(f).get("plugin_config", {}).get("memory", {})
-    except Exception:
-        return None
+    mem_cfg = _mem_plugin_cfg()
     if not mem_cfg.get("enabled", True):
         return None
     if not mem_cfg.get("fuzzy_dedup", True):
@@ -243,49 +268,109 @@ async def update_memory(
 
 
 # ---------------------------------------------------------------------------
-# Aging: move old low-importance rows to long-term
+# Aging: move rows from short-term to long-term
+# Two independent modes:
+#   age_by_count   — count-pressure: moves overflow rows (ignores age threshold)
+#   age_by_minutes — staleness: moves rows not accessed in N minutes
 # ---------------------------------------------------------------------------
 
-async def age_to_longterm(older_than_hours: int = 48, max_rows: int = 100) -> int:
-    """
-    Move short-term rows older than N hours to long-term.
-    Returns number of rows moved.
-    """
-    select_sql = (
-        f"SELECT * FROM {_ST} "
-        f"WHERE created_at < NOW() - INTERVAL {older_than_hours} HOUR "
-        f"ORDER BY importance ASC, created_at ASC "
-        f"LIMIT {max_rows}"
-    )
-    try:
-        raw = await execute_sql(select_sql)
-        rows = _parse_table(raw)
-        if not rows:
-            return 0
-
-        moved = 0
-        for row in rows:
-            rid = row.get("id", "")
-            topic = row.get("topic", "").replace("'", "''")
-            content = row.get("content", "").replace("'", "''")
-            imp = row.get("importance", 5)
-            src = row.get("source", "session")
-            sid = row.get("session_id", "").replace("'", "''")
-
-            insert = (
+async def _move_rows_to_longterm(rows: list[dict]) -> int:
+    """Move a list of parsed short-term rows to long-term. Returns count moved."""
+    moved = 0
+    for row in rows:
+        rid = row.get("id", "")
+        if not rid:
+            continue
+        topic   = row.get("topic",      "").replace("'", "''")
+        content = row.get("content",    "").replace("'", "''")
+        imp     = row.get("importance", 5)
+        src     = row.get("source",     "session")
+        sid     = row.get("session_id", "").replace("'", "''")
+        try:
+            await execute_sql(
                 f"INSERT INTO {_LT} "
                 f"(topic, content, importance, source, session_id, shortterm_id) "
                 f"VALUES ('{topic}', '{content}', {imp}, '{src}', '{sid}', {rid})"
             )
-            await execute_sql(insert)
-            await execute_sql(
-                f"DELETE FROM {_ST} WHERE id = {rid}"
-            )
+            await execute_sql(f"DELETE FROM {_ST} WHERE id = {rid}")
             moved += 1
+        except Exception as e:
+            log.warning(f"_move_rows_to_longterm: failed for id={rid}: {e}")
+    return moved
 
+
+async def age_by_count(max_rows: int = 200) -> int:
+    """
+    Count-pressure aging: if short-term row count exceeds memory_age_entrycount,
+    move exactly the overflow rows to long-term.
+    Rows are selected by importance ASC, last_accessed ASC (least important,
+    least recently used first).  Ignores age threshold.
+    Returns number of rows moved.
+    """
+    cfg = _age_cfg()
+    entry_limit = cfg["memory_age_entrycount"]
+    try:
+        count_raw = await execute_sql(f"SELECT COUNT(*) FROM {_ST}")
+        lines = [l.strip() for l in count_raw.strip().splitlines() if l.strip()]
+        current_count = 0
+        for line in lines:
+            if line.isdigit():
+                current_count = int(line)
+                break
+            # handle "COUNT(*)\n123" format
+            parts = line.split()
+            if parts and parts[-1].isdigit():
+                current_count = int(parts[-1])
+                break
+
+        overflow = current_count - entry_limit
+        if overflow <= 0:
+            return 0
+
+        # Move exactly overflow rows, capped by max_rows safety ceiling
+        n_to_move = min(overflow, max_rows)
+        select_sql = (
+            f"SELECT * FROM {_ST} "
+            f"ORDER BY importance ASC, last_accessed ASC "
+            f"LIMIT {n_to_move}"
+        )
+        raw = await execute_sql(select_sql)
+        rows = _parse_table(raw)
+        moved = await _move_rows_to_longterm(rows)
+        if moved:
+            log.info(f"age_by_count: moved {moved} rows (overflow={overflow}, limit={entry_limit})")
         return moved
     except Exception as e:
-        log.error(f"age_to_longterm failed: {e}")
+        log.error(f"age_by_count failed: {e}")
+        return 0
+
+
+async def age_by_minutes(trigger_minutes: int, max_rows: int = 200) -> int:
+    """
+    Staleness aging: move rows whose last_accessed is older than trigger_minutes.
+    Ordered by importance ASC, last_accessed ASC.
+    max_rows is a safety ceiling per pass.
+    Returns number of rows moved.
+    """
+    if trigger_minutes <= 0:
+        return 0
+    try:
+        select_sql = (
+            f"SELECT * FROM {_ST} "
+            f"WHERE last_accessed < NOW() - INTERVAL {int(trigger_minutes)} MINUTE "
+            f"ORDER BY importance ASC, last_accessed ASC "
+            f"LIMIT {int(max_rows)}"
+        )
+        raw = await execute_sql(select_sql)
+        rows = _parse_table(raw)
+        if not rows:
+            return 0
+        moved = await _move_rows_to_longterm(rows)
+        if moved:
+            log.info(f"age_by_minutes: moved {moved} rows (threshold={trigger_minutes}min)")
+        return moved
+    except Exception as e:
+        log.error(f"age_by_minutes failed: {e}")
         return 0
 
 
@@ -318,6 +403,21 @@ async def load_topic_list() -> list[str]:
         return []
 
 
+async def _update_last_accessed(row_ids: list) -> None:
+    """Fire-and-forget: update last_accessed for a list of shortterm row IDs."""
+    if not row_ids:
+        return
+    ids_str = ", ".join(str(rid) for rid in row_ids if str(rid).isdigit())
+    if not ids_str:
+        return
+    try:
+        await execute_sql(
+            f"UPDATE {_ST} SET last_accessed = NOW() WHERE id IN ({ids_str})"
+        )
+    except Exception as e:
+        log.debug(f"_update_last_accessed failed: {e}")
+
+
 async def load_context_block(min_importance: int = 3) -> str:
     """
     Return a formatted string of short-term memories for prompt injection.
@@ -326,11 +426,17 @@ async def load_context_block(min_importance: int = 3) -> str:
     Includes the full list of known topics so the model can reuse existing
     categories rather than inventing new ones each turn.
     Returns empty string if no memories and no topics.
+    Updates last_accessed for all returned rows (background task, no await).
     """
     rows, topics = await asyncio.gather(
         load_short_term(limit=10000, min_importance=min_importance),
         load_topic_list(),
     )
+
+    # Update last_accessed for all injected rows (fire-and-forget)
+    row_ids = [row.get("id", "") for row in rows if row.get("id", "")]
+    if row_ids:
+        asyncio.create_task(_update_last_accessed(row_ids))
 
     if not rows and not topics:
         return ""
