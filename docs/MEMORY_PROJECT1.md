@@ -16,13 +16,14 @@ Every request
         │
         ▼
 auto_enrich_context()
-  ├── injects ## Active Memory block (short-term rows, importance ≥ 3)
-  └── injects Known topics list (DISTINCT topics from both memory tables)
+  ├── embeds last 3 conversation turns → Qdrant semantic search (top-K relevant rows)
+  ├── always injects rows with importance ≥ 8 (regardless of semantic score)
+  └── injects ## Active Memory block into system message
         │
         ▼
 Grok reasons and responds
-  ├── Path A: issues memory_save tool call directly → DB write
-  └── Path B: narrates memory_save() in text → post-response scanner saves to DB
+  ├── Path A: issues memory_save tool call directly → DB write + Qdrant upsert
+  └── Path B: narrates memory_save() in text → post-response scanner → DB write + Qdrant upsert
 
 Session ends (!reset)
         │
@@ -30,16 +31,71 @@ Session ends (!reset)
 [summarizer-anthropic] ──extracts──► JSON facts (topic, content, importance)
         │
         ▼
-samaritan_memory_shortterm  ◄── auto-injected into every request (≤400 tokens)
+samaritan_memory_shortterm  ◄── MySQL source of truth; also indexed in Qdrant (tier="short")
         │
         │  after 48h (low-importance rows)
         ▼
-samaritan_memory_longterm   ◄── on-demand recall via tool call
+samaritan_memory_longterm   ◄── on-demand recall via tool call; Qdrant tier updated to "long"
         │
         │  future
         ▼
 Google Drive archive        ◄── bulk cold storage (not yet built)
 ```
+
+---
+
+## Dual Database Architecture
+
+The memory system uses two databases with complementary roles. Neither can replace the other.
+
+### Why two databases?
+
+| Need | MySQL handles it | Qdrant handles it |
+|---|---|---|
+| Store memory content permanently | ✅ source of truth | stores payload copy (secondary) |
+| Structured queries (importance ≥ N, age > X hours) | ✅ SQL WHERE clauses | not designed for this |
+| Deduplication (topic+content exact match) | ✅ SELECT WHERE | not designed for this |
+| Aging (move rows between tiers) | ✅ DELETE/INSERT | tier payload updated as side-effect |
+| Session summarization (read conversation → extract facts) | ✅ reads from here | not involved |
+| `!reset` summarize-before-clear | ✅ | not involved |
+| **Semantic similarity search** | not possible without extension | ✅ vector ANN search |
+| **Context-aware retrieval** (what's relevant *right now*?) | not possible | ✅ |
+| **`last_accessed` selective update** (only matched rows) | ✅ writes on demand | provides the hit list |
+| Recover from Qdrant outage | ✅ fallback: load-all | fails gracefully → fallback |
+
+### How they divide the retrieval problem
+
+**MySQL** answers: *"What rows satisfy these structural criteria?"*
+- Give me all rows with importance ≥ 8
+- Give me rows created more than 48 hours ago
+- Count rows grouped by topic
+
+**Qdrant** answers: *"What rows are semantically close to this conversation?"*
+- The last 3 conversation turns are embedded to a 768-dim vector
+- Qdrant returns the top-K rows whose stored vectors are nearest (cosine similarity)
+- No SQL knowledge of topics, importance, or content wording needed
+
+Every turn combines both: Qdrant finds what's relevant, MySQL's `min_importance_always` threshold guarantees critical rows are never filtered out.
+
+### Consistency model
+
+MySQL is always written first. Qdrant is updated as a fire-and-forget async side-effect. This means:
+
+- **Qdrant can be behind** by one embed round-trip (~50ms) — acceptable for retrieval
+- **Qdrant can be missing rows** if the embed server was down during a save — detected by the drift indicator in `!memstats` (MySQL ST+LT count vs Qdrant points_count); fix with `backfill()`
+- **Qdrant orphans** are possible if a MySQL row is manually deleted without calling `vec.delete_memory(row_id)` — currently harmless (search returns the orphan's id but MySQL lookup finds nothing)
+- **Qdrant outage** degrades gracefully: `search_memories()` returns `[]`, `load_context_block()` falls back to loading all rows above `min_importance`
+
+### Before vs. after Qdrant
+
+| Aspect | Before (MySQL only) | After (MySQL + Qdrant) |
+|---|---|---|
+| Retrieval strategy | Load top-15 by importance, every turn | Embed query → ANN search → top-K relevant rows |
+| Rows injected | Fixed 15 rows, same set every turn | Variable — only semantically close rows + always-inject |
+| `last_accessed` | Updated on all 15 rows every turn (meaningless) | Updated only on rows Qdrant returned (meaningful staleness signal) |
+| Topic variance | `work schedule` ≠ `Lee's hours` ≠ `schedule` | All cluster near each other in vector space |
+| Off-topic injection | Schedule rows injected during coding discussion | Schedule rows below min_score threshold — not injected |
+| Token cost | Fixed ~300–500 tokens regardless | ~50–400 tokens proportional to matched set size |
 
 ---
 
@@ -51,10 +107,23 @@ Google Drive archive        ◄── bulk cold storage (not yet built)
 |---|---|---|
 | Python 3.11+ | Runtime | System |
 | agent-mcp | Agent server framework | `git clone` + `pip install -r requirements.txt` |
-| MySQL / MariaDB | Short-term and long-term memory storage | System |
+| MySQL / MariaDB | Short-term and long-term memory storage (source of truth) | System |
+| Qdrant | Vector search index for semantic memory retrieval | Binary or Docker |
+| `qdrant-client>=1.7` | Qdrant Python client | `pip install qdrant-client` |
+| `httpx>=0.24` | Async HTTP for embedding endpoint calls | `pip install httpx` |
+| nomic-embed-text (GGUF) | Embedding model — 768-dim vectors, 84MB | llama.cpp server |
 | `aiomysql` | Async MySQL driver | In `requirements.txt` |
 | `langchain-openai` | LLM dispatch (OpenAI-compatible) | In `requirements.txt` |
 | `langchain-google-genai` | LLM dispatch (Gemini) | In `requirements.txt` |
+
+### Infrastructure (nuc11 — 192.168.10.101)
+
+| Service | Port | Purpose |
+|---|---|---|
+| Qdrant | 6333 | Vector search — collection `samaritan_memory` |
+| llama.cpp (nomic-embed-text) | 8000 | Embedding endpoint — `/v1/embeddings` |
+
+Firewall rules required: allow TCP 6333 and 8000 inbound from agent-mcp host.
 
 ### API Keys Required
 
@@ -70,12 +139,16 @@ Gemini (`GEMINI_API_KEY`) is optional — `summarizer-gemini` is a fallback summ
 
 | File | Role |
 |---|---|
-| `memory.py` | Core memory module — all read/write/age/summarize logic; `_parse_table()` fixed for pipe-separated output |
+| `memory.py` | Core memory module — all read/write/age/summarize logic; `_parse_table()` fixed for pipe-separated output; `load_context_block()` updated for semantic retrieval via Qdrant |
 | `database.py` | Added `execute_insert()` — returns `cursor.lastrowid` in same connection (fixes LAST_INSERT_ID race) |
-| `agents.py` | `auto_enrich_context()` injects short-term block; loop guard fixed (resolves tool_calls before HumanMessage injection); threshold 2→3 |
+| `agents.py` | `auto_enrich_context()` builds semantic query from last 3 turns + calls Qdrant; loop guard fixed; threshold 2→3 |
 | `routes.py` | `cmd_reset()` triggers summarize-before-clear |
 | `tools.py` | Memory tools registered in both `CORE_LC_TOOLS` and `core_executors` (previously only in CORE_LC_TOOLS); `memory` toolset added |
-| `llm-models.json` | `samaritan-reasoning`: `memory` toolset added, temp 0.7→0.2, top_p 0.9→0.7; `samaritan-execution` unchanged |
+| `config.py` | `load_llm_registry()` whitelist expanded to include `memory_scan` and `max_tokens` (previously stripped silently) |
+| `plugin_memory_vector_qdrant.py` | **New** — infrastructure plugin: Qdrant + nomic-embed-text; exposes `get_vector_api()` singleton; no LangChain tools |
+| `plugin-manifest.json` | Registered `plugin_memory_vector_qdrant` (type=data_tool, priority=50) |
+| `plugins-enabled.json` | Enabled `plugin_memory_vector_qdrant` with qdrant/embed config |
+| `llm-models.json` | `samaritan-reasoning`: switched to `grok-4-1-fast-reasoning`, `memory_scan: true` added, `max_tokens: 4096`; `memory` toolset removed (uses intercept path only) |
 | `llm-tools.json` | `"memory"` toolset added |
 | `db-config.json` | Instance-specific (gitignored): database name + table names; loaded by `memory.py` and `database.py` at startup |
 | `system_prompt/004_reasoning/.system_prompt_memory` | Rewritten: direct tool call instructions + CRITICAL hallucination warning |
@@ -140,34 +213,36 @@ The memory system depends on three models working together. Here is the relevant
 
 ```json
 "samaritan-reasoning": {
-  "model_id": "grok-4-1-fast-non-reasoning",
+  "model_id": "grok-4-1-fast-reasoning",
   "type": "OPENAI",
   "host": "https://api.x.ai/v1",
   "env_key": "XAI_API_KEY",
   "max_context": 5000,
-  "llm_tools": ["get_system_info", "llm_call", "llm_list", "search_tavily", "search_xai", "memory"],
+  "llm_tools": ["get_system_info", "llm_call", "llm_list", "search_tavily", "search_xai", "extract"],
   "system_prompt_folder": "system_prompt/004_reasoning",
-  "temperature": 0.2,
-  "top_p": 0.7,
-  "token_selection_setting": "custom"
+  "temperature": 0.6,
+  "top_p": 0.9,
+  "max_tokens": 4096,
+  "token_selection_setting": "custom",
+  "memory_scan": true
 }
 ```
 
 | Parameter | Value | Why |
 |---|---|---|
-| `model_id` | `grok-4-1-fast-non-reasoning` | Grok without chain-of-thought overhead; better for chat turns |
-| `llm_tools` | minimal set + `memory` | Memory tools added so Grok can call them directly if it issues a proper tool call |
-| `temperature` | `0.2` | Lowered from 0.7 to encourage tool call generation over narration |
-| `top_p` | `0.7` | Tightened from 0.9; reduces divergent token selection during tool decisions |
-| `token_selection_setting` | `"custom"` | Applies the temperature/top_p above (vs. `"default"` which ignores them) |
-| `max_context` | `5000` | Short-term memory injection + conversation fits comfortably |
+| `model_id` | `grok-4-1-fast-reasoning` | Grok with internal chain-of-thought; better judgment for memory saves and delegation decisions |
+| `llm_tools` | minimal set — no `memory` toolset | Memory saves handled via intercept path (post-response scan), not direct tool calls |
+| `memory_scan` | `true` | Enables `_scan_and_save_memories()` post-response scanner; Grok writes `memory_save(...)` in text and it is intercepted by agents.py |
+| `temperature` | `0.6` | Reasoning model ignores this at the API level; set for documentation purposes |
+| `top_p` | `0.9` | Same — reasoning model ignores it |
+| `max_tokens` | `4096` | Caps reasoning output length; prevents runaway chain-of-thought token spend |
+| `token_selection_setting` | `"custom"` | Applies temp/top_p/max_tokens |
+| `max_context` | `5000` | Message count ceiling; effective window is `min(5000, agent_max_ctx=200)` = 200 messages |
 | `system_prompt_folder` | `004_reasoning` | Loads the memory-aware Samaritan prompt tree |
 
-> **Grok tool-calling caveat:** `grok-4-1-fast-non-reasoning` was observed to narrate tool execution
-> (write text claiming memory was saved) instead of issuing an actual tool call, even at temperature=0.2.
-> The `memory` toolset is bound so that *if* Grok does issue a tool call it will succeed. For reliability,
-> explicit memory saves should be delegated to `samaritan-execution` via `llm_call`. The system prompt
-> includes a CRITICAL warning: never claim a save without the tool call appearing in the response.
+> **Memory intercept path:** `grok-4-1-fast-reasoning` writes `memory_save(topic=..., content=..., importance=...)` in its response text rather than issuing a tool call. `_scan_and_save_memories()` in `agents.py` captures this via regex and writes to DB silently. No `memory` toolset needed on the reasoning model.
+
+> **`config.py` whitelist:** `load_llm_registry()` must include `memory_scan` and `max_tokens` in its explicit field whitelist or both are silently dropped from the loaded registry, disabling the intercept path entirely.
 
 #### `samaritan-execution` — The Obedient Executor (gpt-4o-mini)
 
@@ -295,44 +370,50 @@ dispatch_llm() → agentic_lc()
         │
         ▼
 auto_enrich_context()   [feature: context_injection]
-  ├── load_short_term(limit=15, min_importance=3)
-  ├── load_topic_list() — DISTINCT topics from both memory tables
-  └── injects "## Active Memory" system message:
-        ├── grouped memory rows by topic  (if any rows)
-        └── Known topics list             (always, if any topics exist)
+  ├── build query = last 3 conversation turns (user+assistant, 300 chars each)
+  ├── IF Qdrant plugin loaded AND query non-empty:
+  │     ├── embed(query) → nomic-embed-text (nuc11:8000) → 768-dim vector
+  │     ├── Qdrant query_points(tier="short", top_k=20, min_score=0.45) → relevant rows
+  │     ├── load_short_term(min_importance=8) → always-injected high-importance rows
+  │     ├── merge: always-rows first, then semantic hits not already included
+  │     └── _update_last_accessed(semantic_hit_ids) — only matched rows updated
+  ├── ELSE (fallback): load_short_term(limit=15, min_importance=3) — all rows
+  └── injects "## Active Memory" system message (grouped by topic)
         │
         ▼
 agentic_lc() — Grok sees enriched context
   ├── Behavior rule 8: scans user message for saveable facts
-  │     └── if found → calls memory_save tool (Path A)
+  │     └── if found → writes memory_save(...) in response text (Path B, not Path A)
   └── Grok responds
         │
         ▼
-Post-response scanner   [feature: post_response_scan]
+Post-response scanner   [feature: post_response_scan + model.memory_scan]
   └── regex scan of final text for memory_save(topic=...) syntax (Path B)
-        └── if matched → _memory_save_exec() → DB write (dedup checked)
+        └── if matched → _memory_save_exec() → save_memory() → DB write + Qdrant upsert
 ```
 
-Token cost of injection: **~200–400 tokens** for 15 rows + topic list, regardless of how many sessions have accumulated in storage.
+Token cost of injection: **~200–400 tokens** for the semantically matched rows, regardless of total rows in storage. High-importance rows always injected even if not semantically close to current topic.
 
 ### Save Path A: Direct Tool Call
 
-Grok or samaritan-execution issues a `memory_save` tool call in the normal agentic loop:
+samaritan-execution (gpt-4o-mini) issues a `memory_save` tool call in the normal agentic loop:
 
 ```
-Grok/gpt-4o-mini turn
+gpt-4o-mini turn
   └── memory_save(topic="X", content="Y", importance=8)   ← tool call
             │
             ▼
       execute_tool() → _memory_save_exec() in tools.py
         └── save_memory() in memory.py
               ├── dedup check (shortterm + longterm)
-              └── execute_insert() → cursor.lastrowid → DB row
+              ├── execute_insert() → cursor.lastrowid → DB row
+              └── asyncio.create_task(vec.upsert_memory(row_id, ...))  ← fire-and-forget
+                    └── embed(content) → Qdrant upsert(id=row_id, tier="short")
 ```
 
-### Save Path B: Post-Response Scanner
+### Save Path B: Post-Response Scanner (Primary path for samaritan-reasoning)
 
-For models that narrate instead of calling tools (observed with Grok), the scanner catches `memory_save(...)` text in the final response:
+Grok writes `memory_save(...)` in response text; the scanner intercepts and saves silently:
 
 ```
 Grok final response text:
@@ -341,13 +422,14 @@ Grok final response text:
         ▼
 _scan_and_save_memories()   [agents.py, fires after response streams]
   ├── Pass 1: regex match on memory_save(topic=..., content=...) syntax
+  │           (backreference pattern handles apostrophes in content)
   └── Pass 2: JSON-blob form fallback (if pass 1 finds nothing)
         │
         ▼
-  _memory_save_exec() → save_memory() → DB (same dedup + insert path as Path A)
+  _memory_save_exec() → save_memory() → DB + Qdrant (same path as Path A)
 ```
 
-Activated per-model via `"memory_scan": true` in `llm-models.json`. Currently set on `samaritan-reasoning` only.
+Activated per-model via `"memory_scan": true` in `llm-models.json`. Currently set on `samaritan-reasoning` only. **Both** `post_response_scan` (global) and `memory_scan` (per-model) must be `true` for this path to fire.
 
 ### Save Path C: Delegation Flow (Grok → gpt-4o-mini)
 
@@ -424,7 +506,8 @@ routes.py session init block
         │   ORDER BY importance ASC (lowest first)
         ├── for each row:
         │     ├── INSERT INTO longterm (copying all fields + shortterm_id)
-        │     └── DELETE FROM shortterm WHERE id = row.id
+        │     ├── DELETE FROM shortterm WHERE id = row.id
+        │     └── asyncio.create_task(vec.update_tier(row_id, "long"))  ← Qdrant sync
         └── returns count of rows moved (logged only)
 ```
 
@@ -597,7 +680,8 @@ rows = await load_short_term(limit=20, min_importance=1)
 moved = await age_to_longterm(older_than_hours=48, max_rows=100)
 
 # Get formatted string ready to inject into a system message
-block = await load_context_block(limit=15, min_importance=3)
+# query: recent conversation text used for semantic search (empty = fallback to load-all)
+block = await load_context_block(min_importance=3, query="current conversation excerpt")
 
 # Summarize a conversation history and save extracted facts to short-term
 status = await summarize_and_save(session_id, history, model_key="summarizer-anthropic")
@@ -642,9 +726,75 @@ memory_age(
 
 ---
 
+## Vector Memory Plugin (`plugin_memory_vector_qdrant.py`)
+
+An infrastructure plugin with no LangChain tools. Loaded by `plugin_loader.py`; the module-level singleton is accessed by `memory.py` and `agents.py` via `get_vector_api()`.
+
+### Configuration (`plugins-enabled.json`)
+
+```json
+"plugin_memory_vector_qdrant": {
+  "enabled": true,
+  "qdrant_host": "192.168.10.101",
+  "qdrant_port": 6333,
+  "embed_url": "http://192.168.10.101:8000/v1/embeddings",
+  "embed_model": "nomic-embed-text",
+  "collection": "samaritan_memory",
+  "vector_dims": 768,
+  "top_k": 20,
+  "min_score": 0.45,
+  "min_importance_always": 8
+}
+```
+
+| Parameter | Effect |
+|---|---|
+| `top_k` | Max rows returned per semantic search |
+| `min_score` | Cosine similarity floor (0–1); lower = more permissive |
+| `min_importance_always` | Rows at or above this importance are always injected regardless of semantic score |
+
+### Public API
+
+```python
+from plugin_memory_vector_qdrant import get_vector_api
+
+vec = get_vector_api()   # None if plugin not loaded/enabled
+
+await vec.upsert_memory(row_id, topic, content, importance, tier="short")
+await vec.search_memories(query_text, top_k, min_score, tier="short") -> list[dict]
+await vec.delete_memory(row_id)
+await vec.update_tier(row_id, new_tier)
+await vec.backfill(rows, tier="short") -> int   # embed + upsert existing MySQL rows
+```
+
+### MySQL ↔ Qdrant consistency
+
+| Operation | MySQL | Qdrant |
+|---|---|---|
+| `save_memory()` | INSERT → row_id | `upsert_memory(row_id)` — fire-and-forget |
+| `age_to_longterm()` | move row | `update_tier(row_id, "long")` — fire-and-forget |
+| Manual row delete | DELETE | `delete_memory(row_id)` — **not auto-called yet** |
+| Qdrant outage | not affected | `search_memories` returns `[]`; fallback to load-all |
+
+### Qdrant API note
+
+qdrant-client 1.7+ renamed `.search()` to `.query_points()`. The result is accessed as `response.points` (not a direct list). Using the old `.search()` method raises `AttributeError`.
+
+### Backfill
+
+To embed and index existing MySQL rows that predate the plugin:
+
+```python
+rows = await load_short_term(limit=10000, min_importance=1)
+vec = get_vector_api()
+count = await vec.backfill(rows, tier="short")
+```
+
+---
+
 ## Bugs Discovered and Fixed (2026-03-01)
 
-All three bugs were independently silent — no exceptions were raised; the system appeared functional while saving nothing.
+All bugs were independently silent — no exceptions were raised; the system appeared functional while saving nothing.
 
 ### Bug 1: Memory tools missing from `get_tool_executor()` — main culprit
 
@@ -719,6 +869,30 @@ async def execute_insert(sql: str) -> int:
     return await asyncio.to_thread(_run_insert, sql)
 ```
 
+### Bug 4: `load_llm_registry()` whitelist silently drops `memory_scan` and `max_tokens`
+
+**File:** `config.py` — `load_llm_registry()`
+
+`load_llm_registry()` built the in-memory model registry using an explicit field whitelist (dict with hardcoded keys). Fields not in the whitelist were silently dropped — no warning, no error.
+
+`memory_scan` was not in the whitelist → `_memory_scan` was always `False` in `dispatch_llm()` → `_scan_and_save_memories()` was never called → Path B saves never fired, for the entire lifetime of the feature.
+
+`max_tokens` was also dropped, so Grok's chain-of-thought was uncapped.
+
+**Fix:** Added both fields to the registry dict in `load_llm_registry()`:
+
+```python
+registry[name] = {
+    ...
+    "memory_scan": config.get("memory_scan", False),
+    "max_tokens":  config.get("max_tokens"),
+}
+```
+
+**Root cause pattern:** Explicit whitelist registries silently discard new model config fields. Any new field added to `llm-models.json` must also be added to the whitelist or it will never reach the runtime.
+
+---
+
 ### Loop guard: OpenAI 400 on HumanMessage injection
 
 **File:** `agents.py` — `agentic_lc()`
@@ -755,4 +929,5 @@ Priority = functionality gain ÷ implementation complexity. P1 = high value, low
 | P2 | Per-topic retention policies | Not built | Med | JSON config mapping topic patterns → `age_after_hours` overrides. Requires modifying `age_to_longterm()` to apply per-row policy instead of a single threshold. High value for operational use but needs schema for the config. |
 | P3 | Google Drive archival | Not built | Med | `memory_age` extended to optionally export aged rows to a Drive file before deletion. Google Drive plugin already exists — mainly plumbing. Low urgency since longterm table handles this well enough. |
 | P3 | Drive → short-term reload | Not built | Med | Inverse of archival: parse Drive export back into shortterm. Depends on archival being built first; blocked on P3 above. |
-| P4 | Semantic/vector search | Not built | High | Requires embedding model, vector store (pgvector or Chroma), and rewrite of `memory_recall`. Significant infra lift. Only matters once memory grows large enough that `LIKE '%topic%'` misses things. |
+| P4 | Semantic/vector search | **Built (2026-03-01)** | High | `plugin_memory_vector_qdrant.py` — Qdrant + nomic-embed-text on nuc11. Replaces load-all with top-K semantic retrieval per turn. Also solves `last_accessed` staleness: only semantically matched rows get timestamp updated. |
+| P4 | Stale Qdrant orphan cleanup | Not built | Low | If a MySQL row is deleted (e.g. manual dedup), the Qdrant point becomes a stale orphan. Currently harmless (hit returns a non-existent row_id which MySQL ignores). Fix: call `vec.delete_memory(row_id)` alongside any MySQL DELETE. |
