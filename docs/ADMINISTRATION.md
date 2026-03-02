@@ -156,38 +156,161 @@ Limit keys: `max_at_llm_depth`, `max_agent_call_depth`, `max_tool_iterations`,
 
 Tool rate types: `llm_call`, `search`, `extract`, `drive`, `db`, `system`, `tmux`
 
-### Memory System Commands
+### Memory System
 
-The tiered memory system is optional and can be toggled per-feature without restarting the server configuration. Changes take effect after a server restart.
+The tiered memory system persists facts across sessions using MySQL. It is optional and
+every feature is independently togglable.
 
-```bash
-python agentctl.py memory status                      # show all feature states
-python agentctl.py memory enable                      # enable the memory system
-python agentctl.py memory disable                     # disable everything
-python agentctl.py memory enable <feature>            # enable one feature
-python agentctl.py memory disable <feature>           # disable one feature
+#### Prerequisites
+
+- `plugin_database_mysql` must be enabled and connected.
+- Three tables must exist in the database. Create them once:
+
+```sql
+CREATE TABLE IF NOT EXISTS <prefix>memory_shortterm (
+    id         INT AUTO_INCREMENT PRIMARY KEY,
+    topic      VARCHAR(255) NOT NULL,
+    content    TEXT NOT NULL,
+    importance TINYINT DEFAULT 5,
+    source     VARCHAR(50) DEFAULT 'session',
+    session_id VARCHAR(255) DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS <prefix>memory_longterm (
+    id         INT AUTO_INCREMENT PRIMARY KEY,
+    topic      VARCHAR(255) NOT NULL,
+    content    TEXT NOT NULL,
+    importance TINYINT DEFAULT 5,
+    source     VARCHAR(50) DEFAULT 'session',
+    session_id VARCHAR(255) DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS <prefix>chat_summaries (
+    id         INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(255),
+    summary    TEXT,
+    msg_count  INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
-Features: `context_injection`, `reset_summarize`, `post_response_scan`
+Replace `<prefix>` with your instance prefix (set in `db-config.json`).
 
-| Feature | What it controls |
-|---|---|
-| `context_injection` | Short-term memories + Known topics injected into every request |
-| `reset_summarize` | Session summarized to memory automatically on `!reset` |
-| `post_response_scan` | Regex scan of final response text for narrated `memory_save()` calls |
+#### `db-config.json` (gitignored, instance-specific)
 
-Configuration is stored in `plugins-enabled.json` under `plugin_config.memory`. Manual JSON equivalent:
+Stores the table name prefix and fully-qualified table names for this deployment.
+If absent, bare names `memory_shortterm`, `memory_longterm`, `chat_summaries` are used.
+
+```json
+{
+  "managed_table_prefix": "myinstance_",
+  "tables": {
+    "memory_shortterm": "myinstance_memory_shortterm",
+    "memory_longterm":  "myinstance_memory_longterm",
+    "chat_summaries":   "myinstance_chat_summaries"
+  }
+}
+```
+
+#### `agentctl.py` memory commands
+
+```bash
+python agentctl.py memory status                             # show all feature states + settings
+python agentctl.py memory enable                             # enable master switch
+python agentctl.py memory disable                            # disable everything
+python agentctl.py memory enable <feature>                   # enable one feature
+python agentctl.py memory disable <feature>                  # disable one feature
+python agentctl.py memory set fuzzy_dedup_threshold <0-1>   # adjust similarity threshold
+python agentctl.py memory set summarizer_model <model_key>  # change summarizer model
+```
+
+#### Feature flags
+
+All features default to `true`. Configuration lives in `plugins-enabled.json` under `plugin_config.memory`:
 
 ```json
 "memory": {
   "enabled": true,
   "context_injection": true,
   "reset_summarize": true,
-  "post_response_scan": true
+  "post_response_scan": true,
+  "fuzzy_dedup": true,
+  "fuzzy_dedup_threshold": 0.78,
+  "summarizer_model": "summarizer-anthropic"
 }
 ```
 
-> For the full memory system design, database setup, save paths, topic lifecycle, and bug history, see [MEMORY_PROJECT1.md](MEMORY_PROJECT1.md).
+| Feature | What it controls |
+|---|---|
+| `context_injection` | Short-term memories injected into every request as `## Active Memory` block |
+| `reset_summarize` | Conversation summarized to memory automatically on `!reset` |
+| `post_response_scan` | Regex scan of final response text for `memory_save()` calls the LLM narrated instead of calling as a tool |
+| `fuzzy_dedup` | Block near-duplicate saves using string similarity (SequenceMatcher) |
+
+#### Settings
+
+| Key | Default | Restart required? | Description |
+|---|---|---|---|
+| `fuzzy_dedup_threshold` | `0.78` | No | Similarity ratio (0.0–1.0) above which a new save is treated as a duplicate of an existing row in the same topic. Read fresh each call. |
+| `summarizer_model` | `"summarizer-anthropic"` | No | Model key used by `summarize_and_save()` on `!reset`. Must be a valid key in `llm-models.json`. |
+
+**Choosing a threshold:** SequenceMatcher ratio on real paraphrased duplicates typically
+lands at 0.78–0.88. Genuinely distinct facts on the same topic land below 0.65. The
+default of 0.78 catches paraphrase duplicates while allowing distinct new facts. Lower
+the threshold (e.g. 0.72) for more aggressive dedup; raise it (e.g. 0.90) to only
+block near-identical strings.
+
+#### How deduplication works
+
+`save_memory()` runs two passes before inserting:
+
+1. **Exact match** — blocks if identical `topic + content` exists in either tier (zero DB cost after index scan).
+2. **Fuzzy match** — if `fuzzy_dedup` is enabled, loads all existing `content` values for the same topic from both tiers (single `UNION ALL` query) and checks SequenceMatcher ratio against each. Skips insert if any match ≥ threshold.
+
+On any DB or config error in pass 2, the save proceeds rather than blocking.
+
+#### Memory tiers
+
+| Tier | Table | Purpose | Loaded how |
+|---|---|---|---|
+| Short-term | `*_memory_shortterm` | Hot facts, injected every request | Automatically |
+| Long-term | `*_memory_longterm` | Aged-out facts | On-demand via `memory_recall(tier="long")` |
+| Archive | Google Drive | Bulk summaries | Future / manual |
+
+Facts age from short-term to long-term automatically on session start (rows older than 48h, lowest importance aged first).
+
+#### Runtime memory commands (`!memory`)
+
+```
+!memory                                   list all short-term memories
+!memory list [short|long]                 list by tier
+!memory show <id> [short|long]            show one row in full
+!memory update <id> [tier=short] [importance=N] [content=text] [topic=label]
+```
+
+#### LLM memory tools
+
+Models with the `memory` toolset have access to:
+
+| Tool | Description |
+|---|---|
+| `memory_save` | Save a fact to short-term memory |
+| `memory_recall` | Search short-term or long-term by topic keyword (also matches content) |
+| `memory_update` | Update importance, content, or topic on an existing row by id |
+| `memory_age` | Manually trigger aging of stale short-term rows to long-term |
+
+Add the `memory` toolset to a model via:
+```
+!llm_tools add <model> memory
+```
+Or in `llm-models.json`:
+```json
+"llm_tools": ["core", "memory"]
+```
+
+> For the full memory system design, save paths, topic lifecycle, and change history, see [MEMORY_PROJECT1.md](MEMORY_PROJECT1.md).
 
 ---
 
