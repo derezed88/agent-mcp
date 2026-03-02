@@ -408,7 +408,12 @@ async def cmd_plugin_command(client_id: str, cmd: str, args: str):
 async def cmd_get_system_info(client_id: str):
     """Show current date/time and system status."""
     from tools import get_system_info
-    result = await get_system_info()
+    from state import current_client_id
+    token = current_client_id.set(client_id)
+    try:
+        result = await get_system_info()
+    finally:
+        current_client_id.reset(token)
     await push_tok(client_id, str(result))
     await conditional_push_done(client_id)
 
@@ -565,15 +570,16 @@ async def cmd_reset(client_id: str, session: dict):
     history_len = len(history)
 
     # Summarize departing history into short-term memory before clearing
-    from agents import _memory_feature
+    from agents import _memory_feature, _memory_cfg
     if history_len >= 4 and _memory_feature("reset_summarize"):
         try:
             from memory import summarize_and_save
+            summarizer_model = _memory_cfg().get("summarizer_model", "summarizer-anthropic")
             await push_tok(client_id, "[memory] Summarizing session to memory...\n")
             status = await summarize_and_save(
                 session_id=client_id,
                 history=history,
-                model_key="summarizer-anthropic",
+                model_key=summarizer_model,
             )
             await push_tok(client_id, f"[memory] {status}\n")
         except Exception as _mem_err:
@@ -1190,7 +1196,7 @@ async def endpoint_health(request: Request) -> JSONResponse:
 
 async def endpoint_list_sessions(request: Request) -> JSONResponse:
     """List all active sessions with metadata."""
-    from state import sessions, sse_queues, get_or_create_shorthand_id
+    from state import sessions, sse_queues, get_or_create_shorthand_id, estimate_history_size
 
     client_id_filter = request.query_params.get("client_id")
 
@@ -1198,11 +1204,19 @@ async def endpoint_list_sessions(request: Request) -> JSONResponse:
     for cid, data in sessions.items():
         if client_id_filter and cid != client_id_filter:
             continue
+        history = data.get("history", [])
+        size = estimate_history_size(history)
         session_list.append({
             "client_id": cid,
             "shorthand_id": get_or_create_shorthand_id(cid),
             "model": data.get("model", "unknown"),
-            "history_length": len(data.get("history", [])),
+            "history_length": len(history),
+            "history_chars": size["char_count"],
+            "history_token_est": size["token_est"],
+            "tokens_in_total": data.get("tokens_in_total", 0),
+            "tokens_out_total": data.get("tokens_out_total", 0),
+            "tokens_in_last": data.get("tokens_in_last"),
+            "tokens_out_last": data.get("tokens_out_last"),
             "peer_ip": data.get("peer_ip"),
         })
 

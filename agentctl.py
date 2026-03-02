@@ -1072,6 +1072,7 @@ class PluginManager:
             "post_response_scan": True,
             "fuzzy_dedup": True,
             "fuzzy_dedup_threshold": 0.78,
+            "summarizer_model": "summarizer-anthropic",
         })
 
         def _bool_str(val: bool) -> str:
@@ -1087,8 +1088,9 @@ class PluginManager:
                 note = "" if active else f"  {Colors.GRAY}(inactive — {'master off' if not master else 'feature off'}){Colors.RESET}"
                 extra = ""
                 if feat == "fuzzy_dedup" and val:
-                    extra = f"  (threshold={mem_cfg.get('fuzzy_dedup_threshold', 0.85):.2f})"
+                    extra = f"  (threshold={mem_cfg.get('fuzzy_dedup_threshold', 0.78):.2f})"
                 print(f"  {feat:<24}: {_bool_str(val)}{note}{extra}")
+            print(f"  {'summarizer_model':<24}: {mem_cfg.get('summarizer_model', 'summarizer-anthropic')}")
 
         elif action in ("enable", "disable"):
             new_val = (action == "enable")
@@ -1108,7 +1110,6 @@ class PluginManager:
             print(f"  Restart the server for changes to take effect.")
 
         elif action == "set":
-            # memory set fuzzy_dedup_threshold 0.80
             key = feature  # reuse 'feature' positional arg as key name
             value = args[2] if len(args) > 2 else ""
             if key == "fuzzy_dedup_threshold":
@@ -1122,8 +1123,21 @@ class PluginManager:
                     print(f"  Takes effect immediately (no restart needed).")
                 except (ValueError, TypeError):
                     print(f"{Colors.RED}✗ Invalid threshold '{value}'. Must be a float between 0.0 and 1.0.{Colors.RESET}")
+            elif key == "summarizer_model":
+                if not value:
+                    print(f"{Colors.RED}✗ Provide a model key, e.g.: memory set summarizer_model nuc11Localtokens{Colors.RESET}")
+                    return
+                from routes import LLM_REGISTRY
+                if value not in LLM_REGISTRY:
+                    available = ", ".join(LLM_REGISTRY.keys())
+                    print(f"{Colors.RED}✗ Unknown model '{value}'.{Colors.RESET}\n  Available: {available}")
+                    return
+                mem_cfg["summarizer_model"] = value
+                self._save_plugins_enabled()
+                print(f"{Colors.GREEN}✓{Colors.RESET} summarizer_model set to '{value}' (persisted)")
+                print(f"  Takes effect on next !reset.")
             else:
-                print(f"{Colors.RED}✗ Unknown key '{key}'. Currently settable: fuzzy_dedup_threshold{Colors.RESET}")
+                print(f"{Colors.RED}✗ Unknown key '{key}'. Settable: fuzzy_dedup_threshold, summarizer_model{Colors.RESET}")
 
         else:
             print(f"{Colors.RED}✗ Unknown action '{action}'. "
@@ -1161,7 +1175,8 @@ class PluginManager:
         print("  memory enable [feature]                   - Enable memory (or a specific feature)")
         print("  memory disable [feature]                  - Disable memory (or a specific feature)")
         print(f"    features: context_injection, reset_summarize, post_response_scan, fuzzy_dedup")
-        print("  memory set fuzzy_dedup_threshold <0.0-1.0> - Set similarity threshold (default 0.85)")
+        print("  memory set fuzzy_dedup_threshold <0.0-1.0> - Set similarity threshold (default 0.78)")
+        print("  memory set summarizer_model <model_key>    - Set model used on !reset summarization")
         print(f"\n{Colors.BOLD}Other:{Colors.RESET}")
         print("  help                              - Show this command list")
         print("  quit                              - Exit plugin manager")

@@ -366,7 +366,7 @@ async def load_context_block(min_importance: int = 3) -> str:
 async def summarize_and_save(
     session_id: str,
     history: list[dict],
-    model_key: str = "summarizer-anthropic",
+    model_key: str,
 ) -> str:
     """
     Call a summarizer LLM on conversation history.
