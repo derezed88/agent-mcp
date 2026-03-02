@@ -273,3 +273,76 @@ class QdrantVectorPlugin(BasePlugin):
 
     def cfg(self) -> dict:
         return dict(self._cfg)
+
+    async def get_stats(self) -> dict:
+        """
+        Collect health/count stats from Qdrant and the embedding server.
+        Returns a dict with keys: qdrant, embed.
+        All fields are strings or ints; errors are reported as strings.
+        """
+        stats: dict = {"qdrant": {}, "embed": {}}
+
+        # ── Qdrant collection info ────────────────────────────────────────
+        try:
+            info = self._qc.get_collection(self._cfg["collection"])
+            stats["qdrant"] = {
+                "status":                str(info.status.value if hasattr(info.status, "value") else info.status),
+                "points_count":          info.points_count or 0,
+                "indexed_vectors_count": info.indexed_vectors_count or 0,
+                "segments_count":        info.segments_count or 0,
+                "optimizer_status":      str(info.optimizer_status.ok if hasattr(info.optimizer_status, "ok") else info.optimizer_status),
+            }
+        except Exception as e:
+            stats["qdrant"]["error"] = str(e)
+
+        # ── Embedding server health + metrics ─────────────────────────────
+        base = self._cfg["embed_url"].rsplit("/v1/", 1)[0]
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                health_resp = await client.get(f"{base}/health")
+                stats["embed"]["health"] = "ok" if health_resp.status_code == 200 else f"HTTP {health_resp.status_code}"
+        except Exception as e:
+            stats["embed"]["health"] = f"unreachable: {e}"
+
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                metrics_resp = await client.get(f"{base}/metrics")
+            if metrics_resp.status_code == 200:
+                raw = metrics_resp.text
+                def _prom_val(name: str) -> str | None:
+                    for line in raw.splitlines():
+                        if line.startswith(name + " ") or line.startswith(name + "{"):
+                            parts = line.rsplit(" ", 1)
+                            return parts[-1].strip() if len(parts) >= 2 else None
+                    return None
+
+                kv_ratio = _prom_val("llamacpp_kv_cache_usage_ratio")
+                kv_tokens = _prom_val("llamacpp_kv_cache_tokens")
+                proc      = _prom_val("llamacpp_requests_processing")
+                deferred  = _prom_val("llamacpp_requests_deferred")
+                tps       = _prom_val("llamacpp_predicted_tokens_seconds")
+                embed_tps = _prom_val("llamacpp_prompt_tokens_seconds")
+
+                if kv_ratio is not None:
+                    try:
+                        stats["embed"]["kv_cache_pct"] = f"{float(kv_ratio)*100:.1f}%"
+                    except ValueError:
+                        pass
+                if kv_tokens is not None:
+                    stats["embed"]["kv_cache_tokens"] = kv_tokens
+                if proc is not None:
+                    stats["embed"]["requests_processing"] = proc
+                if deferred is not None:
+                    stats["embed"]["requests_deferred"] = deferred
+                if embed_tps is not None:
+                    stats["embed"]["embed_tps"] = f"{float(embed_tps):.0f} tok/s"
+                elif tps is not None:
+                    stats["embed"]["embed_tps"] = f"{float(tps):.0f} tok/s"
+            elif metrics_resp.status_code == 501:
+                stats["embed"]["metrics"] = "disabled (start llama.cpp with --metrics)"
+            else:
+                stats["embed"]["metrics"] = f"HTTP {metrics_resp.status_code}"
+        except Exception as e:
+            stats["embed"]["metrics"] = f"unavailable: {e}"
+
+        return stats

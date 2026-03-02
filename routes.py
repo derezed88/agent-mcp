@@ -457,6 +457,60 @@ async def cmd_memstats(client_id: str):
                     lines.append(f"  {row[0]:<30} {row[1]:>3} runs")
             lines.append("")
 
+    # ── Vector index stats ────────────────────────────────────────────────────
+    try:
+        from plugin_memory_vector_qdrant import get_vector_api
+        vec = get_vector_api()
+        if vec:
+            vstats = await vec.get_stats()
+            vcfg   = vec.cfg()
+            qd = vstats.get("qdrant", {})
+            em = vstats.get("embed", {})
+
+            lines.append("**Vector Index (Qdrant)**")
+            if "error" in qd:
+                lines.append(f"  status               : ERROR — {qd['error']}")
+            else:
+                mysql_total = st_count + lt_count
+                qdrant_pts  = qd.get("points_count", "?")
+                drift = ""
+                if isinstance(qdrant_pts, int) and mysql_total > 0:
+                    diff = mysql_total - qdrant_pts
+                    if diff != 0:
+                        drift = f"  !! drift: MySQL={mysql_total} Qdrant={qdrant_pts} (diff={diff:+d})"
+                lines.append(f"  status               : {qd.get('status', '?')}")
+                lines.append(f"  points_count         : {qdrant_pts}  (MySQL ST+LT={mysql_total})")
+                if drift:
+                    lines.append(drift)
+                lines.append(f"  indexed_vectors      : {qd.get('indexed_vectors_count', '?')}")
+                lines.append(f"  segments             : {qd.get('segments_count', '?')}")
+                lines.append(f"  optimizer            : {qd.get('optimizer_status', '?')}")
+                lines.append(f"  collection           : {vcfg.get('collection')}  @{vcfg.get('qdrant_host')}:{vcfg.get('qdrant_port')}")
+                lines.append(f"  top_k / min_score    : {vcfg.get('top_k')} / {vcfg.get('min_score')}")
+                lines.append(f"  always_inject_imp>=  : {vcfg.get('min_importance_always')}")
+            lines.append("")
+
+            lines.append("**Embedding Server (nomic-embed-text)**")
+            lines.append(f"  health               : {em.get('health', '?')}")
+            if "kv_cache_pct" in em:
+                lines.append(f"  kv_cache_usage       : {em['kv_cache_pct']}")
+            if "kv_cache_tokens" in em:
+                lines.append(f"  kv_cache_tokens      : {em['kv_cache_tokens']}")
+            if "embed_tps" in em:
+                lines.append(f"  embed_throughput     : {em['embed_tps']}")
+            if "requests_processing" in em:
+                lines.append(f"  requests_processing  : {em['requests_processing']}")
+            if "requests_deferred" in em:
+                lines.append(f"  requests_deferred    : {em['requests_deferred']}")
+            if "metrics" in em:
+                lines.append(f"  metrics endpoint     : {em['metrics']}")
+            lines.append(f"  url                  : {vcfg.get('embed_url')}")
+            lines.append("")
+        else:
+            lines.append("**Vector Index**: not loaded\n")
+    except Exception as _vec_err:
+        lines.append(f"**Vector Index**: error — {_vec_err}\n")
+
     # ── Config snapshot ───────────────────────────────────────────────────────
     mem_cfg = _mem_plugin_cfg()
     age_cfg = _age_cfg()
