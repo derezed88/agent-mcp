@@ -5,7 +5,7 @@
     "gpd3": {
       "model_id": "gpd3",
       "type": "OPENAI",
-      "host": "https://YOUR_TUNNEL_URL_HERE",
+      "host": "https://pinipjjdtp.a.pinggy.link",
       "env_key": "LLAMA_API_KEY",
       "max_context": 200,
       "enabled": true,
@@ -26,7 +26,7 @@
     "nuc11Localtokens": {
       "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       "type": "OPENAI",
-      "host": "http://YOUR_LOCAL_LLM_HOST:8000/v1",
+      "host": "http://192.168.10.101:8000/v1",
       "env_key": null,
       "max_context": 200,
       "enabled": true,
@@ -44,7 +44,7 @@
     "nuc11Local": {
       "model_id": "Qwen3-8B-Q4_K_M.gguf",
       "type": "OPENAI",
-      "host": "http://YOUR_LOCAL_LLM_HOST:8000/v1",
+      "host": "http://192.168.10.101:8000/v1",
       "env_key": null,
       "max_context": 200,
       "enabled": true,
@@ -294,12 +294,11 @@
         "llm_list",
         "search_tavily",
         "search_xai",
-        "extract",
-        "memory"
+        "extract"
       ],
       "system_prompt_folder": "system_prompt/004_reasoning",
-      "temperature": 0.2,
-      "top_p": 0.7,
+      "temperature": 0.6,
+      "top_p": 0.9,
       "top_k": null,
       "max_tokens": 4096,
       "token_selection_setting": "custom",
