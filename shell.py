@@ -249,6 +249,15 @@ async def resolve_session_id(token: str) -> str | None:
     except ValueError:
         return token
 
+def _fmt_k(n: int) -> str:
+    """Format an integer compactly: 1234 -> '1.2k', 123456 -> '123k', 999 -> '999'."""
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    if n >= 1000:
+        return f"{n/1000:.1f}k"
+    return str(n)
+
+
 async def list_sessions():
     """Fetch and display all sessions from server."""
     try:
@@ -263,11 +272,25 @@ async def list_sessions():
             cid = s["client_id"]
             model = s["model"]
             history = s["history_length"]
+            char_k = s.get("history_chars", 0)
+            tok_est = s.get("history_token_est", 0)
             peer_ip = s.get("peer_ip")
             ip_str = f", ip={peer_ip}" if peer_ip else ""
+            size_str = f" (~{char_k:,} chars, ~{tok_est:,} tok est)"
             await state.append_output(
-                f"  ID [{shorthand}] {cid}: model={model}, history={history} messages{ip_str}{current}"
+                f"  ID [{shorthand}] {cid}: model={model}, history={history} msgs{size_str}{ip_str}{current}"
             )
+            in_total = s.get("tokens_in_total", 0)
+            out_total = s.get("tokens_out_total", 0)
+            in_last = s.get("tokens_in_last")
+            out_last = s.get("tokens_out_last")
+            if in_total == 0 and out_total == 0:
+                await state.append_output("  tokens: no LLM calls yet (or provider doesn't report usage)")
+            else:
+                last_str = f"last: in={_fmt_k(in_last)} out={_fmt_k(out_last or 0)} | " if in_last is not None else ""
+                await state.append_output(
+                    f"  tokens: {last_str}total: in={_fmt_k(in_total)} out={_fmt_k(out_total)}"
+                )
         await state.append_output("")
     except Exception as exc:
         await state.append_output(f"[ERROR] Failed to list sessions: {exc}")
@@ -526,6 +549,9 @@ async def user_input_handler(text: str) -> bool:
             return True
 
         if cmd == "session":
+            ts = datetime.now().strftime("%H:%M:%S")
+            await state.append_output(f"\n[{ts}] You: {stripped}")
+            await state.append_output("")
             if not arg:
                 # List all sessions
                 await list_sessions()

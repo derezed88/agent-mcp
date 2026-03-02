@@ -133,6 +133,7 @@ def _build_lc_llm(model_key: str):
             base_url=cfg.get("host"),
             api_key=cfg.get("key") or "no-key-required",
             streaming=True,
+            stream_usage=True,
             timeout=cfg.get("llm_call_timeout", 60),
         )
         if use_custom:
@@ -648,10 +649,10 @@ def try_force_tool_calls(text: str, valid_tool_names: set[str] | None = None) ->
 
 _MEMORY_SAVE_RE = re.compile(
     r'memory_save\s*\(\s*'
-    r'topic\s*=\s*["\'](?P<topic>[^"\']+)["\']'
-    r'\s*,\s*content\s*=\s*["\'](?P<content>[^"\']+)["\']'
+    r'topic\s*=\s*(?P<tq>["\'])(?P<topic>(?:(?!(?P=tq)).)+)(?P=tq)'
+    r'\s*,\s*content\s*=\s*(?P<cq>["\'])(?P<content>(?:(?!(?P=cq)).)+)(?P=cq)'
     r'(?:\s*,\s*importance\s*=\s*(?P<importance>\d+))?'
-    r'(?:\s*,\s*source\s*=\s*["\'](?P<source>[^"\']+)["\'])?'
+    r'(?:\s*,\s*source\s*=\s*(?P<sq>["\'])(?P<source>(?:(?!(?P=sq)).)+)(?P=sq))?'
     r'[^)]*\)',
     re.DOTALL | re.IGNORECASE,
 )

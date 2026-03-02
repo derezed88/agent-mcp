@@ -33,16 +33,10 @@ async def get_system_info() -> dict:
         sess = sessions[cid]
         history = sess.get("history", [])
         size = estimate_history_size(history)
-        in_total = sess.get("tokens_in_total", 0)
-        out_total = sess.get("tokens_out_total", 0)
         result["session_context"] = {
             "history_messages": len(history),
             "history_chars": size["char_count"],
             "history_token_est": size["token_est"],
-            "llm_tokens_in_total": in_total,
-            "llm_tokens_out_total": out_total,
-            "llm_tokens_in_last": sess.get("tokens_in_last"),
-            "llm_tokens_out_last": sess.get("tokens_out_last"),
         }
     return result
 
@@ -573,7 +567,7 @@ async def _memory_save_exec(topic: str, content: str, importance: int = 5, sourc
         session_id=session_id,
     )
     if row_id == 0:
-        return f"Memory already persisted (duplicate): [{topic}] {content} — no action needed."
+        return f"Memory duplicate skipped (already in memory): [{topic}] {content}"
     return f"Memory saved (id={row_id}): [{topic}] {content} (importance={importance})"
 
 
