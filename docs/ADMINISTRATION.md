@@ -230,11 +230,14 @@ python agentctl.py memory set memory_age_entrycount <n>          # max short-ter
 python agentctl.py memory set memory_age_count_timer <min|-1>    # count-pressure interval (-1=off)
 python agentctl.py memory set memory_age_trigger_minutes <min>   # staleness threshold in minutes
 python agentctl.py memory set memory_age_minutes_timer <min|-1>  # staleness check interval (-1=off)
+python agentctl.py memory test                                    # live toggle test: disable, verify off, re-enable, verify on
 ```
+
+All changes take effect immediately — no server restart required. The server re-reads `plugins-enabled.json` on every request.
 
 #### Feature flags
 
-All features default to `true`. Configuration lives in `plugins-enabled.json` under `plugin_config.memory`:
+All feature flags are live — changes to `plugins-enabled.json` take effect on the next request with no server restart. Configuration lives under `plugin_config.memory`:
 
 ```json
 "memory": {
@@ -243,6 +246,7 @@ All features default to `true`. Configuration lives in `plugins-enabled.json` un
   "reset_summarize": true,
   "post_response_scan": true,
   "fuzzy_dedup": true,
+  "vector_search_qdrant": true,
   "fuzzy_dedup_threshold": 0.78,
   "summarizer_model": "summarizer-anthropic",
   "auto_memory_age": true,
@@ -255,10 +259,12 @@ All features default to `true`. Configuration lives in `plugins-enabled.json` un
 
 | Feature | What it controls |
 |---|---|
+| `enabled` | Master switch — when off, all memory features are suppressed regardless of individual flags |
 | `context_injection` | Short-term memories injected into every request as `## Active Memory` block |
 | `reset_summarize` | Conversation summarized to memory automatically on `!reset` |
 | `post_response_scan` | Regex scan of final response text for `memory_save()` calls the LLM narrated instead of calling as a tool |
 | `fuzzy_dedup` | Block near-duplicate saves using string similarity (SequenceMatcher) |
+| `vector_search_qdrant` | Semantic retrieval via Qdrant + nomic-embed-text. Disable to fall back to keyword-only recall. Named `_qdrant` to leave namespace open for other vector backends. |
 
 #### Settings
 
@@ -313,14 +319,17 @@ Moves all rows whose `last_accessed` is older than `memory_age_trigger_minutes` 
 
 **Disabling a timer:** Set the timer to `-1`. The task loop continues running (no restart needed) but skips the aging pass. The other timer remains active independently.
 
-#### Runtime memory commands (`!memory`)
+#### Runtime memory commands
 
 ```
+!memstats                                 show memory system health: DB counts, vector index, feature flag states
 !memory                                   list all short-term memories
 !memory list [short|long]                 list by tier
 !memory show <id> [short|long]            show one row in full
 !memory update <id> [tier=short] [importance=N] [content=text] [topic=label]
 ```
+
+`!memstats` includes a **Config snapshot** section showing the master switch (`enabled (master)`) and each feature flag. Any flag showing `OFF (inactive—master off)` means the master switch is suppressing it.
 
 #### LLM memory tools
 
