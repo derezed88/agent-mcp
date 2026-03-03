@@ -1061,7 +1061,7 @@ class PluginManager:
         Features: context_injection, reset_summarize, post_response_scan
         Master switch: 'all' (or no feature arg) toggles the 'enabled' key.
         """
-        FEATURES = ("context_injection", "reset_summarize", "post_response_scan", "fuzzy_dedup")
+        FEATURES = ("context_injection", "reset_summarize", "post_response_scan", "fuzzy_dedup", "vector_search_qdrant")
         action = args[0] if args else "status"
         feature = args[1] if len(args) > 1 else "all"
 
@@ -1071,6 +1071,7 @@ class PluginManager:
             "reset_summarize": True,
             "post_response_scan": True,
             "fuzzy_dedup": True,
+            "vector_search_qdrant": True,
             "fuzzy_dedup_threshold": 0.78,
             "summarizer_model": "summarizer-anthropic",
             "auto_memory_age": True,
@@ -1390,7 +1391,7 @@ class PluginManager:
         print("  memory status                             - Show memory feature on/off state")
         print("  memory enable [feature]                   - Enable memory (or a specific feature)")
         print("  memory disable [feature]                  - Disable memory (or a specific feature)")
-        print(f"    features: context_injection, reset_summarize, post_response_scan, fuzzy_dedup")
+        print(f"    features: context_injection, reset_summarize, post_response_scan, fuzzy_dedup, vector_search_qdrant")
         print("  memory set fuzzy_dedup_threshold <0.0-1.0>   - Set similarity threshold (default 0.78)")
         print("  memory set summarizer_model <model_key>       - Set model used on !reset summarization")
         print("  memory set auto_memory_age <true|false>       - Enable/disable background aging")

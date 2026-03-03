@@ -48,8 +48,24 @@ _INSTANCE: "QdrantVectorPlugin | None" = None
 
 
 def get_vector_api() -> "QdrantVectorPlugin | None":
-    """Return the initialised plugin instance, or None if not loaded/enabled."""
-    return _INSTANCE if (_INSTANCE and _INSTANCE.enabled) else None
+    """Return the initialised plugin instance, or None if not loaded/enabled.
+
+    Also checks plugin_config.memory.vector_search_qdrant (default True) so
+    Qdrant semantic search can be toggled live without restarting the server,
+    alongside context_injection / reset_summarize / post_response_scan.
+    """
+    if not (_INSTANCE and _INSTANCE.enabled):
+        return None
+    try:
+        import json as _json, os as _os
+        path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "plugins-enabled.json")
+        with open(path) as fh:
+            mem_cfg = _json.load(fh).get("plugin_config", {}).get("memory", {})
+        if not mem_cfg.get("vector_search_qdrant", True):
+            return None
+    except Exception:
+        pass  # if config unreadable, default to enabled
+    return _INSTANCE
 
 
 # ---------------------------------------------------------------------------
