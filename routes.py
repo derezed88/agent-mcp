@@ -1040,12 +1040,18 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         prior_history = load_history(client_id)
         prior_cfg = load_session_config(client_id)
         _model_tool_suppress = model_cfg.get("tool_suppress", get_default_tool_suppress())
+        # Model-level tool_suppress:true always wins; prior_cfg can only add suppression,
+        # not remove it — prevents stale session config (default false) from overriding
+        # a model that explicitly requires suppression.
+        _effective_tool_suppress = _model_tool_suppress or prior_cfg.get("tool_suppress", False)
+        _effective_mss = model_cfg.get("memory_scan_suppress", False) or prior_cfg.get("memory_scan_suppress", False)
         sessions[client_id] = {
             "model": model_key,
             "history": prior_history,
             "history_max_ctx": effective_ctx,
             "tool_preview_length": prior_cfg.get("tool_preview_length", get_default_tool_preview_length()),
-            "tool_suppress": prior_cfg.get("tool_suppress", _model_tool_suppress),
+            "tool_suppress": _effective_tool_suppress,
+            "memory_scan_suppress": _effective_mss,
             "_client_id": client_id,
             "created_at": _time_init.time(),
         }
@@ -1337,12 +1343,15 @@ async def endpoint_stream(request: Request):
         prior_history = load_history(client_id)
         prior_cfg = load_session_config(client_id)
         _model_tool_suppress = _mcfg.get("tool_suppress", get_default_tool_suppress())
+        _effective_tool_suppress = _model_tool_suppress or prior_cfg.get("tool_suppress", False)
+        _effective_mss = _mcfg.get("memory_scan_suppress", False) or prior_cfg.get("memory_scan_suppress", False)
         sessions[client_id] = {
             "model": DEFAULT_MODEL,
             "history": prior_history,
             "history_max_ctx": _phd.compute_effective_max_ctx(_mcfg),
             "tool_preview_length": prior_cfg.get("tool_preview_length", get_default_tool_preview_length()),
-            "tool_suppress": prior_cfg.get("tool_suppress", _model_tool_suppress),
+            "tool_suppress": _effective_tool_suppress,
+            "memory_scan_suppress": _effective_mss,
             "_client_id": client_id,
         }
         if "agent_call_stream" in prior_cfg:

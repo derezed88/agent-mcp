@@ -90,6 +90,7 @@ def load_llm_registry():
                 "llm_tools": config.get('llm_tools', []),
                 "llm_tools_gates": config.get('llm_tools_gates', []),
                 "memory_scan": config.get('memory_scan', False),
+                "memory_scan_suppress": config.get('memory_scan_suppress', False),
                 "max_tokens": config.get('max_tokens'),
                 "tool_suppress": config.get('tool_suppress', False),
             }
