@@ -10,7 +10,8 @@ Input model:
 Key bindings — input:
   Enter / F5 / Ctrl+G  — submit immediately
   Backspace / Delete   — delete char before cursor
-  Left / Right         — move cursor
+  Left / Right         — move cursor one character
+  Option+Left / Right  — move cursor one word (bash-style)
   Up / Down            — move cursor one visual row up/down
   Home / Ctrl+A        — jump to start
   End  / Ctrl+E        — jump to end
@@ -737,6 +738,31 @@ def _snapshot(st: AppState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Word-movement helpers (bash-style: stop at word boundary)
+# ---------------------------------------------------------------------------
+
+def _word_left(text: str, pos: int) -> int:
+    """Return position after moving one word left (Option+Left / Alt+b)."""
+    p = pos
+    while p > 0 and not text[p - 1].isalnum() and text[p - 1] != '_':
+        p -= 1
+    while p > 0 and (text[p - 1].isalnum() or text[p - 1] == '_'):
+        p -= 1
+    return p
+
+
+def _word_right(text: str, pos: int) -> int:
+    """Return position after moving one word right (Option+Right / Alt+f)."""
+    n = len(text)
+    p = pos
+    while p < n and not text[p].isalnum() and text[p] != '_':
+        p += 1
+    while p < n and (text[p].isalnum() or text[p] == '_'):
+        p += 1
+    return p
+
+
+# ---------------------------------------------------------------------------
 # Input loop
 # ---------------------------------------------------------------------------
 
@@ -845,6 +871,41 @@ async def input_loop(stdscr):
 
         if ch == -1:
             await asyncio.sleep(0.02)
+            continue
+
+        # ---- Escape sequence handling (Option/Alt + arrow = word movement) -
+        # ESC (27) starts multi-byte sequences.  Read the rest with a brief
+        # halfdelay so we don't block but still capture what follows quickly.
+        if ch == 27:
+            curses.halfdelay(1)   # 0.1 s timeout for subsequent bytes
+            seq = [27]
+            try:
+                while True:
+                    nc = stdscr.getch()
+                    if nc == -1:
+                        break
+                    seq.append(nc)
+                    if len(seq) >= 6:
+                        break
+            except Exception:
+                pass
+            curses.cbreak()       # restore non-blocking mode
+            stdscr.nodelay(True)
+
+            seq_bytes = bytes(seq)
+            # Option+Left:  \x1b[1;3D  or  \x1bb  (macOS Terminal / iTerm2)
+            # Option+Right: \x1b[1;3C  or  \x1bf
+            if seq_bytes in (b'\x1b[1;3D', b'\x1bb', b'\x1b\x1b[D'):
+                async with state.lock:
+                    state.input_cursor_pos = _word_left(state.input_text, state.input_cursor_pos)
+                state.redraw_event.set()
+                continue
+            elif seq_bytes in (b'\x1b[1;3C', b'\x1bf', b'\x1b\x1b[C'):
+                async with state.lock:
+                    state.input_cursor_pos = _word_right(state.input_text, state.input_cursor_pos)
+                state.redraw_event.set()
+                continue
+            # Unrecognised escape sequence — discard silently
             continue
 
         # ---- Detect paste: collect multiple rapid characters --------------

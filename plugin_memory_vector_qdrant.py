@@ -17,9 +17,9 @@ Public API (accessed via get_vector_api()):
 
 Configuration (plugins-enabled.json → plugin_config.plugin_memory_vector_qdrant):
     enabled:                  true
-    qdrant_host:              "192.168.10.101"
+    qdrant_host:              "localhost"
     qdrant_port:              6333
-    embed_url:                "http://192.168.10.101:8000/v1/embeddings"
+    embed_url:                "http://localhost:8000/v1/embeddings"
     embed_model:              "nomic-embed-text"
     collection:               "samaritan_memory"
     vector_dims:              768
@@ -94,9 +94,9 @@ class QdrantVectorPlugin(BasePlugin):
     def init(self, config: dict) -> bool:
         global _INSTANCE
         self._cfg = {
-            "qdrant_host":           config.get("qdrant_host",           "192.168.10.101"),
+            "qdrant_host":           config.get("qdrant_host",           "localhost"),
             "qdrant_port":           config.get("qdrant_port",           6333),
-            "embed_url":             config.get("embed_url",             "http://192.168.10.101:8000/v1/embeddings"),
+            "embed_url":             config.get("embed_url",             "http://localhost:8000/v1/embeddings"),
             "embed_model":           config.get("embed_model",           "nomic-embed-text"),
             "collection":            config.get("collection",            "samaritan_memory"),
             "vector_dims":           config.get("vector_dims",           768),

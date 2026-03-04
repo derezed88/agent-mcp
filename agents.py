@@ -497,6 +497,8 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
             elif tool_name == "google_drive":
                 op = tool_args.get("operation", "?")
                 await push_tok(client_id, f"\n[drive ▶] {op}\n")
+            elif tool_name in ("llm_call", "llm_call_clean", "llm_clean_text"):
+                pass  # llm_call prints its own [llm_call ▶] tag internally
             else:
                 await push_tok(client_id, f"\n[{tool_name} ▶] executing…\n")
 
@@ -542,6 +544,8 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
                     await push_tok(client_id, f"[drive ◀]\n{preview}\n")
                 else:
                     await push_tok(client_id, "[drive ◀]\n")
+            elif tool_name in ("llm_call", "llm_call_clean", "llm_clean_text"):
+                pass  # llm_call prints its own [llm_call ◀] tag internally
             else:
                 if preview:
                     await push_tok(client_id, f"[{tool_name} ◀]\n{preview}\n")

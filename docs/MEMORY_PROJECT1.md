@@ -116,7 +116,7 @@ MySQL is always written first. Qdrant is updated as a fire-and-forget async side
 | `langchain-openai` | LLM dispatch (OpenAI-compatible) | In `requirements.txt` |
 | `langchain-google-genai` | LLM dispatch (Gemini) | In `requirements.txt` |
 
-### Infrastructure (nuc11 — 192.168.10.101)
+### Infrastructure (nuc11 — 192.168.x.x)
 
 | Service | Port | Purpose |
 |---|---|---|
@@ -759,9 +759,9 @@ An infrastructure plugin with no LangChain tools. Loaded by `plugin_loader.py`; 
 ```json
 "plugin_memory_vector_qdrant": {
   "enabled": true,
-  "qdrant_host": "192.168.10.101",
+  "qdrant_host": "192.168.x.x",
   "qdrant_port": 6333,
-  "embed_url": "http://192.168.10.101:8000/v1/embeddings",
+  "embed_url": "http://192.168.x.x:8000/v1/embeddings",
   "embed_model": "nomic-embed-text",
   "collection": "samaritan_memory",
   "vector_dims": 768,
