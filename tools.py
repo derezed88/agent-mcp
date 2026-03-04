@@ -935,9 +935,10 @@ async def _config_cfg_exec(action: str, key: str = "", value: str = "") -> str:
     sess = sessions.get(cid, {}) if cid else {}
 
     _SESSION_KEYS = {
-        "stream":              ("agent_call_stream",  "bool",  True),
-        "tool_preview_length": ("tool_preview_length", "int",  500),
-        "tool_suppress":       ("tool_suppress",       "bool", False),
+        "stream":               ("agent_call_stream",   "bool", True),
+        "tool_preview_length":  ("tool_preview_length", "int",  500),
+        "tool_suppress":        ("tool_suppress",        "bool", False),
+        "memory_scan_suppress": ("memory_scan_suppress", "bool", False),
     }
 
     if action == "list":

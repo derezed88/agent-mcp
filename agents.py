@@ -674,6 +674,31 @@ _XML_PARAM_RE = re.compile(
 )
 
 
+def _strip_memory_calls(text: str) -> str:
+    """Remove memory_save(...) call syntax from response text.
+
+    Strips all three formats the scanner recognises: function-call syntax,
+    JSON-blob form, and xAI XML form. Also collapses any blank lines left
+    behind so the result reads cleanly.
+    """
+    # Pass 1: function-call syntax
+    text = _MEMORY_SAVE_RE.sub("", text)
+    # Pass 2: JSON-blob form — only memory_save blobs
+    text = _JSON_BLOB_RE.sub(
+        lambda m: "" if (_try_parse_json_tool(m.group(0)) or (None, {}))[0] == "memory_save" else m.group(0),
+        text,
+    )
+    # Pass 3: xAI XML form — only memory_save function_call tags
+    text = _XML_TOOL_CALL_RE.sub(
+        lambda m: "" if m.group("fn") == "memory_save" else m.group(0),
+        text,
+    )
+    # Collapse runs of blank lines to at most one blank line
+    import re as _re
+    text = _re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 async def _scan_and_save_memories(text: str, client_id: str, model_key: str) -> int:
     """Scan a final text response for memory_save() calls and execute any found.
 
@@ -902,6 +927,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
             bool(LLM_REGISTRY.get(model_key, {}).get("memory_scan", False))
             and _memory_feature("post_response_scan")
         )
+        _memory_scan_suppress = sessions.get(client_id, {}).get("memory_scan_suppress", False)
         # Tool-call loop detection: track the last N consecutive tool-call fingerprints.
         # If the same set of tool+args repeats >= _TOOL_LOOP_THRESHOLD times in a row,
         # the model is stuck in a deterministic loop (Qwen3, Hermes, etc.).
@@ -944,7 +970,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                 # No tool calls — final answer
                 final = _content_to_str(ai_msg.content)
                 if final:
-                    await push_tok(client_id, final)
+                    await push_tok(client_id, _strip_memory_calls(final) if _memory_scan_suppress else final)
                 else:
                     # Gemini 2.5 Flash returns empty content + no tool calls when
                     # too many tools are bound (>~35). On first turn only, retry
@@ -972,7 +998,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                         else:
                             final = _content_to_str(ai_msg.content)
                             if final:
-                                await push_tok(client_id, final)
+                                await push_tok(client_id, _strip_memory_calls(final) if _memory_scan_suppress else final)
                             else:
                                 log.warning(
                                     f"agentic_lc: empty response after retry from model={model_key} "
@@ -1011,7 +1037,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                             update_session_token_stats(sessions.get(client_id, {}), getattr(ai_msg, "usage_metadata", None) or {})
                             final = _content_to_str(ai_msg.content)
                             if final:
-                                await push_tok(client_id, final)
+                                await push_tok(client_id, _strip_memory_calls(final) if _memory_scan_suppress else final)
                             else:
                                 log.warning(
                                     f"agentic_lc: empty response after nudge from model={model_key} "
@@ -1079,7 +1105,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                     update_session_token_stats(sessions.get(client_id, {}), getattr(ai_final, "usage_metadata", None) or {})
                     final = _content_to_str(ai_final.content)
                     if final:
-                        await push_tok(client_id, final)
+                        await push_tok(client_id, _strip_memory_calls(final) if _memory_scan_suppress else final)
                     else:
                         await push_tok(client_id, "[no response after loop break]")
                 except asyncio.TimeoutError:
