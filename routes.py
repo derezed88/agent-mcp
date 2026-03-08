@@ -125,12 +125,13 @@ async def cmd_help(client_id: str):
         "  !db_query <sql>                           - run SQL directly (no LLM)\n"
         "\n"
         "Memory:\n"
-        "  !memory                                   - list all short-term memories\n"
+        "  !memory [true|false]                      - enable/disable memory logging (MySQL+Qdrant)\n"
         "  !memory list [short|long]                 - list by tier\n"
         "  !memory show <id> [short|long]            - show one row in full\n"
         "  !memory update <id> [tier=short] [importance=N] [content=text] [topic=label]\n"
         "  !memstats                                 - memory system health dashboard\n"
         "  !membackfill                              - embed missing rows into Qdrant vector index\n"
+        "  !memreconcile                             - remove orphaned Qdrant points not in MySQL\n"
         "  !memage                                   - manually trigger one topic-chunk aging pass\n"
         "  !memtrim [N]                              - hard-delete N oldest ST rows (escape valve; default: trim to LWM)\n"
         "\n"
@@ -234,7 +235,7 @@ async def cmd_memory(client_id: str, arg: str):
     !memory show <id> [short|long]  - show one row in full
     !memory update <id> [tier=short] [importance=N] [content=...] [topic=...]
     """
-    from memory import load_short_term, load_long_term, update_memory
+    from memory import load_short_term, load_long_term, update_memory, _mem_plugin_cfg
     parts = arg.split(maxsplit=1)
     subcmd = parts[0].lower() if parts else "list"
     rest = parts[1].strip() if len(parts) > 1 else ""
@@ -243,6 +244,11 @@ async def cmd_memory(client_id: str, arg: str):
         tier = "long" if subcmd == "long" else "short"
         if subcmd == "list" and rest in ("long", "short"):
             tier = rest
+        _mem_flag = sessions[client_id].get("memory_enabled", None)
+        _global_mem = _mem_plugin_cfg().get("enabled", True) if _mem_flag is None else None
+        _mem_active = _mem_flag if _mem_flag is not None else _global_mem
+        _mem_src = "session" if _mem_flag is not None else "global"
+        await push_tok(client_id, f"Memory logging: {'ON' if _mem_active else 'OFF'} ({_mem_src})")
         rows = await (load_long_term(limit=100) if tier == "long" else load_short_term(limit=100, min_importance=1))
         if not rows:
             await push_tok(client_id, f"No {tier}-term memories.")
@@ -272,6 +278,17 @@ async def cmd_memory(client_id: str, arg: str):
             await push_tok(client_id, f"No {tier}-term row with id={row_id}.")
         else:
             await push_tok(client_id, "\n".join(f"  {k}: {v}" for k, v in row.items()))
+
+    elif subcmd in ("true", "false", "on", "off"):
+        # Per-session on/off switch — stored in session dict, not global config
+        val = subcmd in ("true", "on")
+        sessions[client_id]["memory_enabled"] = val
+        state_str = "ON" if val else "OFF"
+        await push_tok(client_id,
+            f"Memory logging {state_str} for this session.\n"
+            + ("  conv_log writes to MySQL+Qdrant re-enabled." if val else
+               "  conv_log writes to MySQL+Qdrant suppressed. !reset will wipe history without summarizing.")
+        )
 
     elif subcmd == "update":
         tparts = rest.split(maxsplit=1)
@@ -314,7 +331,7 @@ async def cmd_memory(client_id: str, arg: str):
     else:
         await push_tok(client_id,
             "Usage:\n"
-            "  !memory                              - list short-term memories\n"
+            "  !memory [true|false]                 - enable/disable memory logging (MySQL+Qdrant)\n"
             "  !memory list [short|long]            - list by tier\n"
             "  !memory show <id> [short|long]       - show one row\n"
             "  !memory update <id> [tier=short] [importance=N] [content=text] [topic=label]")
@@ -329,7 +346,7 @@ async def cmd_memstats(client_id: str):
     summarizer runs, dedup config, and last activity timestamps.
     """
     from database import execute_sql
-    from memory import _ST, _LT, _SUM, _age_cfg, _mem_plugin_cfg
+    from memory import _ST, _LT, _SUM, _age_cfg, _mem_plugin_cfg, get_retrieval_stats
 
     lines = ["## Memory System Stats\n"]
 
@@ -439,7 +456,7 @@ async def cmd_memstats(client_id: str):
     def _scalar(raw: str) -> str:
         for line in raw.strip().splitlines():
             line = line.strip()
-            if line and not line.startswith("MAX") and not line.startswith("MIN") and set(line) > set("-+|"):
+            if line and not line.startswith("MAX") and not line.startswith("MIN") and not set(line).issubset(set("-+| ")):
                 return line
         return "(none)"
 
@@ -517,12 +534,35 @@ async def cmd_memstats(client_id: str):
     except Exception as _vec_err:
         lines.append(f"**Vector Index**: error — {_vec_err}\n")
 
+    # ── Retrieval stats (two-pass) ───────────────────────────────────────────
+    rstats = get_retrieval_stats()
+    if rstats["total"] > 0:
+        single = rstats["single_pass_sufficient"]
+        two = rstats["two_pass_needed"]
+        fallback = rstats["fallback_no_vec"]
+        total = rstats["total"]
+        single_pct = int(single / total * 100) if total else 0
+        two_pct = int(two / total * 100) if total else 0
+        lines.append("**Retrieval Stats (since restart)**")
+        lines.append(f"  total retrievals     : {total}")
+        lines.append(f"  single-pass sufficient: {single} ({single_pct}%)")
+        lines.append(f"  two-pass needed      : {two} ({two_pct}%)")
+        lines.append(f"  fallback (no vector) : {fallback}")
+        qfloor = float(_mem_plugin_cfg().get("two_pass_quality_floor", 0.75))
+        lines.append(f"  pass-1 avg quality hits: {rstats['pass1_avg_hits']:.1f} (score ≥ {qfloor})")
+        if two > 0:
+            lines.append(f"  pass-2 avg extra hits: {rstats['pass2_avg_extra']:.1f}")
+        lines.append("")
+
     # ── Config snapshot ───────────────────────────────────────────────────────
     mem_cfg = _mem_plugin_cfg()
     age_cfg = _age_cfg()
     lines.append("**Config (plugins-enabled.json)**")
     master_on = mem_cfg.get("enabled", True)
     lines.append(f"  {'enabled (master)':<28}: {'on' if master_on else 'OFF'}")
+    _sess_mem = sessions[client_id].get("memory_enabled", None) if client_id in sessions else None
+    if _sess_mem is not None:
+        lines.append(f"  {'enabled (this session)':<28}: {'on' if _sess_mem else 'OFF'} (overrides master)")
     features = ("context_injection", "reset_summarize", "post_response_scan", "fuzzy_dedup", "vector_search_qdrant")
     for f in features:
         val = mem_cfg.get(f, True)
@@ -567,8 +607,8 @@ async def cmd_membackfill(client_id: str):
     !membackfill — embed and upsert any MySQL memory rows missing from Qdrant.
     Compares all MySQL row IDs against Qdrant point IDs; only processes the gap.
     """
-    from database import execute_sql
-    from memory import _ST, _LT, _parse_table
+    from database import fetch_dicts
+    from memory import _ST, _LT
 
     try:
         from plugin_memory_vector_qdrant import get_vector_api
@@ -582,7 +622,7 @@ async def cmd_membackfill(client_id: str):
         await conditional_push_done(client_id)
         return
 
-    await push_tok(client_id, "Scanning for missing Qdrant points...")
+    await push_tok(client_id, "Scanning for missing Qdrant points...\n")
 
     try:
         qdrant_ids = vec.get_all_point_ids()
@@ -591,26 +631,107 @@ async def cmd_membackfill(client_id: str):
         await conditional_push_done(client_id)
         return
 
-    st_raw = await execute_sql(f"SELECT id, topic, content, importance FROM {_ST}")
-    lt_raw = await execute_sql(f"SELECT id, topic, content, importance FROM {_LT}")
-    st_rows = _parse_table(st_raw)
-    lt_rows = _parse_table(lt_raw)
+    st_rows = await fetch_dicts(f"SELECT id, topic, content, importance FROM {_ST}")
+    lt_rows = await fetch_dicts(f"SELECT id, topic, content, importance FROM {_LT}")
 
+    mysql_ids = {int(r["id"]) for r in st_rows} | {int(r["id"]) for r in lt_rows}
     missing_st = [r for r in st_rows if int(r["id"]) not in qdrant_ids]
     missing_lt = [r for r in lt_rows if int(r["id"]) not in qdrant_ids]
     total_missing = len(missing_st) + len(missing_lt)
+    orphan_count = len(qdrant_ids - mysql_ids)
+
+    # Report metrics
+    report = (
+        f"Qdrant points:  {len(qdrant_ids)}\n"
+        f"MySQL rows:     {len(mysql_ids)} ({len(st_rows)} ST, {len(lt_rows)} LT)\n"
+        f"In sync:        {len(qdrant_ids & mysql_ids)}\n"
+        f"Missing from Q: {total_missing} ({len(missing_st)} ST, {len(missing_lt)} LT)\n"
+        f"Orphans in Q:   {orphan_count} (use !memreconcile to clean)\n"
+    )
+    await push_tok(client_id, report)
 
     if total_missing == 0:
-        await push_tok(client_id, f"No drift — all {len(qdrant_ids)} Qdrant points match MySQL.")
+        await push_tok(client_id, "No missing points — Qdrant has all MySQL rows.")
         await conditional_push_done(client_id)
         return
 
-    await push_tok(client_id, f"Found {total_missing} missing ({len(missing_st)} ST, {len(missing_lt)} LT). Backfilling...")
+    await push_tok(client_id, f"Backfilling {total_missing} missing rows...")
 
     saved_st = await vec.backfill(missing_st, tier="short") if missing_st else 0
     saved_lt = await vec.backfill(missing_lt, tier="long")  if missing_lt else 0
 
     await push_tok(client_id, f"Done. Upserted {saved_st} short-term + {saved_lt} long-term rows into Qdrant.")
+    await conditional_push_done(client_id)
+
+
+async def cmd_memreconcile(client_id: str):
+    """
+    !memreconcile — remove orphaned Qdrant points whose MySQL rows no longer exist.
+    Inverse of !membackfill: Qdrant has points that MySQL doesn't → delete from Qdrant.
+    Reports metrics: total Qdrant points, MySQL rows, orphans found, orphans deleted.
+    """
+    from database import fetch_dicts
+    from memory import _ST, _LT
+
+    try:
+        from plugin_memory_vector_qdrant import get_vector_api
+        vec = get_vector_api()
+        if not vec:
+            await push_tok(client_id, "Vector plugin not available.")
+            await conditional_push_done(client_id)
+            return
+    except Exception as e:
+        await push_tok(client_id, f"Vector plugin error: {e}")
+        await conditional_push_done(client_id)
+        return
+
+    await push_tok(client_id, "Scanning for orphaned Qdrant points...\n")
+
+    try:
+        qdrant_ids = vec.get_all_point_ids()
+    except Exception as e:
+        await push_tok(client_id, f"Failed to fetch Qdrant point IDs: {e}")
+        await conditional_push_done(client_id)
+        return
+
+    # Collect all valid MySQL IDs from both tiers
+    st_ids = await fetch_dicts(f"SELECT id FROM {_ST}")
+    lt_ids = await fetch_dicts(f"SELECT id FROM {_LT}")
+    mysql_ids = {int(r["id"]) for r in st_ids} | {int(r["id"]) for r in lt_ids}
+
+    orphan_ids = qdrant_ids - mysql_ids
+    in_sync = qdrant_ids & mysql_ids
+
+    # Report metrics
+    report = (
+        f"Qdrant points:  {len(qdrant_ids)}\n"
+        f"MySQL rows:     {len(mysql_ids)}\n"
+        f"In sync:        {len(in_sync)}\n"
+        f"Orphans found:  {len(orphan_ids)}\n"
+    )
+    await push_tok(client_id, report)
+
+    if not orphan_ids:
+        await push_tok(client_id, "No orphans — Qdrant is fully reconciled with MySQL.")
+        await conditional_push_done(client_id)
+        return
+
+    # Delete orphaned points in batches
+    deleted = 0
+    batch_size = 500
+    orphan_list = sorted(orphan_ids)
+    for i in range(0, len(orphan_list), batch_size):
+        batch = orphan_list[i : i + batch_size]
+        try:
+            vec._qc.delete(
+                collection_name=vec._cfg["collection"],
+                points_selector=batch,
+            )
+            deleted += len(batch)
+        except Exception as e:
+            await push_tok(client_id, f"Delete batch failed at offset {i}: {e}\n")
+
+    await push_tok(client_id, f"Deleted {deleted}/{len(orphan_ids)} orphaned Qdrant points.")
     await conditional_push_done(client_id)
 
 
@@ -648,8 +769,8 @@ async def cmd_memtrim(client_id: str, arg: str):
     Escape valve for when topic-chunk aging can't make progress.
     """
     from memory import trim_st_to_lwm, _st_count, _age_cfg
-    from database import execute_sql
-    from memory import _ST, _parse_table
+    from database import execute_sql, fetch_dicts
+    from memory import _ST
 
     cfg    = _age_cfg()
     before = await _st_count()
@@ -665,10 +786,9 @@ async def cmd_memtrim(client_id: str, arg: str):
             vec = None
         try:
             import asyncio
-            rows_raw = await execute_sql(
+            rows = await fetch_dicts(
                 f"SELECT id FROM {_ST} ORDER BY importance ASC, last_accessed ASC LIMIT {n}"
             )
-            rows = _parse_table(rows_raw)
             deleted = 0
             for r in rows:
                 rid = r.get("id")
@@ -944,9 +1064,10 @@ async def cmd_reset(client_id: str, session: dict):
     history = list(session.get("history", []))
     history_len = len(history)
 
-    # Summarize departing history into short-term memory before clearing
+    # Summarize departing history into short-term memory before clearing.
+    # Skip entirely when memory.enabled is false — just wipe history.
     from agents import _memory_feature, _memory_cfg
-    if history_len >= 4 and _memory_feature("reset_summarize"):
+    if history_len >= 4 and _memory_feature("enabled") and _memory_feature("reset_summarize"):
         try:
             from memory import summarize_and_save
             summarizer_model = _memory_cfg().get("summarizer_model", "summarizer-anthropic")
@@ -1070,6 +1191,7 @@ async def cmd_session(client_id: str, arg: str):
       !session <ID> delete    - delete a session
     """
     from state import sessions, get_or_create_shorthand_id, get_session_by_shorthand, remove_shorthand_mapping, estimate_history_size, format_session_token_line
+    from memory import _mem_plugin_cfg as _mpcfg
 
     parts = arg.split()
 
@@ -1092,9 +1214,14 @@ async def cmd_session(client_id: str, arg: str):
                 tok_est = size["token_est"]
                 size_str = f" (~{char_k:,} chars, ~{tok_est:,} tok est)"
                 token_line = format_session_token_line(data)
+                _mem_flag = data.get("memory_enabled", None)
+                if _mem_flag is not None:
+                    mem_str = f", mem={'ON' if _mem_flag else 'OFF'}(session)"
+                else:
+                    mem_str = f", mem={'ON' if _mpcfg().get('enabled', True) else 'OFF'}(global)"
                 lines.append(
                     f"  ID [{shorthand_id}] {sid}: model={model}, "
-                    f"history={history_len} msgs{size_str}{ip_str}{marker}"
+                    f"history={history_len} msgs{size_str}{ip_str}{mem_str}{marker}"
                 )
                 lines.append(token_line)
             await push_tok(client_id, "\n".join(lines))
@@ -1309,10 +1436,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         prior_history = load_history(client_id)
         prior_cfg = load_session_config(client_id)
         _model_tool_suppress = model_cfg.get("tool_suppress", get_default_tool_suppress())
-        # Model-level tool_suppress:true always wins; prior_cfg can only add suppression,
-        # not remove it — prevents stale session config (default false) from overriding
-        # a model that explicitly requires suppression.
-        _effective_tool_suppress = _model_tool_suppress or prior_cfg.get("tool_suppress", False)
+        # Explicit user override (prior_cfg has the key) wins; otherwise model setting wins.
+        _effective_tool_suppress = prior_cfg["tool_suppress"] if "tool_suppress" in prior_cfg else _model_tool_suppress
         _effective_mss = model_cfg.get("memory_scan_suppress", False) or prior_cfg.get("memory_scan_suppress", False)
         # agent_call_stream: model False wins (restrictive); model None defers to prior_cfg/default
         _model_stream = model_cfg.get("agent_call_stream", None)
@@ -1433,6 +1558,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_memstats(client_id)
                 elif cmd == "membackfill":
                     await cmd_membackfill(client_id)
+                elif cmd == "memreconcile":
+                    await cmd_memreconcile(client_id)
                 elif cmd == "memage":
                     await cmd_memage(client_id)
                 elif cmd == "memtrim":
@@ -1536,6 +1663,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "membackfill":
             await cmd_membackfill(client_id)
             return
+        if cmd == "memreconcile":
+            await cmd_memreconcile(client_id)
+            return
         if cmd == "memage":
             await cmd_memage(client_id)
             return
@@ -1611,7 +1741,10 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             session["history"] = _run_history_chain(session["history"], session, model_cfg)
             # Verbatim conversation logging — save user prompt + assistant response as paired
             # memory rows when the model has conv_log enabled.
-            if model_cfg.get("conv_log"):
+            # session["memory_enabled"] overrides the global plugin config (per-session toggle).
+            _sess_mem = session.get("memory_enabled", None)
+            log.debug(f"conv_log gate: conv_log={model_cfg.get('conv_log')} sess_mem={_sess_mem} model={session['model']}")
+            if model_cfg.get("conv_log") and (_sess_mem is None or _sess_mem):
                 try:
                     from memory import save_conversation_turn
                     _, _, _topic = await save_conversation_turn(
@@ -1665,7 +1798,8 @@ async def endpoint_stream(request: Request):
         prior_history = load_history(client_id)
         prior_cfg = load_session_config(client_id)
         _model_tool_suppress = _mcfg.get("tool_suppress", get_default_tool_suppress())
-        _effective_tool_suppress = _model_tool_suppress or prior_cfg.get("tool_suppress", False)
+        # Explicit user override (prior_cfg has the key) wins; otherwise model setting wins.
+        _effective_tool_suppress = prior_cfg["tool_suppress"] if "tool_suppress" in prior_cfg else _model_tool_suppress
         _effective_mss = _mcfg.get("memory_scan_suppress", False) or prior_cfg.get("memory_scan_suppress", False)
         _model_stream = _mcfg.get("agent_call_stream", None)
         _effective_stream = (False if _model_stream is False else prior_cfg.get("agent_call_stream", True))
@@ -1791,6 +1925,7 @@ async def endpoint_list_sessions(request: Request) -> JSONResponse:
             "tokens_in_last": data.get("tokens_in_last"),
             "tokens_out_last": data.get("tokens_out_last"),
             "peer_ip": data.get("peer_ip"),
+            "memory_enabled": data.get("memory_enabled", None),
         })
 
     return JSONResponse({"sessions": session_list})

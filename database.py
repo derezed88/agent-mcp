@@ -67,6 +67,27 @@ def _run_sql(sql: str) -> str:
 async def execute_sql(sql: str) -> str:
     return await asyncio.to_thread(_run_sql, sql)
 
+def _fetch_dicts(sql: str) -> list[dict]:
+    """Run a SELECT and return rows as list of dicts (no text formatting)."""
+    conn = _connect()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql)
+        if not cursor.description:
+            return []
+        cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+    finally:
+        cursor.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+async def fetch_dicts(sql: str) -> list[dict]:
+    """Async wrapper for _fetch_dicts — returns list of dicts, pipe-safe."""
+    return await asyncio.to_thread(_fetch_dicts, sql)
+
 def _run_insert(sql: str) -> int:
     """Run an INSERT and return lastrowid within the same connection."""
     conn = _connect()

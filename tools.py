@@ -582,8 +582,11 @@ class _MemoryAgeArgs(BaseModel):
 
 async def _memory_save_exec(topic: str, content: str, importance: int = 5, source: str = "assistant") -> str:
     from memory import save_memory
-    from state import current_client_id
+    from state import current_client_id, sessions
     session_id = current_client_id.get("") or ""
+    _sess_mem = sessions.get(session_id, {}).get("memory_enabled", None)
+    if _sess_mem is False:
+        return "Memory logging is disabled for this session."
     row_id = await save_memory(
         topic=topic, content=content,
         importance=importance, source=source,
@@ -595,7 +598,7 @@ async def _memory_save_exec(topic: str, content: str, importance: int = 5, sourc
 
 
 async def _memory_recall_exec(topic: str = "", tier: str = "short", limit: int = 20) -> str:
-    from memory import load_short_term, load_long_term, _parse_table
+    from memory import load_short_term, load_long_term
     if tier == "long":
         rows = await load_long_term(limit=limit, topic=topic)
     else:
@@ -1178,7 +1181,7 @@ async def _tool_list_exec(action: str = "list", tool: str = "") -> str:
             return "ERROR: 'tool' required for action='describe'."
         for lc_tool in _CURRENT_LC_TOOLS:
             if lc_tool.name == tool:
-                schema = lc_tool.args_schema.schema() if lc_tool.args_schema else {}
+                schema = lc_tool.args_schema.model_json_schema() if lc_tool.args_schema else {}
                 params = schema.get("properties", {})
                 param_lines = [f"  {k}: {v.get('description', '')}" for k, v in params.items()]
                 param_str = "\n".join(param_lines) if param_lines else "  (no parameters)"
@@ -1412,7 +1415,7 @@ def _make_core_lc_tools() -> list:
     ]
 
 
-# Populated by agent-mcp.py after plugin registration via update_tool_definitions()
+# Populated by llmem-gw.py after plugin registration via update_tool_definitions()
 CORE_LC_TOOLS: list = []
 
 

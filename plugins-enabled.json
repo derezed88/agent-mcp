@@ -13,15 +13,16 @@
     "plugin_proxy_llama",
     "plugin_client_slack",
     "plugin_urlextract_tavily",
+    "plugin_extract_gemini",
     "plugin_tmux",
     "plugin_claude_vscode_sessions"
   ],
   "plugin_config": {
     "plugin_memory_vector_qdrant": {
       "enabled": true,
-      "qdrant_host": "localhost",
+      "qdrant_host": "192.168.10.101",
       "qdrant_port": 6333,
-      "embed_url": "http://localhost:8000/v1/embeddings",
+      "embed_url": "http://192.168.10.101:8000/v1/embeddings",
       "embed_model": "nomic-embed-text",
       "collection": "samaritan_memory",
       "vector_dims": 768,
@@ -88,10 +89,16 @@
       "fuzzy_dedup_threshold": 0.78,
       "summarizer_model": "summarizer-anthropic",
       "auto_memory_age": true,
-      "memory_age_entrycount": 50,
+      "short_hwm": 100,
+      "short_lwm": 50,
+      "recent_turns_protect": 10,
+      "staleness_override_minutes": 2880,
+      "chunk_importance_threshold": 8,
       "memory_age_count_timer": 60,
+      "memory_age_minutes_timer": 360,
+      "memory_age_entrycount": 50,
       "memory_age_trigger_minutes": 2880,
-      "memory_age_minutes_timer": 360
+      "identity_name": "samaritan"
     },
     "plugin_tmux": {
       "enabled": true,

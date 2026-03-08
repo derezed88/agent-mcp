@@ -254,7 +254,7 @@ def update_tool_definitions():
     """
     Populate tool globals after all plugins are registered.
 
-    Called once by agent-mcp.py after plugin loading completes.
+    Called once by llmem-gw.py after plugin loading completes.
     Also triggers CORE_LC_TOOLS construction (which needs agents imported).
     """
     global _CURRENT_LC_TOOLS, _CURRENT_OPENAI_TOOLS
@@ -1060,33 +1060,60 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
     # Build a query string from the last few turns for semantic retrieval
     if _memory_feature("context_injection"):
         try:
-            from memory import load_context_block
+            from memory import load_context_block, load_topic_list
             # Prefer model-derived current_topic as query seed (set from <<topic>> tag each turn).
-            # Fall back to concatenation of last 3 turns if no topic tracked yet.
+            # Fall back to last 3 user/assistant turns (excluding system and tool injections).
             _session_ctx = sessions.get(client_id, {})
             current_topic = _session_ctx.get("current_topic", "")
             if current_topic:
                 query_text = current_topic
             else:
-                recent = messages[-6:] if len(messages) >= 6 else messages
+                # Filter to genuine user/assistant turns — skip system messages and
+                # tool injection content (starts with "[Session start" or similar).
+                _genuine = [
+                    m for m in messages
+                    if m.get("role") in ("user", "assistant")
+                    and m.get("content")
+                    and not m.get("content", "").startswith("[Session start")
+                    and not m.get("content", "").startswith("[context]")
+                ]
+                recent = _genuine[-6:] if len(_genuine) >= 6 else _genuine
                 query_text = " ".join(
-                    m.get("content", "")[:300]
-                    for m in recent
-                    if m.get("role") in ("user", "assistant") and m.get("content")
+                    m.get("content", "")[:300] for m in recent
                 ).strip()
-            mem_block = await load_context_block(min_importance=3, query=query_text)
+            mem_block = await load_context_block(
+                min_importance=3, query=query_text, user_text=text
+            )
             if mem_block:
                 enrichments.append(mem_block)
+            # Inject known topic list so the model reuses existing slugs rather than coining new ones
+            try:
+                known_topics = await load_topic_list()
+                if known_topics:
+                    enrichments.append(
+                        "## Recent Topics\n"
+                        + ", ".join(known_topics)
+                    )
+            except Exception as _tl_err:
+                log.debug(f"auto_enrich_context: topic list load failed: {_tl_err}")
         except Exception as _mem_err:
             log.warning(f"auto_enrich_context: memory load failed: {_mem_err}")
 
     if not enrichments: return messages
 
-    inject = {
-        "role": "system",
-        "content": "## Auto-retrieved context\nBase answer on this data:\n\n" + "\n\n".join(enrichments)
-    }
-    return list(messages[:-1]) + [inject, messages[-1]]
+    inject_content = "## Auto-retrieved context\nBase answer on this data:\n\n" + "\n\n".join(enrichments)
+    inject = {"role": "system", "content": inject_content}
+    final_messages = list(messages[:-1]) + [inject, messages[-1]]
+
+    # Log prompt composition for diagnostics
+    inject_chars = len(inject_content)
+    total_chars = sum(len(m.get("content", "")) for m in final_messages)
+    msg_count = len(final_messages)
+    log.debug(
+        f"auto_enrich_context: inject={inject_chars:,} chars, "
+        f"total_prompt={total_chars:,} chars, {msg_count} messages"
+    )
+    return final_messages
 
 # --- Agent Loop ---
 

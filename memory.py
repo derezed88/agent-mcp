@@ -29,6 +29,23 @@ from database import execute_sql, execute_insert
 log = logging.getLogger("memory")
 
 # ---------------------------------------------------------------------------
+# Retrieval stats — tracks single-pass vs two-pass usage for !memstats
+# ---------------------------------------------------------------------------
+_retrieval_stats = {
+    "total": 0,
+    "single_pass_sufficient": 0,
+    "two_pass_needed": 0,
+    "pass1_avg_hits": 0.0,     # running average of pass-1 hit count
+    "pass2_avg_extra": 0.0,    # running average of extra hits from pass-2
+    "fallback_no_vec": 0,
+}
+
+
+def get_retrieval_stats() -> dict:
+    """Return a copy of the retrieval stats counters."""
+    return dict(_retrieval_stats)
+
+# ---------------------------------------------------------------------------
 # Load table names from db-config.json (instance-specific, gitignored)
 # ---------------------------------------------------------------------------
 
@@ -121,6 +138,31 @@ def _fuzzy_similar(a: str, b: str, threshold: float) -> bool:
     ratio = difflib.SequenceMatcher(None, a, b).ratio()
     return ratio >= threshold
 
+def _fuzzy_match_topics(query: str, topics: list[str], threshold: float = 0.62) -> list[str]:
+    """
+    Return topic slugs from `topics` that fuzzy-match any word or hyphen-normalised
+    ngram in `query`.  Compares each topic against sliding windows of 1-4 words so
+    that "plumbing issues" matches the slug "plumbing-issue".
+    """
+    if not query or not topics:
+        return []
+    q_norm = query.lower().replace("-", " ")
+    words = q_norm.split()
+    matched = []
+    for slug in topics:
+        slug_norm = slug.lower().replace("-", " ")
+        slug_word_count = len(slug_norm.split())
+        for window in range(max(1, slug_word_count - 1), slug_word_count + 2):
+            for i in range(len(words) - window + 1):
+                phrase = " ".join(words[i : i + window])
+                if difflib.SequenceMatcher(None, phrase, slug_norm).ratio() >= threshold:
+                    matched.append(slug)
+                    break
+            else:
+                continue
+            break
+    return matched
+
 
 # ---------------------------------------------------------------------------
 # Short-term: save
@@ -144,6 +186,8 @@ async def save_memory(
     session_id: str = "",
 ) -> int:
     """Insert a new short-term memory row. Returns new row id, or 0 if duplicate/error."""
+    if not _mem_plugin_cfg().get("enabled", True):
+        return 0
     topic = topic.replace("'", "''")[:255]
     content = content.replace("'", "''")
     session_id = (session_id or "").replace("'", "''")[:255]
@@ -254,6 +298,45 @@ def _make_conv_topic(user_text: str) -> str:
     return f"conv-{date_str}-{slug}"
 
 
+async def _normalize_topic(topic_tag: str, threshold: float = 0.65) -> str:
+    """Fuzzy-match a model-generated topic tag against existing topics.
+
+    Uses SequenceMatcher with word permutations to handle reordering
+    (e.g. 'kitchen-plumbing' → 'plumbing-issue').  Threshold 0.65 avoids
+    false positives on shared-prefix topics (e.g. 'memory-roadmap' ≠ 'memory-toggle').
+
+    Returns the best existing match, or the original tag if no close match.
+    """
+    try:
+        existing = await load_topic_list()
+    except Exception:
+        return topic_tag
+    if not existing or topic_tag in existing:
+        return topic_tag  # exact match or no topics — use as-is
+
+    from itertools import permutations as _perms
+    tag_norm = topic_tag.replace("-", " ").lower()
+    tag_words = tag_norm.split()
+    best_slug, best_score = topic_tag, 0.0
+
+    for slug in existing:
+        slug_norm = slug.replace("-", " ").lower()
+        score = difflib.SequenceMatcher(None, tag_norm, slug_norm).ratio()
+        # Try word permutations (cheap for 2-3 word slugs) to handle reordering
+        if len(tag_words) <= 4:
+            for perm in _perms(tag_words):
+                s = difflib.SequenceMatcher(None, " ".join(perm), slug_norm).ratio()
+                if s > score:
+                    score = s
+        if score > best_score:
+            best_slug, best_score = slug, score
+
+    if best_score >= threshold:
+        log.debug(f"topic_normalize: '{topic_tag}' → '{best_slug}' (score={best_score:.2f})")
+        return best_slug
+    return topic_tag
+
+
 async def save_conversation_turn(
     user_text: str,
     assistant_text: str,
@@ -266,10 +349,15 @@ async def save_conversation_turn(
     the topic for both rows, and the tag is stripped from the stored content.
     Falls back to a date-slug derived from the user text.
 
+    The extracted tag is fuzzy-matched against existing topics to prevent
+    near-duplicate topic proliferation (e.g. 'kitchen-plumbing' → 'plumbing-issue').
+
     Returns (user_row_id, assistant_row_id, topic_used).
     Row IDs of 0 mean duplicate/skipped.
     """
     topic_tag, asst_clean = _extract_topic_tag(assistant_text)
+    if topic_tag:
+        topic_tag = await _normalize_topic(topic_tag)
     topic = topic_tag if topic_tag else _make_conv_topic(user_text)
 
     user_id = await save_memory(
@@ -302,6 +390,8 @@ async def save_lt_memory(
     shortterm_id: int | None = None,
 ) -> int:
     """Insert directly into long-term memory. Returns new LT row id, or 0 on error/duplicate."""
+    if not _mem_plugin_cfg().get("enabled", True):
+        return 0
     topic      = topic.replace("'", "''")[:255]
     content    = content.replace("'", "''")
     session_id = (session_id or "").replace("'", "''")[:255]
@@ -887,14 +977,24 @@ async def _update_lt_last_accessed(row_ids: list) -> None:
         log.debug(f"_update_lt_last_accessed failed: {e}")
 
 
-async def load_context_block(min_importance: int = 3, query: str = "") -> str:
+async def load_context_block(
+    min_importance: int = 3,
+    query: str = "",
+    user_text: str = "",
+) -> str:
     """
     Return a formatted string of memories for prompt injection (short-term + relevant long-term).
 
-    When a query string is provided and the vector plugin is available:
-      - Semantic search runs against both short-term and long-term tiers
-      - Rows with importance >= min_importance_always are always included from short-term
-      - Only semantically retrieved short-term rows have last_accessed updated
+    Two-pass retrieval (when vector plugin available):
+      Pass 1: Semantic search using `query` (typically the topic slug).
+      Pass 2: If pass 1 yields fewer than `two_pass_threshold` *quality* hits
+              (score >= two_pass_quality_floor), re-query using `user_text`
+              (the actual user message) for richer semantic signal.
+              Only new IDs are merged.
+
+    Config keys (plugins-enabled.json → plugin_config.memory):
+      two_pass_threshold      int    (default 5)   — min quality hits to skip pass 2
+      two_pass_quality_floor  float  (default 0.75) — min score to count as quality hit
 
     When no query or vector plugin unavailable:
       - Short-term: all rows meeting min_importance
@@ -904,6 +1004,19 @@ async def load_context_block(min_importance: int = 3, query: str = "") -> str:
     categories rather than inventing new ones each turn.
     Returns empty string if no memories and no topics.
     """
+    cfg = _mem_plugin_cfg()
+    two_pass_threshold = int(cfg.get("two_pass_threshold", 5))
+    two_pass_quality_floor = float(cfg.get("two_pass_quality_floor", 0.75))
+
+    # Strip vocative address of identity name from queries
+    # ("Samaritan, tell me about X" → "tell me about X")
+    _identity = cfg.get("identity_name", "")
+    if _identity:
+        _voc_re = re.compile(rf'^\s*{re.escape(_identity)}[\s,;:!.—–-]+', re.IGNORECASE)
+        query = (_voc_re.sub('', query).strip() or query)
+        if user_text:
+            user_text = (_voc_re.sub('', user_text).strip() or user_text)
+
     from plugin_memory_vector_qdrant import get_vector_api
     vec = get_vector_api()
 
@@ -913,7 +1026,7 @@ async def load_context_block(min_importance: int = 3, query: str = "") -> str:
         # --- Semantic retrieval path ---
         always_importance = vec.cfg().get("min_importance_always", 8)
 
-        # Run semantic search against both tiers and high-importance fetch in parallel
+        # Pass 1: query with topic slug (or fallback text)
         semantic_st_task = asyncio.create_task(vec.search_memories(query, tier="short"))
         semantic_lt_task = asyncio.create_task(vec.search_memories(query, tier="long"))
         always_task      = asyncio.create_task(
@@ -931,6 +1044,68 @@ async def load_context_block(min_importance: int = 3, query: str = "") -> str:
                 merged_st.append(hit)
                 seen_ids_st.add(str(hit.get("id", "")))
 
+        # Count only high-quality hits (above quality floor) for two-pass decision
+        pass1_quality_count = sum(1 for h in semantic_st if h.get("score", 0) >= two_pass_quality_floor) + \
+                              sum(1 for h in semantic_lt if h.get("score", 0) >= two_pass_quality_floor)
+        pass1_total_count = len(semantic_st) + len(semantic_lt)
+        used_two_pass = False
+
+        # Pass 2: if pass 1 has few quality hits and we have user_text that differs from query
+        if (
+            pass1_quality_count < two_pass_threshold
+            and user_text
+            and user_text.strip().lower() != query.strip().lower()
+        ):
+            used_two_pass = True
+            seen_ids_lt = {str(h.get("id", "")) for h in semantic_lt}
+            p2_st_task = asyncio.create_task(vec.search_memories(user_text, tier="short"))
+            p2_lt_task = asyncio.create_task(vec.search_memories(user_text, tier="long"))
+            p2_st, p2_lt = await asyncio.gather(p2_st_task, p2_lt_task)
+
+            p2_extra = 0
+            for hit in p2_st:
+                if str(hit.get("id", "")) not in seen_ids_st:
+                    merged_st.append(hit)
+                    seen_ids_st.add(str(hit.get("id", "")))
+                    p2_extra += 1
+            for hit in p2_lt:
+                if str(hit.get("id", "")) not in seen_ids_lt:
+                    semantic_lt.append(hit)
+                    seen_ids_lt.add(str(hit.get("id", "")))
+                    p2_extra += 1
+            log.debug(
+                f"load_context_block: pass2 user_text query added {p2_extra} extra hits "
+                f"(p2_st={len(p2_st)} p2_lt={len(p2_lt)})"
+            )
+        # Score distribution for diagnostics
+        all_scores = [h.get("score", 0) for h in semantic_st + semantic_lt]
+        score_dist = ""
+        if all_scores:
+            above_80 = sum(1 for s in all_scores if s >= 0.80)
+            above_65 = sum(1 for s in all_scores if s >= 0.65)
+            above_45 = sum(1 for s in all_scores if s >= 0.45)
+            top3 = sorted(all_scores, reverse=True)[:3]
+            bot3 = sorted(all_scores)[:3]
+            score_dist = f" scores: top3={top3} bot3={bot3} >=0.80:{above_80} >=0.65:{above_65} >=0.45:{above_45}"
+        log.debug(
+            f"load_context_block: query={query!r} pass1 total={pass1_total_count} quality(>={two_pass_quality_floor})={pass1_quality_count} "
+            f"two_pass={'YES' if used_two_pass else 'no'}{score_dist}"
+        )
+
+        # Update retrieval stats
+        _retrieval_stats["total"] += 1
+        n = _retrieval_stats["total"]
+        if used_two_pass:
+            _retrieval_stats["two_pass_needed"] += 1
+            # Running average of extra hits from pass 2
+            old_avg = _retrieval_stats["pass2_avg_extra"]
+            _retrieval_stats["pass2_avg_extra"] = old_avg + (p2_extra - old_avg) / _retrieval_stats["two_pass_needed"]
+        else:
+            _retrieval_stats["single_pass_sufficient"] += 1
+        # Running average of pass-1 quality hit count (above quality floor)
+        old_p1 = _retrieval_stats["pass1_avg_hits"]
+        _retrieval_stats["pass1_avg_hits"] = old_p1 + (pass1_quality_count - old_p1) / n
+
         # Only update last_accessed for semantically retrieved short-term rows
         semantic_ids = [h.get("id") for h in semantic_st if h.get("id")]
         if semantic_ids:
@@ -939,13 +1114,34 @@ async def load_context_block(min_importance: int = 3, query: str = "") -> str:
         if lt_ids:
             asyncio.create_task(_update_lt_last_accessed(lt_ids))
 
+        # Fuzzy topic match: pull ST rows for topics matching query AND user_text
+        fuzzy_topics = set(_fuzzy_match_topics(query, topics))
+        if user_text and user_text.strip().lower() != query.strip().lower():
+            fuzzy_topics |= set(_fuzzy_match_topics(user_text, topics))
+        if fuzzy_topics:
+            from database import fetch_dicts as _fetch_dicts
+            placeholders = ", ".join(f"'{t}'" for t in fuzzy_topics)
+            fuzzy_rows = await _fetch_dicts(
+                f"SELECT id, topic, content, importance FROM {_ST} "
+                f"WHERE topic IN ({placeholders})"
+            )
+            fuzzy_added = 0
+            for hit in fuzzy_rows:
+                if str(hit.get("id", "")) not in seen_ids_st:
+                    merged_st.append(hit)
+                    seen_ids_st.add(str(hit.get("id", "")))
+                    fuzzy_added += 1
+            log.debug(f"load_context_block: fuzzy_topics={list(fuzzy_topics)} matched={len(fuzzy_rows)} added={fuzzy_added}")
+
         log.debug(
             f"load_context_block: st_semantic={len(semantic_st)} "
             f"always={len(always_rows)} lt_semantic={len(semantic_lt)} "
-            f"merged_st={len(merged_st)}"
+            f"merged_st={len(merged_st)} two_pass={used_two_pass}"
         )
     else:
         # --- Fallback: load by importance threshold ---
+        _retrieval_stats["total"] += 1
+        _retrieval_stats["fallback_no_vec"] += 1
         merged_st, topics = await asyncio.gather(
             load_short_term(limit=10000, min_importance=min_importance),
             topics_task,
@@ -965,6 +1161,20 @@ async def load_context_block(min_importance: int = 3, query: str = "") -> str:
 
     if not merged_st and not semantic_lt and not topics:
         return ""
+
+    # Log injected topic breakdown for diagnostics
+    st_topics = {}
+    for r in merged_st:
+        t = r.get("topic", "general")
+        st_topics[t] = st_topics.get(t, 0) + 1
+    lt_topics = {}
+    for r in semantic_lt:
+        t = r.get("topic", "general")
+        lt_topics[t] = lt_topics.get(t, 0) + 1
+    log.debug(
+        f"load_context_block: injecting ST={len(merged_st)} rows ({len(st_topics)} topics: {dict(list(st_topics.items())[:10])}) "
+        f"LT={len(semantic_lt)} rows ({len(lt_topics)} topics: {dict(list(lt_topics.items())[:10])})"
+    )
 
     lines = ["## Active Memory (short-term recall)\n"]
 
