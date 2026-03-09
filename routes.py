@@ -1450,19 +1450,37 @@ async def cmd_tools(client_id: str, arg: str, session: dict):
     # Resolve each llm_tools entry: toolset group names are used directly; literal
     # tool names are shown under their parent toolset label but filtered to only
     # the tools actually authorized for this model.
-    from agents import _toolset_for_tool
     seen_toolsets: set[str] = set()
     resolved: list[tuple[str, list[str], bool]] = []  # (ts_name, tools_list, is_group)
+
+    # Set of toolset group names explicitly listed in this model's llm_tools.
+    authorized_groups: set[str] = {e for e in authorized_toolsets if e in LLM_TOOLSETS}
+
+    def _best_parent_ts(tool_name: str, all_literals: list[str]) -> str | None:
+        """Find the parent toolset for a literal tool name.
+        Prefer the toolset with the most authorized literal overlap; break
+        ties by preferring smaller (more specific) toolsets."""
+        candidates: list[tuple[int, int, str]] = []  # (-overlap, size, ts_name)
+        for ts_name, tools in LLM_TOOLSETS.items():
+            if tool_name in tools:
+                overlap = sum(1 for t in all_literals if t in tools)
+                candidates.append((-overlap, len(tools), ts_name))
+        if not candidates:
+            return None
+        candidates.sort()
+        return candidates[0][2]
 
     # Pre-group literals by parent toolset (preserving first-seen order per parent)
     literal_by_parent: dict[str, list[str]] = {}  # parent_ts -> [authorized tool names]
     entry_order: list[tuple[str, bool]] = []  # (key, is_group) in original order
 
+    all_literals = [e for e in authorized_toolsets if e not in LLM_TOOLSETS]
+
     for entry in authorized_toolsets:
         if entry in LLM_TOOLSETS:
             entry_order.append((entry, True))
         else:
-            parent_ts = _toolset_for_tool(entry)
+            parent_ts = _best_parent_ts(entry, all_literals)
             if parent_ts:
                 if parent_ts not in literal_by_parent:
                     literal_by_parent[parent_ts] = []
