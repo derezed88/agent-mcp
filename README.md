@@ -8,7 +8,7 @@ A multi-client AI agent server with a plugin architecture. Maintains persistent 
 
 Building a multi-LLM agent from scratch means solving: async session management, streaming SSE, multi-interface adapters (OpenAI vs. Ollama wire format alone is a week of work), per-tool gate/permission systems, rate limiting with auto-disable, tiered system prompt assembly, swarm coordination with depth guards, and a plugin discovery mechanism. This codebase has all of that working and tested across production use.
 
-You inherit ~16,000 lines solving infrastructure so you can write the 100 lines that make your agent unique.
+You inherit ~25,000 lines solving infrastructure so you can write the 100 lines that make your agent unique.
 
 This system serves two distinct developer profiles. Both get a foundation rather than a blank page.
 
@@ -38,10 +38,11 @@ That's a working multi-tool LLM agent with MySQL, Google Drive, web search, and 
 
 `llm-models.json` is the model registry. Add an entry, drop the API key in `.env`, restart. No code. Out of the box:
 
-- **Local**: Qwen2.5-7B via llama.cpp (no API cost, 32k context)
+- **Local**: Qwen3.5-9B via Ollama (no API cost)
 - **OpenAI**: gpt-4o-mini, gpt-5-mini, gpt-5-nano
-- **Google**: Gemini 2.5 Flash / Flash-Lite
+- **Google**: Gemini 2.5 Flash / Flash-Lite / 2.0 Flash
 - **xAI**: Grok 4 Fast (reasoning and non-reasoning)
+- **Anthropic**: Claude Sonnet / Haiku (via OpenAI-compatible endpoint)
 
 Switch the active model at runtime: `!model gemini25f` — persisted to disk immediately, no restart.
 
@@ -60,12 +61,15 @@ Gates are per-tool, per-table read/write permissions. The pattern is `!<toolname
 
 #### Tune Agent Behavior via Text Files
 
-The system prompt is 22 modular section files — not a monolithic blob. Edit any section, add new ones, or assign a different folder to each model:
+The system prompt is a set of modular section files — not a monolithic blob. Edit any section, add new ones, or assign a different folder to each model:
 
 ```
 system_prompt/
-├── 000_default/         ← 22 section files (behavior, memory chain, tool rules...)
-└── 001_blank/           ← minimal alternative for specialized deployments
+├── 000_default/         ← section files (behavior, memory chain, tool rules...)
+├── 001_blank/           ← minimal alternative for specialized deployments
+├── 004_reasoning/       ← reasoning-arm prompt (Grok / Claude)
+├── 004_voice/           ← voice-frontend prompt
+└── 007_judge/           ← judge/evaluator prompt
 ```
 
 Give a local low-power model a stripped prompt; give frontier models the full PDDS memory chain. Each model's folder is set in `llm-models.json` — one field, no code.
@@ -76,7 +80,7 @@ The combination of persistent memory, writable system prompt, and LLM access to 
 
 The pieces that make this possible:
 
-- **Tiered persistent memory** — facts, preferences, and outcomes are stored in a three-tier hierarchy: short-term (hot context, injected every request), long-term (aged-out summaries, retrieved on demand), and cold archive (Google Drive). Memory ages automatically — short-term rows are summarised by the LLM and promoted to long-term without operator involvement.
+- **Tiered persistent memory** — facts, preferences, and outcomes are stored in a two-tier hierarchy: short-term (hot context, injected every request) and long-term (aged-out summaries, retrieved on demand). Memory ages automatically — short-term rows are summarised by the LLM and promoted to long-term without operator involvement.
 - **Context auto-enrichment** — before each LLM call, `auto-enrich.json` rules are evaluated against the user's message. Matching rules execute SQL queries and inject the results as grounded context — no tool call required from the LLM. Useful for identity tables, deployment config, or any data that should be available without asking. Individual rules can be disabled with `"enabled": false`; the entire feature can be suppressed for a session with `!config write auto_enrich false`.
 - **Semantic retrieval via vector search** — each turn, the agent embeds the current topic and queries a local Qdrant vector store to pull the most relevant long-term memories into context. Retrieval is score-gated and tier-aware: only memories that match the current topic surface, regardless of when they were stored.
 - **Topic-aware memory routing** — the agent tags every response with a `<<topic-slug>>` label. The system extracts this tag, uses it as the topic key for memory storage, and feeds it as the Qdrant query seed next turn. Memory stays coherent across long sessions without manual tagging.
@@ -166,7 +170,7 @@ python llmemctl.py history-chain-remove plugin_history_vec
 
 You're building custom integrations, new tools, or specialized agent behaviors on top of a working foundation.
 
-**You write the 100 lines that make your agent unique. The other 15,900 are already here.**
+**You write the 100 lines that make your agent unique. The other 24,900 are already here.**
 
 #### 5-Minute Start for a New Plugin
 
@@ -192,17 +196,18 @@ That's it. [`plugin_loader.py`](plugin_loader.py) discovers it, wires it into th
 
 #### The Tool Ecosystem Is Already Populated
 
-[`tools.py`](tools.py) (1,249 lines) defines the core tool layer. Plugins extend it. What's already working:
+[`tools.py`](tools.py) (1,561 lines) defines the core tool layer. Plugins extend it. What's already working:
 
 | Category | Tools |
 |---|---|
-| Memory / storage | `db_query` (MySQL), `google_drive` (list/read/write/search), `memory_save`, `memory_recall`, `memory_age` |
+| Memory / storage | `db_query` (MySQL), `google_drive` (list/read/write/search), `memory_save`, `memory_recall`, `memory_update`, `memory_age` |
 | Search | `search_ddgs` (no API key), `search_google`, `search_tavily`, `search_xai` |
-| Web | `url_extract` (Tavily content extraction) |
-| System | `get_system_info`, `read_system_prompt`, `update_system_prompt` |
-| LLM delegation | `llm_clean_text`, `llm_clean_tool`, `at_llm` (full context), `agent_call` (swarm) |
-| Inspection | `limit_list`, `gate_list`, `session`, `llm_list` |
-| Terminal | `tmux_new`, `tmux_exec`, `tmux_history` (7 sub-tools via [`plugin_tmux.py`](plugin_tmux.py)) |
+| Web | `url_extract` (Tavily content extraction), `file_extract` (Gemini file extraction) |
+| System | `get_system_info`, `sysprompt_cfg` (read/write/delete sections) |
+| LLM delegation | `llm_call` (clean context or tool call), `agent_call` (swarm) |
+| Config / admin | `model_cfg`, `config_cfg`, `limits_cfg`, `llm_tools`, `judge_configure` |
+| Inspection | `tool_list`, `session`, `llm_list`, `help` |
+| Terminal | `tmux_new`, `tmux_exec`, `tmux_ls`, `tmux_kill_session`, `tmux_kill_server`, `tmux_history`, `tmux_history_limit` (via [`plugin_tmux.py`](plugin_tmux.py)) |
 
 New tools you add are immediately available to all connected LLMs — no restart, because registration happens at load time.
 
@@ -282,7 +287,7 @@ class BasePlugin(ABC):
     def get_help(self) -> str: ...                 # optional help text
 ```
 
-See [`plugin_search_ddgs.py`](plugin_search_ddgs.py) (111 lines) for the minimal working pattern. See [`plugin_client_api.py`](plugin_client_api.py) (~300 lines) for a full client interface with SSE, gates, and session management.
+See [`plugin_search_ddgs.py`](plugin_search_ddgs.py) (101 lines) for the minimal working pattern. See [`plugin_client_api.py`](plugin_client_api.py) (~300 lines) for a full client interface with SSE, gates, and session management.
 
 ---
 
@@ -373,10 +378,11 @@ The session LLM can delegate sub-tasks to other registered models:
 
 | Tool | What is sent | Use case |
 |---|---|---|
-| `llm_clean_text(model, prompt)` | Prompt only — no context, no tools | Summarisation, analysis |
-| `llm_clean_tool(model, tool, args)` | Tool definition only | Isolated tool call via a second model |
+| `llm_call(model, prompt, mode='text')` | Prompt only — no context, no tools | Summarisation, analysis |
+| `llm_call(model, prompt, mode='tool', tool=...)` | Tool definition only | Isolated tool call via a second model |
+| `llm_call(model, prompt, mode='agent')` | Full history and tool context | Sub-agent with full capabilities |
 
-Enable delegation per model with `!llm_call <model> true`. Rate-limited by default (3 calls / 20 s, auto-disables on breach).
+Enable delegation per model with `!llm_call <model> true`. Rate-limited by default (4 calls / 5 s, auto-disables on breach).
 
 ### Swarm / Multi-Agent Communication
 
@@ -510,14 +516,17 @@ Agent B ────HTTP──►    │   ChatOpenAI              │──► 
 | `plugin_search_xai` | `search_xai` | xAI Grok search (web + X/Twitter) |
 | `plugin_search_google` | `search_google` | Google search via Gemini grounding |
 | `plugin_urlextract_tavily` | `url_extract` | Extract full text content from any URL via Tavily |
+| `plugin_extract_gemini` | `file_extract` | Extract text/data from local files and Google Drive documents via Gemini file API; supports Drive Workspace export (Docs, Sheets, Slides) |
 | `plugin_tmux` | `tmux_new`, `tmux_exec`, `tmux_ls`, `tmux_kill_session`, `tmux_kill_server`, `tmux_history`, `tmux_history_limit` | Persistent PTY shell sessions — LLM can run shell commands and read output; whitelist/blacklist configurable |
 | `plugin_memory_vector_qdrant` | _(infrastructure)_ | Qdrant vector index for semantic memory retrieval. Embeds memory rows via a local embedding model and provides scored nearest-neighbour lookup by topic. MySQL remains the source of truth; Qdrant is the retrieval index. Requires a running Qdrant instance and a compatible embedding endpoint (e.g. nomic-embed-text via llama.cpp). |
+| `plugin_claude_vscode_sessions` | _(client interface)_ | Exposes Claude Code session exports stored in Google Drive as a readable resource for the LLM |
 
 **History** — how conversation context is managed:
 
 | Plugin | What it adds |
 |---|---|
 | `plugin_history_default` | Sliding-window history trimming: keeps last N messages where N = min(agent_max_ctx, model.max_context). Always first in the chain. Additional `plugin_history_*.py` plugins can be appended to the chain for compression, vector retrieval, or custom strategies. |
+| `plugin_history_judge` | Optional second chain member: passes each turn through a judge model to score or filter content before it enters the history window. |
 
 Manage plugins:
 
@@ -540,6 +549,7 @@ python llmemctl.py disable <plugin_name>
 | [docs/setup_services.md](docs/setup_services.md) | systemd, tmux, screen, and tunnel deployment |
 | [docs/plugin-client-api.md](docs/plugin-client-api.md) | API plugin — programmatic access and swarm setup |
 | [docs/SWARMDESIGN.md](docs/SWARMDESIGN.md) | Swarm foundation and discovery design options |
+| [docs/JUDGEMODEL.md](docs/JUDGEMODEL.md) | Judge model architecture — per-turn scoring, memory review, history filtering |
 | [docs/plugin-*.md](docs/) | Per-plugin setup and configuration |
 
 ---
