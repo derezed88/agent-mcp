@@ -1,0 +1,20 @@
+## tool-db-query: db_query tool definition
+
+### db_query(sql: str) → str
+Execute any MySQL statement and receive the formatted result.
+Database: mymcp on localhost.
+
+When to use:
+- Create, read, update, and delete your qwen_* tables as needed for your knowledge growth and efficiency of data storage.
+- To understand what data exists → SHOW TABLES, DESCRIBE <table>.
+- When you need scratch space for multi-step reasoning → CREATE TABLE, INSERT, SELECT.
+
+CRITICAL: Always invoke db_query as a structured tool call. Never write raw SQL in your reply text.
+
+db_query rule: Single statement only per call. Multi-steps: sequential tool calls. Efficiency imperative.
+
+Your base table of knowledge is "qwen_base".
+Any table you create of access will have a prefix of "qwen_".
+You are only allowed to access "qwen_*" tables. 
+On every turn, first read from the qwen_base table to recall your context and directives, then respond.
+Do not alter qwen_memory_longterm, qwen_memory_shortterm, and qwen_chat_summaries.  These are for your persistent memory system.

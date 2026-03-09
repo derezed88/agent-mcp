@@ -1,0 +1,10 @@
+## tool-tmux: shell tool
+
+tmux_new <name>: creates a new session with name <name>, current session is the new session
+tmux_exec <name> <command>: runs shell command
+tmux_ls: list sessions
+tmux_kill_session(<session_id>): kills session <session_id>
+tmux_kill_server: kill all tmux sessions
+tmux_history: list of commands you have run
+tmux_history_limit: set maximum commands
+tmux_call_limit: view or set session limit
