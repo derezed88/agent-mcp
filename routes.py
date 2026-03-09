@@ -1448,33 +1448,53 @@ async def cmd_tools(client_id: str, arg: str, session: dict):
 
     # Default: show heat status table.
     # Resolve each llm_tools entry: toolset group names are used directly; literal
-    # tool names are mapped to their containing toolset via _toolset_for_tool().
-    # Multiple literals from the same toolset collapse into one row.
+    # tool names are shown under their parent toolset label but filtered to only
+    # the tools actually authorized for this model.
     from agents import _toolset_for_tool
     seen_toolsets: set[str] = set()
     resolved: list[tuple[str, list[str], bool]] = []  # (ts_name, tools_list, is_group)
+
+    # Pre-group literals by parent toolset (preserving first-seen order per parent)
+    literal_by_parent: dict[str, list[str]] = {}  # parent_ts -> [authorized tool names]
+    entry_order: list[tuple[str, bool]] = []  # (key, is_group) in original order
+
     for entry in authorized_toolsets:
         if entry in LLM_TOOLSETS:
-            # Proper toolset group name
-            if entry not in seen_toolsets:
-                seen_toolsets.add(entry)
-                resolved.append((entry, LLM_TOOLSETS[entry], True))
+            entry_order.append((entry, True))
         else:
-            # Literal tool name — find its toolset
             parent_ts = _toolset_for_tool(entry)
-            if parent_ts and parent_ts not in seen_toolsets:
-                seen_toolsets.add(parent_ts)
-                resolved.append((parent_ts, LLM_TOOLSETS[parent_ts], False))
-            elif not parent_ts:
-                # Orphan tool with no toolset — show as always-active literal
-                resolved.append((entry, [entry], False))
+            if parent_ts:
+                if parent_ts not in literal_by_parent:
+                    literal_by_parent[parent_ts] = []
+                literal_by_parent[parent_ts].append(entry)
+                entry_order.append((parent_ts, False))
+            else:
+                # Orphan — no parent toolset
+                entry_order.append((entry, None))
+
+    for key, kind in entry_order:
+        if kind is True:
+            # Toolset group name
+            if key not in seen_toolsets:
+                seen_toolsets.add(key)
+                resolved.append((key, LLM_TOOLSETS[key], True))
+        elif kind is False:
+            # Literal tool(s) grouped under parent toolset
+            if key not in seen_toolsets:
+                seen_toolsets.add(key)
+                resolved.append((key, literal_by_parent[key], False))
+        else:
+            # Orphan tool with no toolset
+            resolved.append((key, [key], False))
 
     lines = [f"Tool heat status — model: {model_key}"]
     lines.append(f"{'Toolset':<16} {'Status':<18} {'Tools'}")
     lines.append("-" * 70)
     for ts_name, tools_in_set, is_group in resolved:
         meta = LLM_TOOLSET_META.get(ts_name, {})
-        if meta.get("always_active", True):
+        # Literal tool rows (is_group=False) are always-active — _compute_active_tools
+        # adds them unconditionally regardless of the parent toolset's always_active flag.
+        if not is_group or meta.get("always_active", True):
             status = "always-active"
         else:
             sub = subs.get(ts_name, {})
