@@ -433,6 +433,12 @@
       "token_selection_setting": "custom"
     }
   },
+  "model_roles": {
+    "summarizer": "summarizer-anthropic",
+    "reviewer":   "reviewer-gemini",
+    "extractor":  "extractor-gemini",
+    "judge":      "judge-gemini"
+  },
   "limits": {
     "max_at_llm_depth": 1,
     "max_agent_call_depth": 1,

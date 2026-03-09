@@ -371,6 +371,23 @@ def save_limit_field(key: str, value: int) -> bool:
         return False
 
 
+def get_model_role(role: str) -> str:
+    """Return the model key assigned to a functional role (e.g. 'summarizer', 'reviewer').
+
+    Roles are defined in the 'model_roles' section of llm-models.json.
+    Raises KeyError if the role is not defined.
+    """
+    try:
+        with open(LLM_MODELS_FILE, "r") as f:
+            data = json.load(f)
+        roles = data.get("model_roles", {})
+        if role not in roles:
+            raise KeyError(f"model role '{role}' not defined in llm-models.json model_roles")
+        return roles[role]
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        raise KeyError(f"model role '{role}' could not be loaded: {e}") from e
+
+
 # Load LLM Registry from JSON (only enabled models)
 LLM_REGISTRY = load_llm_registry()
 

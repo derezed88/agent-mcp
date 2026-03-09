@@ -586,7 +586,7 @@ async def cmd_memstats(client_id: str, model_key: str = ""):
         val = mem_cfg.get(f, True)
         lines.append(f"  {f:<28}: {'on' if val else 'OFF'}{' (inactive—master off)' if not master_on else ''}")
     lines.append(f"  {'fuzzy_dedup_threshold':<28}: {mem_cfg.get('fuzzy_dedup_threshold', 0.78):.2f}")
-    lines.append(f"  {'summarizer_model':<28}: {mem_cfg.get('summarizer_model', 'summarizer-anthropic')}")
+    lines.append(f"  {'summarizer_model':<28}: {mem_cfg.get('summarizer_model', '(not set)')}")
     hwm = age_cfg["short_hwm"]
     lwm = age_cfg["short_lwm"]
     lines.append(f"  {'auto_memory_age':<28}: {'on' if age_cfg['auto_memory_age'] else 'OFF'}")
@@ -908,7 +908,8 @@ async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
 
     # ── generate new review ──────────────────────────────────────────────
     from memory import _mem_plugin_cfg
-    _review_model = _mem_plugin_cfg().get("reviewer_model", "reviewer-gemini")
+    from config import get_model_role
+    _review_model = _mem_plugin_cfg().get("reviewer_model") or get_model_role("reviewer")
     await push_tok(client_id, f"Analysing topics with {_review_model}...\n")
 
     # Gather topic stats + sample content from both tiers
@@ -1374,7 +1375,8 @@ async def cmd_reset(client_id: str, session: dict):
         try:
             from memory import summarize_and_save
             set_model_context(session.get("model", ""))
-            summarizer_model = _memory_cfg().get("summarizer_model", "summarizer-anthropic")
+            from config import get_model_role
+            summarizer_model = _memory_cfg().get("summarizer_model") or get_model_role("summarizer")
             _reset_suppress = session.get("tool_suppress", False)
             if not _reset_suppress:
                 await push_tok(client_id, "[memory] Summarizing session to memory...\n")

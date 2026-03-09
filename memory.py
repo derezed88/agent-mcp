@@ -723,7 +723,8 @@ async def _age_topic_chunks(
     protect_n       = cfg["recent_turns_protect"]
     stale_override  = cfg["staleness_override_minutes"]
     imp_threshold   = cfg["chunk_importance_threshold"]
-    model_key       = _mem_plugin_cfg().get("summarizer_model", "summarizer-anthropic")
+    from config import get_model_role
+    model_key       = _mem_plugin_cfg().get("summarizer_model") or get_model_role("summarizer")
 
     totals = {"chunks": 0, "summarized": 0, "promoted": 0, "deleted": 0}
 

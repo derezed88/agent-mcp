@@ -768,7 +768,7 @@ class PluginManager:
         return False
 
     # ------------------------------------------------------------------
-    # Unified resource commands for agentctl
+    # Unified resource commands for llmemctl
     # ------------------------------------------------------------------
 
     def _load_llm_tools(self) -> dict:
@@ -790,7 +790,7 @@ class PluginManager:
             return False
 
     def llm_tools_cmd(self, args: list):
-        """Handle: agentctl llm-tools <action> [name] [tools]"""
+        """Handle: llmemctl llm-tools <action> [name] [tools]"""
         action = args[0] if args else "list"
         name = args[1] if len(args) > 1 else ""
         tools_str = args[2] if len(args) > 2 else ""
@@ -815,7 +815,7 @@ class PluginManager:
 
         elif action == "read":
             if not name:
-                print(f"{Colors.RED}✗ Name required: agentctl llm-tools read <name>{Colors.RESET}")
+                print(f"{Colors.RED}✗ Name required: llmemctl llm-tools read <name>{Colors.RESET}")
                 return
             ts = toolsets.get(name)
             if ts is None:
@@ -825,7 +825,7 @@ class PluginManager:
 
         elif action == "write":
             if not name or not tools_str:
-                print(f"{Colors.RED}✗ Usage: agentctl llm-tools write <name> <tool1,tool2,...>{Colors.RESET}")
+                print(f"{Colors.RED}✗ Usage: llmemctl llm-tools write <name> <tool1,tool2,...>{Colors.RESET}")
                 return
             tool_list = [t.strip() for t in tools_str.split(",") if t.strip()]
             toolsets[name] = tool_list
@@ -834,7 +834,7 @@ class PluginManager:
 
         elif action == "delete":
             if not name:
-                print(f"{Colors.RED}✗ Name required: agentctl llm-tools delete <name>{Colors.RESET}")
+                print(f"{Colors.RED}✗ Name required: llmemctl llm-tools delete <name>{Colors.RESET}")
                 return
             if name not in toolsets:
                 print(f"{Colors.RED}✗ Toolset '{name}' not found{Colors.RESET}")
@@ -845,7 +845,7 @@ class PluginManager:
 
         elif action == "add":
             if not name or not tools_str:
-                print(f"{Colors.RED}✗ Usage: agentctl llm-tools add <name> <tool1,tool2,...>{Colors.RESET}")
+                print(f"{Colors.RED}✗ Usage: llmemctl llm-tools add <name> <tool1,tool2,...>{Colors.RESET}")
                 return
             existing = toolsets.get(name, [])
             new_tools = [t.strip() for t in tools_str.split(",") if t.strip()]
@@ -859,7 +859,7 @@ class PluginManager:
             print(f"{Colors.RED}✗ Unknown action '{action}'. Valid: list, read, write, delete, add{Colors.RESET}")
 
     def model_cfg_cmd(self, args: list):
-        """Handle: agentctl model-cfg <action> [name] [field] [value]"""
+        """Handle: llmemctl model-cfg <action> [name] [field] [value]"""
         action = args[0] if args else "list"
         name = args[1] if len(args) > 1 else ""
         field = args[2] if len(args) > 2 else ""
@@ -893,7 +893,7 @@ class PluginManager:
 
         elif action == "write":
             if not name or not field:
-                print(f"{Colors.RED}✗ Usage: agentctl model-cfg write <name> <field> <value>{Colors.RESET}")
+                print(f"{Colors.RED}✗ Usage: llmemctl model-cfg write <name> <field> <value>{Colors.RESET}")
                 return
             if name not in models:
                 print(f"{Colors.RED}✗ Model '{name}' not found{Colors.RESET}")
@@ -926,7 +926,7 @@ class PluginManager:
             # Delegate to existing methods
             if action == "copy":
                 if not name or not field:
-                    print(f"{Colors.RED}✗ Usage: agentctl model-cfg copy <source> <new_name>{Colors.RESET}")
+                    print(f"{Colors.RED}✗ Usage: llmemctl model-cfg copy <source> <new_name>{Colors.RESET}")
                     return
                 # Use field as new_name for copy
                 if name not in models:
@@ -972,7 +972,7 @@ class PluginManager:
             print(f"{Colors.RED}✗ Unknown action '{action}'. Valid: list, read, write, copy, delete, enable, disable{Colors.RESET}")
 
     def limits_cfg_cmd(self, args: list):
-        """Handle: agentctl limits <action> [key] [value]"""
+        """Handle: llmemctl limits <action> [key] [value]"""
         action = args[0] if args else "list"
         key = args[1] if len(args) > 1 else ""
         value = args[2] if len(args) > 2 else ""
@@ -1001,7 +1001,7 @@ class PluginManager:
 
         elif action == "read":
             if not key:
-                print(f"{Colors.RED}✗ Key required: agentctl limits read <key>{Colors.RESET}")
+                print(f"{Colors.RED}✗ Key required: llmemctl limits read <key>{Colors.RESET}")
                 return
             if key in limits:
                 print(f"{key}: {limits[key]}")
@@ -1021,7 +1021,7 @@ class PluginManager:
 
         elif action == "write":
             if not key or not value:
-                print(f"{Colors.RED}✗ Usage: agentctl limits write <key> <value>{Colors.RESET}")
+                print(f"{Colors.RED}✗ Usage: llmemctl limits write <key> <value>{Colors.RESET}")
                 return
             try:
                 int_val = int(value)
@@ -1078,21 +1078,35 @@ class PluginManager:
                     import json as _json
                     data = _json.load(f)
                 models = data.get("models", {})
-                found = False
-                print(f"\n{Colors.BOLD}Judge configs:{Colors.RESET}")
+                judged, unjudged = [], []
                 for mname, mcfg in sorted(models.items()):
+                    if not isinstance(mcfg, dict):
+                        continue
                     jcfg = mcfg.get("judge_config")
                     if jcfg:
-                        found = True
+                        judged.append((mname, mcfg, jcfg))
+                    else:
+                        unjudged.append((mname, mcfg))
+                print(f"\n{Colors.BOLD}Judge configs (persisted in llm-models.json):{Colors.RESET}")
+                if judged:
+                    for mname, mcfg, jcfg in judged:
+                        ms = mcfg.get("memory_scan", False)
                         print(
                             f"  {Colors.GREEN}{mname}{Colors.RESET}: "
                             f"judge={jcfg.get('model','?')}  "
                             f"gates={jcfg.get('gates',[])}  "
                             f"mode={jcfg.get('mode','block')}  "
-                            f"threshold={jcfg.get('threshold',0.7)}"
+                            f"threshold={jcfg.get('threshold',0.7)}  "
+                            f"memory_scan={ms}"
                         )
-                if not found:
-                    print("  (no judge configs set — use: llmemctl judge set <model> model <judge-model>)")
+                else:
+                    print("  (none — use: llmemctl judge set <model> model <judge-model>)")
+                if unjudged:
+                    print(f"\n{Colors.BOLD}Models without judge_config:{Colors.RESET}")
+                    for mname, mcfg in unjudged:
+                        ms = mcfg.get("memory_scan", False)
+                        desc = mcfg.get("description", "")[:40]
+                        print(f"  {mname:28s}  memory_scan={str(ms):<5}  {desc}")
                 print()
             except Exception as e:
                 print(f"{Colors.RED}✗ Error reading llm-models.json: {e}{Colors.RESET}")
@@ -1170,7 +1184,7 @@ class PluginManager:
             print(f"{Colors.RED}✗ Unknown judge subcommand '{action}'. Valid: list, set, enable-plugin, disable-plugin{Colors.RESET}")
 
     def memory_cmd(self, args: list):
-        """Handle: agentctl memory status|enable|disable [feature]
+        """Handle: llmemctl memory status|enable|disable [feature]
 
         Features: context_injection, reset_summarize, post_response_scan
         Master switch: 'all' (or no feature arg) toggles the 'enabled' key.
@@ -1187,7 +1201,7 @@ class PluginManager:
             "fuzzy_dedup": True,
             "vector_search_qdrant": True,
             "fuzzy_dedup_threshold": 0.78,
-            "summarizer_model": "summarizer-anthropic",
+            "summarizer_model": self.models.get("model_roles", {}).get("summarizer", ""),
             "auto_memory_age": True,
             "memory_age_entrycount": 50,
             "memory_age_count_timer": 60,
@@ -1233,7 +1247,7 @@ class PluginManager:
                 if feat == "fuzzy_dedup" and val:
                     extra = f"  (threshold={mem_cfg.get('fuzzy_dedup_threshold', 0.78):.2f})"
                 print(f"  {feat:<24}: {_bool_str(val)}{note}{extra}")
-            print(f"  {'summarizer_model':<24}: {mem_cfg.get('summarizer_model', 'summarizer-anthropic')}")
+            print(f"  {'summarizer_model':<24}: {mem_cfg.get('summarizer_model', '(not set)')}")
             # Aging config
             age_on = mem_cfg.get("auto_memory_age", True)
             print(f"\n  {Colors.BOLD}Background Aging:{Colors.RESET}")
@@ -1557,7 +1571,7 @@ class PluginManager:
 
         while True:
             try:
-                cmd = input(f"\n{Colors.CYAN}agentctl>{Colors.RESET} ").strip()
+                cmd = input(f"\n{Colors.CYAN}llmemctl>{Colors.RESET} ").strip()
             except (KeyboardInterrupt, EOFError):
                 print("\nExiting...")
                 break
