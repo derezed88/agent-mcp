@@ -384,7 +384,7 @@ class PluginManager:
                     print(f"     {Colors.GRAY}(Download from Google Cloud Console){Colors.RESET}")
 
             print(f"\n4. Restart agent after resolving issues:")
-            print(f"   {Colors.BOLD}python agent-mcp.py{Colors.RESET}")
+            print(f"   {Colors.BOLD}python llmem-gw.py{Colors.RESET}")
 
         print()
 
@@ -424,7 +424,7 @@ class PluginManager:
 
         if self.save_config():
             print(f"{Colors.GREEN}✓ Enabled plugin: {plugin_name}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart llmem-gw.py for changes to take effect{Colors.RESET}")
             return True
         return False
 
@@ -443,7 +443,7 @@ class PluginManager:
 
         if self.save_config():
             print(f"{Colors.GREEN}✓ Disabled plugin: {plugin_name}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart llmem-gw.py for changes to take effect{Colors.RESET}")
             return True
         return False
 
@@ -517,7 +517,7 @@ class PluginManager:
 
         if self.save_config():
             print(f"{Colors.GREEN}✓ Set {plugin_name} port to {port} ({port_key}={port}){Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart llmem-gw.py for changes to take effect{Colors.RESET}")
             return True
         return False
 
@@ -646,7 +646,7 @@ class PluginManager:
         self.models['models'] = models
         if self.save_models():
             print(f"{Colors.GREEN}✓ Added model: {name}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart llmem-gw.py for changes to take effect{Colors.RESET}")
             return True
         return False
 
@@ -669,7 +669,7 @@ class PluginManager:
         self.models['default_model'] = model_key
         if self.save_models():
             print(f"{Colors.GREEN}✓ Set default model to: {model_key}{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart llmem-gw.py for changes to take effect{Colors.RESET}")
             return True
         return False
 
@@ -742,7 +742,7 @@ class PluginManager:
             print(f"{Colors.GREEN}✓ Updated host for {model_name}{Colors.RESET}")
             print(f"  Old: {old_host}")
             print(f"  New: {new_host if new_host else 'null'}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart llmem-gw.py for changes to take effect{Colors.RESET}")
             return True
         return False
 
@@ -763,7 +763,7 @@ class PluginManager:
 
         if self.save_config():
             print(f"{Colors.GREEN}✓ TMUX_EXEC_TIMEOUT: {old}s → {seconds}s{Colors.RESET}")
-            print(f"{Colors.CYAN}Restart agent-mcp.py for changes to take effect{Colors.RESET}")
+            print(f"{Colors.CYAN}Restart llmem-gw.py for changes to take effect{Colors.RESET}")
             return True
         return False
 
@@ -1280,7 +1280,7 @@ class PluginManager:
         print(f"  Checking server at {base_url} ...", end=" ", flush=True)
         if not _check_connectivity():
             print(f"{Colors.RED}UNREACHABLE{Colors.RESET}")
-            print(f"  Start the server first: python agent-mcp.py")
+            print(f"  Start the server first: python llmem-gw.py")
             return
         print(f"{Colors.GREEN}OK{Colors.RESET}")
 

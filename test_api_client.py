@@ -2,7 +2,7 @@
 Integration test for the agent-mcp API client plugin.
 
 Assumes the agent is running with plugin_client_api enabled (port 8767).
-Start the agent: source venv/bin/activate && python agent-mcp.py
+Start the agent: source venv/bin/activate && python llmem-gw.py
 
 Usage:
     python test_api_client.py [--url http://localhost:8767] [--api-key KEY]

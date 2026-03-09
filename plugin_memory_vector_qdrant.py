@@ -17,9 +17,9 @@ Public API (accessed via get_vector_api()):
 
 Configuration (plugins-enabled.json → plugin_config.plugin_memory_vector_qdrant):
     enabled:                  true
-    qdrant_host:              "localhost"
+    qdrant_host:              "192.168.10.101"
     qdrant_port:              6333
-    embed_url:                "http://localhost:8000/v1/embeddings"
+    embed_url:                "http://192.168.10.101:8000/v1/embeddings"
     embed_model:              "nomic-embed-text"
     collection:               "samaritan_memory"
     vector_dims:              768
@@ -94,9 +94,9 @@ class QdrantVectorPlugin(BasePlugin):
     def init(self, config: dict) -> bool:
         global _INSTANCE
         self._cfg = {
-            "qdrant_host":           config.get("qdrant_host",           "localhost"),
+            "qdrant_host":           config.get("qdrant_host",           "192.168.10.101"),
             "qdrant_port":           config.get("qdrant_port",           6333),
-            "embed_url":             config.get("embed_url",             "http://localhost:8000/v1/embeddings"),
+            "embed_url":             config.get("embed_url",             "http://192.168.10.101:8000/v1/embeddings"),
             "embed_model":           config.get("embed_model",           "nomic-embed-text"),
             "collection":            config.get("collection",            "samaritan_memory"),
             "vector_dims":           config.get("vector_dims",           768),
@@ -160,6 +160,25 @@ class QdrantVectorPlugin(BasePlugin):
     # Upsert / delete / update
     # ------------------------------------------------------------------
 
+    def _resolve_collection(self, collection: str | None) -> str:
+        return collection if collection else self._cfg["collection"]
+
+    def _ensure_collection(self, collection: str) -> None:
+        """Create the Qdrant collection if it does not already exist."""
+        try:
+            existing = [c.name for c in self._qc.get_collections().collections]
+            if collection not in existing:
+                self._qc.create_collection(
+                    collection_name=collection,
+                    vectors_config=VectorParams(
+                        size=self._cfg["vector_dims"],
+                        distance=Distance.COSINE,
+                    ),
+                )
+                log.info(f"Created Qdrant collection '{collection}'")
+        except Exception as e:
+            log.warning(f"_ensure_collection({collection!r}) failed: {e}")
+
     async def upsert_memory(
         self,
         row_id: int,
@@ -167,12 +186,15 @@ class QdrantVectorPlugin(BasePlugin):
         content: str,
         importance: int,
         tier: str = "short",
+        collection: str | None = None,
     ) -> None:
         """Embed content and upsert a point into Qdrant using MySQL row_id as point ID."""
+        coll = self._resolve_collection(collection)
         try:
             vector = await self.embed(content, prefix="search_document")
+            self._ensure_collection(coll)
             self._qc.upsert(
-                collection_name=self._cfg["collection"],
+                collection_name=coll,
                 points=[PointStruct(
                     id=row_id,
                     vector=vector,
@@ -188,21 +210,23 @@ class QdrantVectorPlugin(BasePlugin):
         except Exception as e:
             log.warning(f"upsert_memory failed (id={row_id}): {e}")
 
-    async def delete_memory(self, row_id: int) -> None:
+    async def delete_memory(self, row_id: int, collection: str | None = None) -> None:
         """Remove a point from Qdrant by MySQL row_id."""
+        coll = self._resolve_collection(collection)
         try:
             self._qc.delete(
-                collection_name=self._cfg["collection"],
+                collection_name=coll,
                 points_selector=[row_id],
             )
         except Exception as e:
             log.warning(f"delete_memory failed (id={row_id}): {e}")
 
-    async def update_tier(self, row_id: int, new_tier: str) -> None:
+    async def update_tier(self, row_id: int, new_tier: str, collection: str | None = None) -> None:
         """Update the tier payload field when a row ages short→long."""
+        coll = self._resolve_collection(collection)
         try:
             self._qc.set_payload(
-                collection_name=self._cfg["collection"],
+                collection_name=coll,
                 payload={"tier": new_tier},
                 points=[row_id],
             )
@@ -219,11 +243,13 @@ class QdrantVectorPlugin(BasePlugin):
         top_k: int | None = None,
         min_score: float | None = None,
         tier: str = "short",
+        collection: str | None = None,
     ) -> list[dict]:
         """
         Semantic search over Qdrant filtered by tier.
         Returns list of dicts: id, topic, content, importance, score.
         """
+        coll = self._resolve_collection(collection)
         if top_k is None:
             top_k = self._cfg["top_k"]
         if min_score is None:
@@ -231,7 +257,7 @@ class QdrantVectorPlugin(BasePlugin):
         try:
             vector = await self.embed(query_text, prefix="search_query")
             response = self._qc.query_points(
-                collection_name=self._cfg["collection"],
+                collection_name=coll,
                 query=vector,
                 query_filter=Filter(
                     must=[FieldCondition(key="tier", match=MatchValue(value=tier))]
@@ -258,12 +284,13 @@ class QdrantVectorPlugin(BasePlugin):
     # Backfill
     # ------------------------------------------------------------------
 
-    async def backfill(self, rows: list[dict], tier: str = "short") -> int:
+    async def backfill(self, rows: list[dict], tier: str = "short", collection: str | None = None) -> int:
         """
         Embed and upsert a list of MySQL rows into Qdrant.
         rows: list of dicts with keys id, topic, content, importance.
         Returns count of successfully upserted rows.
         """
+        coll = self._resolve_collection(collection)
         saved = 0
         for row in rows:
             row_id = row.get("id")
@@ -276,20 +303,22 @@ class QdrantVectorPlugin(BasePlugin):
                     content=row.get("content", ""),
                     importance=int(row.get("importance", 5)),
                     tier=tier,
+                    collection=coll,
                 )
                 saved += 1
             except Exception as e:
                 log.warning(f"backfill failed row id={row_id}: {e}")
-        log.info(f"backfill: upserted {saved}/{len(rows)} rows (tier={tier})")
+        log.info(f"backfill: upserted {saved}/{len(rows)} rows (tier={tier}, collection={coll!r})")
         return saved
 
-    def get_all_point_ids(self) -> set[int]:
+    def get_all_point_ids(self, collection: str | None = None) -> set[int]:
         """Return all point IDs currently in Qdrant (scrolls all pages)."""
+        coll = self._resolve_collection(collection)
         ids: set[int] = set()
         offset = None
         while True:
             result, next_offset = self._qc.scroll(
-                collection_name=self._cfg["collection"],
+                collection_name=coll,
                 offset=offset,
                 limit=1000,
                 with_payload=False,
@@ -309,17 +338,18 @@ class QdrantVectorPlugin(BasePlugin):
     def cfg(self) -> dict:
         return dict(self._cfg)
 
-    async def get_stats(self) -> dict:
+    async def get_stats(self, collection: str | None = None) -> dict:
         """
         Collect health/count stats from Qdrant and the embedding server.
         Returns a dict with keys: qdrant, embed.
         All fields are strings or ints; errors are reported as strings.
         """
+        coll = self._resolve_collection(collection)
         stats: dict = {"qdrant": {}, "embed": {}}
 
         # ── Qdrant collection info ────────────────────────────────────────
         try:
-            info = self._qc.get_collection(self._cfg["collection"])
+            info = self._qc.get_collection(coll)
             stats["qdrant"] = {
                 "status":                str(info.status.value if hasattr(info.status, "value") else info.status),
                 "points_count":          info.points_count or 0,

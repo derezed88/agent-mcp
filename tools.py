@@ -1058,7 +1058,7 @@ async def _limits_cfg_exec(action: str, key: str = "", value: str = "") -> str:
     _DEPTH_KEYS = {
         "max_at_llm_depth": "Max nested llm_call(history=caller) hops",
         "max_agent_call_depth": "Max nested agent_call hops",
-        "max_tool_iterations": "Max LLM↔tool round-trips per request",
+        "max_tool_iterations": "Max LLM↔tool round-trips per request (-1 = unlimited)",
     }
 
     if action == "list":

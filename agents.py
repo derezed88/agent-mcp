@@ -18,7 +18,7 @@ import time
 from config import log, MAX_TOOL_ITERATIONS, LLM_REGISTRY, RATE_LIMITS, LIVE_LIMITS, LLM_TOOLSETS, LLM_TOOLSET_META, TOOL_CALL_LOG_DEFAULT, save_llm_model_field
 from state import push_tok, push_done, push_flush, push_err, current_client_id, sessions, wait_for_gate, resolve_gate, has_pending_gate, update_session_token_stats
 from prompt import load_prompt_for_folder
-from database import execute_sql
+from database import execute_sql, set_model_context
 from tools import (
     get_system_info,
     get_all_lc_tools, get_all_openai_tools, get_tool_executor,
@@ -556,6 +556,10 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
     # Set context var so executors can read client_id without it being a parameter
     current_client_id.set(client_id)
 
+    # Set DB routing context for per-model database scoping
+    _et_model = sessions.get(client_id, {}).get("model", "")
+    set_model_context(_et_model)
+
     # Universal rate limit check
     tool_type = get_tool_type(tool_name)
     rate_ok, rate_err = await check_rate_limit(client_id, tool_name, tool_type)
@@ -992,18 +996,13 @@ async def _scan_and_save_memories(text: str, client_id: str, model_key: str) -> 
 # --- Enrichment ---
 
 def _load_enrich_rules() -> list[dict]:
-    """Load instance-specific auto-enrichment rules from auto-enrich.json."""
-    import json as _json
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto-enrich.json")
-    try:
-        with open(path) as f:
-            rules = _json.load(f)
-        return [r for r in rules if isinstance(r, dict) and r.get("enabled", True)] if isinstance(rules, list) else []
-    except FileNotFoundError:
+    """Load auto-enrichment rules from db-config.json for the active model's database."""
+    from database import get_tables_for_model
+    tables = get_tables_for_model()
+    rules = tables.get("auto_enrich")
+    if not isinstance(rules, list):
         return []
-    except Exception as e:
-        log.warning(f"auto-enrich.json load failed: {e}")
-        return []
+    return [r for r in rules if isinstance(r, dict) and r.get("enabled", True)]
 
 
 def _memory_cfg() -> dict:
@@ -1130,6 +1129,7 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
     this is purely an LLM abstraction swap.
     """
     try:
+        set_model_context(model_key)
         _stream_level = sessions.get(client_id, {}).get("stream_level", 0)
         llm = _build_lc_llm(model_key, use_cache=(_stream_level >= 1))
 
@@ -1190,7 +1190,10 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
         _TOOL_LOOP_THRESHOLD = 3
         _last_tc_fingerprint: str = ""
         _tc_repeat_count: int = 0
-        for _ in range(LIVE_LIMITS.get("max_tool_iterations", MAX_TOOL_ITERATIONS)):
+        _max_iters = LIVE_LIMITS.get("max_tool_iterations", MAX_TOOL_ITERATIONS)
+        _iter_count = 0
+        while _max_iters == -1 or _iter_count < _max_iters:
+            _iter_count += 1
             if not _suppress:
                 await push_tok(client_id, "\n[thinking…]\n")
             try:
@@ -1222,18 +1225,25 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
                     _astream_text_pushed = False
                     if not ai_msg.tool_calls and _text_parts:
                         _full_text = "".join(_text_parts)
-                        # Strip memory calls on full text BEFORE sentence-splitting:
-                        # splitting first can break a memory_save(...) call mid-content
-                        # when the content string contains periods, causing partial
-                        # fragments that no longer match the regex.
-                        if _memory_scan_suppress:
-                            _full_text = _strip_memory_calls(_full_text)
-                        _sentences = _SENT_RE.split(_full_text)
-                        for _s in _sentences:
-                            _s = _s.strip()
-                            if _s:
-                                await push_tok(client_id, _s + " ")
-                        _astream_text_pushed = True
+                        # Check for bare tool calls (local models like Qwen) BEFORE pushing text.
+                        # If forced tool calls are found, suppress the narration prose entirely —
+                        # the catcher below will execute the tools and re-invoke for a real answer.
+                        _model_tool_names_pre = {t.name for t in _model_tools} if _model_tools else None
+                        if try_force_tool_calls(_full_text, valid_tool_names=_model_tool_names_pre):
+                            pass  # Don't push — let the forced-call catcher handle it below.
+                        else:
+                            # Strip memory calls on full text BEFORE sentence-splitting:
+                            # splitting first can break a memory_save(...) call mid-content
+                            # when the content string contains periods, causing partial
+                            # fragments that no longer match the regex.
+                            if _memory_scan_suppress:
+                                _full_text = _strip_memory_calls(_full_text)
+                            _sentences = _SENT_RE.split(_full_text)
+                            for _s in _sentences:
+                                _s = _s.strip()
+                                if _s:
+                                    await push_tok(client_id, _s + " ")
+                            _astream_text_pushed = True
                 else:
                     ai_msg: AIMessage = await asyncio.wait_for(
                         llm_with_tools.ainvoke(ctx),

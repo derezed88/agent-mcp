@@ -2,30 +2,64 @@ import json
 import os
 import asyncio
 import re
+import contextvars
 import mysql.connector
 #from .config import log
 from config import log
 
-def _load_database_name() -> str:
+def _load_db_config() -> dict:
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "db-config.json")
     try:
         with open(path) as f:
-            return json.load(f).get("database", "")
+            return json.load(f)
     except FileNotFoundError:
         log.warning("db-config.json not found — database name not set")
-        return ""
+        return {}
     except Exception as e:
         log.warning(f"db-config.json load failed: {e}")
-        return ""
+        return {}
 
-_DATABASE = _load_database_name()
+_db_cfg = _load_db_config()
+_DB_DEFAULT    = _db_cfg.get("database", "")
+_DB_TABLES     = _db_cfg.get("tables", {})   # db_name -> {memory_shortterm, ...}
+
+# Context variable — set per-request so all DB calls in that request use the
+# correct database without threading model_key through every call site.
+_active_model_key: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_active_model_key", default=""
+)
+
+def set_model_context(model_key: str) -> None:
+    """Set the active model key for DB routing in the current async context."""
+    _active_model_key.set(model_key or "")
+
+def get_database_for_model(model_key: str | None = None) -> str:
+    """Return the database name for a model key from LLM_REGISTRY, or None if not configured."""
+    from config import LLM_REGISTRY
+    key = model_key or _active_model_key.get()
+    if not key:
+        return _DB_DEFAULT
+    return LLM_REGISTRY.get(key, {}).get("database") or _DB_DEFAULT
+
+def get_tables_for_model(model_key: str | None = None) -> dict:
+    """Return the table name map for the active model's database.
+
+    Falls back to the first table set defined, then bare logical names.
+    """
+    db = get_database_for_model(model_key)
+    if db in _DB_TABLES:
+        return _DB_TABLES[db]
+    # Fallback: use first defined table set (should not normally happen)
+    if _DB_TABLES:
+        return next(iter(_DB_TABLES.values()))
+    return {}
 
 def _connect() -> mysql.connector.MySQLConnection:
     return mysql.connector.connect(
         host="localhost",
         user=os.getenv("MYSQL_USER"),
         password=os.getenv("MYSQL_PASS"),
-        database=_DATABASE,
+        database=get_database_for_model(),
     )
 
 def _run_sql(sql: str) -> str:

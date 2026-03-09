@@ -97,6 +97,7 @@ def load_llm_registry():
                 "tool_suppress": config.get('tool_suppress', False),
                 "agent_call_stream": config.get('agent_call_stream', None),
                 "stream_level": config.get('stream_level', None),
+                "database": config.get('database'),
             }
 
         return registry

@@ -174,7 +174,7 @@ def _extract_session_meta(jsonl_path: str) -> dict:
 
     title = _extract_session_title(jsonl_path)
 
-    # Decode project dir name (-home-user-projects-foo → /home/user/projects/foo)
+    # Decode project dir name (-home-markj-projects-foo → /home/markj/projects/foo)
     project_dir = os.path.basename(os.path.dirname(jsonl_path))
     project_path = project_dir.replace("-", "/").lstrip("/")
     if not project_path.startswith("/"):
@@ -204,7 +204,7 @@ def _list_all_sessions(date_filter: Optional[str] = None,
 
     Args:
         date_filter:    ISO date prefix e.g. "2026-02-24" — filters by first_timestamp
-        project_filter: partial project path match e.g. "agent-mcp"
+        project_filter: partial project path match e.g. "llmem-gw"
     """
     sessions = []
     pattern = os.path.join(CLAUDE_PROJECTS_DIR, "*", "*.jsonl")
@@ -281,7 +281,7 @@ async def endpoint_sessions_list(request: Request) -> JSONResponse:
 
     Query params:
         date    - ISO date prefix filter e.g. "2026-02-24"
-        project - partial project path filter e.g. "agent-mcp"
+        project - partial project path filter e.g. "llmem-gw"
 
     Returns session_id, title, first/last timestamps, message_count, file_bytes.
     """

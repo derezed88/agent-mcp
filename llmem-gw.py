@@ -15,7 +15,7 @@ Pluggable features:
 - Data access tools (MySQL, Google Drive, Google Search)
 
 Usage:
-    python agent-mcp.py [--help]
+    python llmem-gw.py [--help]
 
 Configuration:
     - plugins-enabled.json - Which plugins to load
@@ -228,6 +228,8 @@ async def run_agent(host: str = "0.0.0.0"):
     async def _age_count_task():
         """Count-pressure aging: runs every memory_age_count_timer minutes."""
         from memory import age_by_count, _age_cfg
+        from database import set_model_context
+        from config import DEFAULT_MODEL
         while True:
             try:
                 cfg = _age_cfg()
@@ -239,6 +241,7 @@ async def run_agent(host: str = "0.0.0.0"):
                     # Disabled — sleep a long time and re-check config periodically
                     await asyncio.sleep(3600)
                     continue
+                set_model_context(DEFAULT_MODEL)
                 await age_by_count()
             except Exception as e:
                 log.warning(f"_age_count_task error: {e}")
@@ -252,6 +255,8 @@ async def run_agent(host: str = "0.0.0.0"):
     async def _age_minutes_task():
         """Staleness aging: runs every memory_age_minutes_timer minutes."""
         from memory import age_by_minutes, _age_cfg
+        from database import set_model_context
+        from config import DEFAULT_MODEL
         while True:
             try:
                 cfg = _age_cfg()
@@ -262,6 +267,7 @@ async def run_agent(host: str = "0.0.0.0"):
                 if timer_min == -1:
                     await asyncio.sleep(3600)
                     continue
+                set_model_context(DEFAULT_MODEL)
                 await age_by_minutes(trigger_minutes=cfg["memory_age_trigger_minutes"])
             except Exception as e:
                 log.warning(f"_age_minutes_task error: {e}")
@@ -288,7 +294,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python agent-mcp.py                 # Start with plugins from plugins-enabled.json
+  python llmem-gw.py                 # Start with plugins from plugins-enabled.json
   python llmemctl.py list       # List available plugins
   python llmemctl.py enable plugin_llama_proxy  # Enable llama proxy
 

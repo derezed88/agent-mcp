@@ -24,7 +24,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from database import execute_sql, execute_insert
+from database import execute_sql, execute_insert, get_tables_for_model
 
 log = logging.getLogger("memory")
 
@@ -46,26 +46,20 @@ def get_retrieval_stats() -> dict:
     return dict(_retrieval_stats)
 
 # ---------------------------------------------------------------------------
-# Load table names from db-config.json (instance-specific, gitignored)
+# Table name helpers — resolved at call time from the active model's database
 # ---------------------------------------------------------------------------
 
-def _load_db_config() -> dict:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "db-config.json")
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        log.warning("db-config.json not found — using default table names")
-        return {}
-    except Exception as e:
-        log.warning(f"db-config.json load failed: {e} — using default table names")
-        return {}
+def _ST() -> str:
+    return get_tables_for_model().get("memory_shortterm", "memory_shortterm")
 
-_db_cfg = _load_db_config()
-_tables = _db_cfg.get("tables", {})
-_ST  = _tables.get("memory_shortterm", "memory_shortterm")
-_LT  = _tables.get("memory_longterm",  "memory_longterm")
-_SUM = _tables.get("chat_summaries",   "chat_summaries")
+def _LT() -> str:
+    return get_tables_for_model().get("memory_longterm", "memory_longterm")
+
+def _SUM() -> str:
+    return get_tables_for_model().get("chat_summaries", "chat_summaries")
+
+def _COLLECTION() -> str:
+    return get_tables_for_model().get("collection", "samaritan_memory")
 
 # ---------------------------------------------------------------------------
 # Config helpers (read from plugins-enabled.json at call time)
@@ -197,13 +191,13 @@ async def save_memory(
     # Dedup pass 1: exact match on topic+content in both tiers
     try:
         dup_check = (
-            f"SELECT 1 FROM {_ST} "
+            f"SELECT 1 FROM {_ST()} "
             f"WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
         )
         if "1" in (await execute_sql(dup_check)).strip():
             return 0
         dup_check_lt = (
-            f"SELECT 1 FROM {_LT} "
+            f"SELECT 1 FROM {_LT()} "
             f"WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
         )
         if "1" in (await execute_sql(dup_check_lt)).strip():
@@ -217,9 +211,9 @@ async def save_memory(
         try:
             # Load content of existing rows with the same topic (both tiers)
             rows_sql = (
-                f"SELECT content FROM {_ST} WHERE topic = '{topic}' "
+                f"SELECT content FROM {_ST()} WHERE topic = '{topic}' "
                 f"UNION ALL "
-                f"SELECT content FROM {_LT} WHERE topic = '{topic}'"
+                f"SELECT content FROM {_LT()} WHERE topic = '{topic}'"
             )
             raw = await execute_sql(rows_sql)
             # Parse: first line is header "content", rest are values
@@ -238,7 +232,7 @@ async def save_memory(
             log.warning(f"save_memory fuzzy-dedup check failed: {e}")
 
     sql = (
-        f"INSERT INTO {_ST} "
+        f"INSERT INTO {_ST()} "
         f"(topic, content, importance, source, session_id) "
         f"VALUES ('{topic}', '{content}', {importance}, '{source}', '{session_id}')"
     )
@@ -260,6 +254,7 @@ async def save_memory(
                     content=content,
                     importance=importance,
                     tier="short",
+                    collection=_COLLECTION(),
                 ))
         except Exception as e:
             log.warning(f"save_memory vector upsert skipped: {e}")
@@ -401,7 +396,7 @@ async def save_lt_memory(
     # Exact dedup in LT
     try:
         dup = await execute_sql(
-            f"SELECT 1 FROM {_LT} WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
+            f"SELECT 1 FROM {_LT()} WHERE topic = '{topic}' AND content = '{content}' LIMIT 1"
         )
         if "1" in dup.strip():
             return 0
@@ -410,7 +405,7 @@ async def save_lt_memory(
 
     st_id_clause = f", {int(shortterm_id)}" if shortterm_id else ", NULL"
     sql = (
-        f"INSERT INTO {_LT} "
+        f"INSERT INTO {_LT()} "
         f"(topic, content, importance, source, session_id, shortterm_id) "
         f"VALUES ('{topic}', '{content}', {importance}, '{source}', '{session_id}'{st_id_clause})"
     )
@@ -431,6 +426,7 @@ async def save_lt_memory(
                     content=content,
                     importance=importance,
                     tier="long",
+                    collection=_COLLECTION(),
                 ))
         except Exception as e:
             log.warning(f"save_lt_memory vector upsert skipped: {e}")
@@ -447,7 +443,7 @@ async def load_short_term(limit: int = 20, min_importance: int = 1) -> list[dict
     sql = (
         f"SELECT id, topic, content, importance, source, session_id, "
         f"created_at, last_accessed "
-        f"FROM {_ST} "
+        f"FROM {_ST()} "
         f"WHERE importance >= {min_importance} "
         f"ORDER BY importance DESC, created_at DESC "
         f"LIMIT {limit}"
@@ -472,7 +468,7 @@ async def load_long_term(limit: int = 20, topic: str = "") -> list[dict]:
     )
     sql = (
         f"SELECT id, topic, content, importance, created_at "
-        f"FROM {_LT} {where} "
+        f"FROM {_LT()} {where} "
         f"ORDER BY importance DESC, created_at DESC "
         f"LIMIT {limit}"
     )
@@ -500,7 +496,7 @@ async def update_memory(
     tier: 'short' (default) or 'long'.
     Returns a status string.
     """
-    table = _ST if tier == "short" else _LT
+    table = _ST() if tier == "short" else _LT()
     sets = []
     if importance is not None:
         importance = max(1, min(10, int(importance)))
@@ -551,7 +547,7 @@ async def update_memory(
 async def _st_count() -> int:
     """Return current short-term row count."""
     try:
-        raw = await execute_sql(f"SELECT COUNT(*) FROM {_ST}")
+        raw = await execute_sql(f"SELECT COUNT(*) FROM {_ST()}")
         for line in raw.strip().splitlines():
             line = line.strip()
             if line.isdigit():
@@ -703,10 +699,10 @@ async def _summarize_chunk_to_lt(
         if not rid:
             continue
         try:
-            await execute_sql(f"DELETE FROM {_ST} WHERE id = {int(rid)}")
+            await execute_sql(f"DELETE FROM {_ST()} WHERE id = {int(rid)}")
             deleted += 1
             if vec:
-                asyncio.create_task(vec.delete_memory(int(rid)))
+                asyncio.create_task(vec.delete_memory(int(rid), collection=_COLLECTION()))
         except Exception as e:
             log.warning(f"_summarize_chunk_to_lt: delete failed for id={rid}: {e}")
 
@@ -740,7 +736,7 @@ async def _age_topic_chunks(
     # Exception: a topic is unprotected if ALL its rows are older than stale_override
     try:
         recent_raw = await execute_sql(
-            f"SELECT DISTINCT topic FROM {_ST} "
+            f"SELECT DISTINCT topic FROM {_ST()} "
             f"ORDER BY id DESC LIMIT {protect_n}"
         )
         protected_topics: set[str] = set()
@@ -759,7 +755,7 @@ async def _age_topic_chunks(
         t_escaped = topic.replace("'", "''")
         try:
             check = await execute_sql(
-                f"SELECT COUNT(*) FROM {_ST} "
+                f"SELECT COUNT(*) FROM {_ST()} "
                 f"WHERE topic = '{t_escaped}' "
                 f"AND last_accessed >= NOW() - INTERVAL {stale_override} MINUTE"
             )
@@ -790,7 +786,7 @@ async def _age_topic_chunks(
     try:
         cand_raw = await execute_sql(
             f"SELECT topic, MIN(last_accessed) AS oldest "
-            f"FROM {_ST} "
+            f"FROM {_ST()} "
             f"GROUP BY topic "
             f"{age_having} "
             f"ORDER BY oldest ASC"
@@ -818,7 +814,7 @@ async def _age_topic_chunks(
         t_escaped = topic.replace("'", "''")
         try:
             rows_raw = await execute_sql(
-                f"SELECT * FROM {_ST} WHERE topic = '{t_escaped}' ORDER BY created_at ASC"
+                f"SELECT * FROM {_ST()} WHERE topic = '{t_escaped}' ORDER BY created_at ASC"
             )
             rows = _parse_table(rows_raw)
         except Exception as e:
@@ -892,7 +888,7 @@ async def trim_st_to_lwm() -> int:
 
     try:
         rows_raw = await execute_sql(
-            f"SELECT id FROM {_ST} "
+            f"SELECT id FROM {_ST()} "
             f"ORDER BY importance ASC, last_accessed ASC "
             f"LIMIT {n_to_delete}"
         )
@@ -907,10 +903,10 @@ async def trim_st_to_lwm() -> int:
         if not rid:
             continue
         try:
-            await execute_sql(f"DELETE FROM {_ST} WHERE id = {int(rid)}")
+            await execute_sql(f"DELETE FROM {_ST()} WHERE id = {int(rid)}")
             deleted += 1
             if vec:
-                asyncio.create_task(vec.delete_memory(int(rid)))
+                asyncio.create_task(vec.delete_memory(int(rid), collection=_COLLECTION()))
         except Exception as e:
             log.warning(f"trim_st_to_lwm: delete failed id={rid}: {e}")
 
@@ -925,8 +921,8 @@ async def trim_st_to_lwm() -> int:
 async def load_topic_list() -> list[str]:
     """Return distinct topic names from both short-term and long-term memory, sorted."""
     try:
-        raw_st = await execute_sql(f"SELECT DISTINCT topic FROM {_ST} ORDER BY topic")
-        raw_lt = await execute_sql(f"SELECT DISTINCT topic FROM {_LT} ORDER BY topic")
+        raw_st = await execute_sql(f"SELECT DISTINCT topic FROM {_ST()} ORDER BY topic")
+        raw_lt = await execute_sql(f"SELECT DISTINCT topic FROM {_LT()} ORDER BY topic")
         topics: set[str] = set()
         for raw in (raw_st, raw_lt):
             for line in raw.strip().splitlines():
@@ -956,7 +952,7 @@ async def _update_last_accessed(row_ids: list) -> None:
         return
     try:
         await execute_sql(
-            f"UPDATE {_ST} SET last_accessed = NOW() WHERE id IN ({ids_str})"
+            f"UPDATE {_ST()} SET last_accessed = NOW() WHERE id IN ({ids_str})"
         )
     except Exception as e:
         log.debug(f"_update_last_accessed failed: {e}")
@@ -971,7 +967,7 @@ async def _update_lt_last_accessed(row_ids: list) -> None:
         return
     try:
         await execute_sql(
-            f"UPDATE {_LT} SET last_accessed = NOW() WHERE id IN ({ids_str})"
+            f"UPDATE {_LT()} SET last_accessed = NOW() WHERE id IN ({ids_str})"
         )
     except Exception as e:
         log.debug(f"_update_lt_last_accessed failed: {e}")
@@ -1027,8 +1023,9 @@ async def load_context_block(
         always_importance = vec.cfg().get("min_importance_always", 8)
 
         # Pass 1: query with topic slug (or fallback text)
-        semantic_st_task = asyncio.create_task(vec.search_memories(query, tier="short"))
-        semantic_lt_task = asyncio.create_task(vec.search_memories(query, tier="long"))
+        _coll = _COLLECTION()
+        semantic_st_task = asyncio.create_task(vec.search_memories(query, tier="short", collection=_coll))
+        semantic_lt_task = asyncio.create_task(vec.search_memories(query, tier="long", collection=_coll))
         always_task      = asyncio.create_task(
             load_short_term(limit=10000, min_importance=always_importance)
         )
@@ -1058,8 +1055,8 @@ async def load_context_block(
         ):
             used_two_pass = True
             seen_ids_lt = {str(h.get("id", "")) for h in semantic_lt}
-            p2_st_task = asyncio.create_task(vec.search_memories(user_text, tier="short"))
-            p2_lt_task = asyncio.create_task(vec.search_memories(user_text, tier="long"))
+            p2_st_task = asyncio.create_task(vec.search_memories(user_text, tier="short", collection=_coll))
+            p2_lt_task = asyncio.create_task(vec.search_memories(user_text, tier="long", collection=_coll))
             p2_st, p2_lt = await asyncio.gather(p2_st_task, p2_lt_task)
 
             p2_extra = 0
@@ -1122,7 +1119,7 @@ async def load_context_block(
             from database import fetch_dicts as _fetch_dicts
             placeholders = ", ".join(f"'{t}'" for t in fuzzy_topics)
             fuzzy_rows = await _fetch_dicts(
-                f"SELECT id, topic, content, importance FROM {_ST} "
+                f"SELECT id, topic, content, importance FROM {_ST()} "
                 f"WHERE topic IN ({placeholders})"
             )
             fuzzy_added = 0
@@ -1148,7 +1145,7 @@ async def load_context_block(
         )
         # Pull high-importance long-term rows directly
         lt_raw = await execute_sql(
-            f"SELECT id, topic, content, importance FROM {_LT} "
+            f"SELECT id, topic, content, importance FROM {_LT()} "
             f"WHERE importance >= 7 ORDER BY importance DESC LIMIT 20"
         )
         semantic_lt = _parse_table(lt_raw)
@@ -1327,7 +1324,7 @@ async def summarize_and_save(
     model_key_safe = model_key.replace("'", "''")
     sid_safe = session_id.replace("'", "''")
     await execute_sql(
-        f"INSERT INTO {_SUM} "
+        f"INSERT INTO {_SUM()} "
         f"(session_id, summary, message_count, model_used) "
         f"VALUES ('{sid_safe}', '{summary_text[:4000]}', {msg_count}, '{model_key_safe}')"
     )

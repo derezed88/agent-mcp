@@ -9,7 +9,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from config import log, LLM_REGISTRY, DEFAULT_MODEL, LLM_MODELS_FILE
 from state import sessions, get_queue, push_tok, push_done, push_model, active_tasks, cancel_active_task
-from database import execute_sql
+from database import execute_sql, set_model_context
 from agents import dispatch_llm
 from tools import get_tool_executor, get_plugin_command, get_plugin_help_sections
 
@@ -210,7 +210,7 @@ async def cmd_help(client_id: str):
     await push_tok(client_id, help_text)
     await conditional_push_done(client_id)
 
-async def cmd_db_query(client_id: str, sql: str):
+async def cmd_db_query(client_id: str, sql: str, model_key: str = ""):
     """Execute SQL directly without LLM."""
     sql = sql.strip()
     if not sql:
@@ -221,6 +221,7 @@ async def cmd_db_query(client_id: str, sql: str):
             "  !db_query SHOW TABLES")
         await conditional_push_done(client_id)
         return
+    set_model_context(model_key)
     try:
         result = await execute_sql(sql)
         await push_tok(client_id, result)
@@ -340,14 +341,15 @@ async def cmd_memory(client_id: str, arg: str):
     await conditional_push_done(client_id)
 
 
-async def cmd_memstats(client_id: str):
+async def cmd_memstats(client_id: str, model_key: str = ""):
     """
     !memstats — memory system health dashboard.
     Shows row counts, topic distribution, importance spread, aging history,
     summarizer runs, dedup config, and last activity timestamps.
     """
+    set_model_context(model_key)
     from database import execute_sql
-    from memory import _ST, _LT, _SUM, _age_cfg, _mem_plugin_cfg, get_retrieval_stats
+    from memory import _ST, _LT, _SUM, _COLLECTION, _age_cfg, _mem_plugin_cfg, get_retrieval_stats
 
     lines = ["## Memory System Stats\n"]
 
@@ -377,9 +379,9 @@ async def cmd_memstats(client_id: str):
         return result
 
     # ── Tier counts ──────────────────────────────────────────────────────────
-    st_count = _int_from(await q(f"SELECT COUNT(*) FROM {_ST}"))
-    lt_count = _int_from(await q(f"SELECT COUNT(*) FROM {_LT}"))
-    sum_count = _int_from(await q(f"SELECT COUNT(*) FROM {_SUM}"))
+    st_count = _int_from(await q(f"SELECT COUNT(*) FROM {_ST()}"))
+    lt_count = _int_from(await q(f"SELECT COUNT(*) FROM {_LT()}"))
+    sum_count = _int_from(await q(f"SELECT COUNT(*) FROM {_SUM()}"))
     lines.append(f"**Tier counts**")
     lines.append(f"  short-term : {st_count} rows")
     lines.append(f"  long-term  : {lt_count} rows")
@@ -388,7 +390,7 @@ async def cmd_memstats(client_id: str):
     # ── Short-term: topic breakdown ───────────────────────────────────────────
     st_topics_raw = await q(
         f"SELECT topic, COUNT(*) as n, ROUND(AVG(importance),1) as avg_imp "
-        f"FROM {_ST} GROUP BY topic ORDER BY n DESC LIMIT 20"
+        f"FROM {_ST()} GROUP BY topic ORDER BY n DESC LIMIT 20"
     )
     st_topic_rows = _rows_from(st_topics_raw)
     if st_topic_rows:
@@ -401,7 +403,7 @@ async def cmd_memstats(client_id: str):
     # ── Long-term: topic breakdown ────────────────────────────────────────────
     lt_topics_raw = await q(
         f"SELECT topic, COUNT(*) as n, ROUND(AVG(importance),1) as avg_imp "
-        f"FROM {_LT} GROUP BY topic ORDER BY n DESC LIMIT 20"
+        f"FROM {_LT()} GROUP BY topic ORDER BY n DESC LIMIT 20"
     )
     lt_topic_rows = _rows_from(lt_topics_raw)
     if lt_topic_rows:
@@ -413,7 +415,7 @@ async def cmd_memstats(client_id: str):
 
     # ── Importance distribution (short-term) ─────────────────────────────────
     imp_raw = await q(
-        f"SELECT importance, COUNT(*) as n FROM {_ST} GROUP BY importance ORDER BY importance"
+        f"SELECT importance, COUNT(*) as n FROM {_ST()} GROUP BY importance ORDER BY importance"
     )
     imp_rows = _rows_from(imp_raw)
     if imp_rows:
@@ -424,7 +426,7 @@ async def cmd_memstats(client_id: str):
 
     # ── Source breakdown (short-term) ─────────────────────────────────────────
     src_raw = await q(
-        f"SELECT source, COUNT(*) as n FROM {_ST} GROUP BY source ORDER BY n DESC"
+        f"SELECT source, COUNT(*) as n FROM {_ST()} GROUP BY source ORDER BY n DESC"
     )
     src_rows = _rows_from(src_raw)
     if src_rows:
@@ -436,11 +438,11 @@ async def cmd_memstats(client_id: str):
 
     # ── Aging: long-term source of truth ─────────────────────────────────────
     lt_from_st_raw = await q(
-        f"SELECT COUNT(*) FROM {_LT} WHERE shortterm_id IS NOT NULL AND shortterm_id > 0"
+        f"SELECT COUNT(*) FROM {_LT()} WHERE shortterm_id IS NOT NULL AND shortterm_id > 0"
     )
     lt_aged = _int_from(lt_from_st_raw)
     lt_direct_raw = await q(
-        f"SELECT COUNT(*) FROM {_LT} WHERE shortterm_id IS NULL OR shortterm_id = 0"
+        f"SELECT COUNT(*) FROM {_LT()} WHERE shortterm_id IS NULL OR shortterm_id = 0"
     )
     lt_direct = _int_from(lt_direct_raw)
     lines.append("**Long-term origin**")
@@ -448,11 +450,11 @@ async def cmd_memstats(client_id: str):
     lines.append(f"  direct saves         : {lt_direct} rows\n")
 
     # ── Last activity timestamps ──────────────────────────────────────────────
-    st_newest_raw = await q(f"SELECT MAX(created_at) FROM {_ST}")
-    st_oldest_raw = await q(f"SELECT MIN(created_at) FROM {_ST}")
-    st_lru_raw    = await q(f"SELECT MIN(last_accessed) FROM {_ST}")
-    lt_newest_raw = await q(f"SELECT MAX(created_at) FROM {_LT}")
-    sum_newest_raw = await q(f"SELECT MAX(created_at) FROM {_SUM}")
+    st_newest_raw = await q(f"SELECT MAX(created_at) FROM {_ST()}")
+    st_oldest_raw = await q(f"SELECT MIN(created_at) FROM {_ST()}")
+    st_lru_raw    = await q(f"SELECT MIN(last_accessed) FROM {_ST()}")
+    lt_newest_raw = await q(f"SELECT MAX(created_at) FROM {_LT()}")
+    sum_newest_raw = await q(f"SELECT MAX(created_at) FROM {_SUM()}")
 
     def _scalar(raw: str) -> str:
         for line in raw.strip().splitlines():
@@ -471,7 +473,7 @@ async def cmd_memstats(client_id: str):
     # ── Summarizer runs ───────────────────────────────────────────────────────
     if sum_count > 0:
         sum_model_raw = await q(
-            f"SELECT model_used, COUNT(*) as n FROM {_SUM} GROUP BY model_used ORDER BY n DESC"
+            f"SELECT model_used, COUNT(*) as n FROM {_SUM()} GROUP BY model_used ORDER BY n DESC"
         )
         sum_model_rows = _rows_from(sum_model_raw)
         if sum_model_rows:
@@ -486,7 +488,8 @@ async def cmd_memstats(client_id: str):
         from plugin_memory_vector_qdrant import get_vector_api
         vec = get_vector_api()
         if vec:
-            vstats = await vec.get_stats()
+            from memory import _COLLECTION
+            vstats = await vec.get_stats(collection=_COLLECTION())
             vcfg   = vec.cfg()
             qd = vstats.get("qdrant", {})
             em = vstats.get("embed", {})
@@ -603,13 +606,14 @@ async def cmd_memstats(client_id: str):
     await conditional_push_done(client_id)
 
 
-async def cmd_membackfill(client_id: str):
+async def cmd_membackfill(client_id: str, model_key: str = ""):
     """
     !membackfill — embed and upsert any MySQL memory rows missing from Qdrant.
     Compares all MySQL row IDs against Qdrant point IDs; only processes the gap.
     """
+    set_model_context(model_key)
     from database import fetch_dicts
-    from memory import _ST, _LT
+    from memory import _ST, _LT, _COLLECTION
 
     try:
         from plugin_memory_vector_qdrant import get_vector_api
@@ -625,15 +629,16 @@ async def cmd_membackfill(client_id: str):
 
     await push_tok(client_id, "Scanning for missing Qdrant points...\n")
 
+    coll = _COLLECTION()
     try:
-        qdrant_ids = vec.get_all_point_ids()
+        qdrant_ids = vec.get_all_point_ids(collection=coll)
     except Exception as e:
         await push_tok(client_id, f"Failed to fetch Qdrant point IDs: {e}")
         await conditional_push_done(client_id)
         return
 
-    st_rows = await fetch_dicts(f"SELECT id, topic, content, importance FROM {_ST}")
-    lt_rows = await fetch_dicts(f"SELECT id, topic, content, importance FROM {_LT}")
+    st_rows = await fetch_dicts(f"SELECT id, topic, content, importance FROM {_ST()}")
+    lt_rows = await fetch_dicts(f"SELECT id, topic, content, importance FROM {_LT()}")
 
     mysql_ids = {int(r["id"]) for r in st_rows} | {int(r["id"]) for r in lt_rows}
     missing_st = [r for r in st_rows if int(r["id"]) not in qdrant_ids]
@@ -643,6 +648,7 @@ async def cmd_membackfill(client_id: str):
 
     # Report metrics
     report = (
+        f"Collection:     {coll}\n"
         f"Qdrant points:  {len(qdrant_ids)}\n"
         f"MySQL rows:     {len(mysql_ids)} ({len(st_rows)} ST, {len(lt_rows)} LT)\n"
         f"In sync:        {len(qdrant_ids & mysql_ids)}\n"
@@ -658,21 +664,22 @@ async def cmd_membackfill(client_id: str):
 
     await push_tok(client_id, f"Backfilling {total_missing} missing rows...")
 
-    saved_st = await vec.backfill(missing_st, tier="short") if missing_st else 0
-    saved_lt = await vec.backfill(missing_lt, tier="long")  if missing_lt else 0
+    saved_st = await vec.backfill(missing_st, tier="short", collection=coll) if missing_st else 0
+    saved_lt = await vec.backfill(missing_lt, tier="long",  collection=coll) if missing_lt else 0
 
     await push_tok(client_id, f"Done. Upserted {saved_st} short-term + {saved_lt} long-term rows into Qdrant.")
     await conditional_push_done(client_id)
 
 
-async def cmd_memreconcile(client_id: str):
+async def cmd_memreconcile(client_id: str, model_key: str = ""):
     """
     !memreconcile — remove orphaned Qdrant points whose MySQL rows no longer exist.
     Inverse of !membackfill: Qdrant has points that MySQL doesn't → delete from Qdrant.
     Reports metrics: total Qdrant points, MySQL rows, orphans found, orphans deleted.
     """
+    set_model_context(model_key)
     from database import fetch_dicts
-    from memory import _ST, _LT
+    from memory import _ST, _LT, _COLLECTION
 
     try:
         from plugin_memory_vector_qdrant import get_vector_api
@@ -688,16 +695,17 @@ async def cmd_memreconcile(client_id: str):
 
     await push_tok(client_id, "Scanning for orphaned Qdrant points...\n")
 
+    coll = _COLLECTION()
     try:
-        qdrant_ids = vec.get_all_point_ids()
+        qdrant_ids = vec.get_all_point_ids(collection=coll)
     except Exception as e:
         await push_tok(client_id, f"Failed to fetch Qdrant point IDs: {e}")
         await conditional_push_done(client_id)
         return
 
     # Collect all valid MySQL IDs from both tiers
-    st_ids = await fetch_dicts(f"SELECT id FROM {_ST}")
-    lt_ids = await fetch_dicts(f"SELECT id FROM {_LT}")
+    st_ids = await fetch_dicts(f"SELECT id FROM {_ST()}")
+    lt_ids = await fetch_dicts(f"SELECT id FROM {_LT()}")
     mysql_ids = {int(r["id"]) for r in st_ids} | {int(r["id"]) for r in lt_ids}
 
     orphan_ids = qdrant_ids - mysql_ids
@@ -705,6 +713,7 @@ async def cmd_memreconcile(client_id: str):
 
     # Report metrics
     report = (
+        f"Collection:     {coll}\n"
         f"Qdrant points:  {len(qdrant_ids)}\n"
         f"MySQL rows:     {len(mysql_ids)}\n"
         f"In sync:        {len(in_sync)}\n"
@@ -725,7 +734,7 @@ async def cmd_memreconcile(client_id: str):
         batch = orphan_list[i : i + batch_size]
         try:
             vec._qc.delete(
-                collection_name=vec._cfg["collection"],
+                collection_name=coll,
                 points_selector=batch,
             )
             deleted += len(batch)
@@ -742,7 +751,7 @@ async def cmd_memreconcile(client_id: str):
 _pending_reviews: dict[str, list[dict]] = {}  # client_id → list of proposals
 
 
-async def cmd_memreview(client_id: str, arg: str = ""):
+async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
     """
     !memreview [approve N,N,...] [reject N,N,...] [clear]
 
@@ -751,8 +760,9 @@ async def cmd_memreview(client_id: str, arg: str = ""):
     reject N,N,...: Remove proposals from the pending list.
     clear: Discard all pending proposals.
     """
+    set_model_context(model_key)
     from database import fetch_dicts, execute_sql
-    from memory import _ST, _LT
+    from memory import _ST, _LT, _COLLECTION
 
     parts = arg.strip().split(maxsplit=1) if arg.strip() else []
     subcmd = parts[0].lower() if parts else ""
@@ -814,14 +824,14 @@ async def cmd_memreview(client_id: str, arg: str = ""):
             try:
                 # Collect affected row IDs before updating
                 affected_ids = []
-                for table in (_ST, _LT):
+                for table in (_ST(), _LT()):
                     rows = await fetch_dicts(
                         f"SELECT id FROM {table} WHERE topic = '{old_topic}'"
                     )
                     affected_ids.extend(int(r["id"]) for r in rows)
 
                 # Update MySQL (both ST and LT tables)
-                for table in (_ST, _LT):
+                for table in (_ST(), _LT()):
                     await execute_sql(
                         f"UPDATE {table} SET topic = '{new_topic}' "
                         f"WHERE topic = '{old_topic}'"
@@ -834,7 +844,7 @@ async def cmd_memreview(client_id: str, arg: str = ""):
                         vec = get_vector_api()
                         if vec:
                             vec._qc.set_payload(
-                                collection_name=vec._cfg["collection"],
+                                collection_name=_COLLECTION(),
                                 payload={"topic": new_topic},
                                 points=affected_ids,
                             )
@@ -889,10 +899,10 @@ async def cmd_memreview(client_id: str, arg: str = ""):
 
     # Gather topic stats + sample content from both tiers
     st_rows = await fetch_dicts(
-        f"SELECT topic, content, importance FROM {_ST} ORDER BY topic, id DESC"
+        f"SELECT topic, content, importance FROM {_ST()} ORDER BY topic, id DESC"
     )
     lt_rows = await fetch_dicts(
-        f"SELECT topic, content, importance FROM {_LT} ORDER BY topic, id DESC"
+        f"SELECT topic, content, importance FROM {_LT()} ORDER BY topic, id DESC"
     )
 
     # Build topic summary with sample content (max 3 samples per topic per tier)
@@ -1012,12 +1022,13 @@ async def cmd_memreview(client_id: str, arg: str = ""):
     await conditional_push_done(client_id)
 
 
-async def cmd_memage(client_id: str):
+async def cmd_memage(client_id: str, model_key: str = ""):
     """
     !memage — manually trigger one full aging pass (count-pressure + staleness).
     Uses the same logic as the background tasks but runs immediately.
     """
     from memory import age_by_count, age_by_minutes, _age_cfg, _st_count
+    set_model_context(model_key)
 
     cfg     = _age_cfg()
     before  = await _st_count()
@@ -1039,13 +1050,14 @@ async def cmd_memage(client_id: str):
     await conditional_push_done(client_id)
 
 
-async def cmd_memtrim(client_id: str, arg: str):
+async def cmd_memtrim(client_id: str, arg: str, model_key: str = ""):
     """
     !memtrim [N] — hard-delete N oldest/least-important ST rows without summarizing.
     If N is omitted, trims to short_lwm.
     Escape valve for when topic-chunk aging can't make progress.
     """
-    from memory import trim_st_to_lwm, _st_count, _age_cfg
+    set_model_context(model_key)
+    from memory import trim_st_to_lwm, _st_count, _age_cfg, _COLLECTION
     from database import execute_sql, fetch_dicts
     from memory import _ST
 
@@ -1064,16 +1076,16 @@ async def cmd_memtrim(client_id: str, arg: str):
         try:
             import asyncio
             rows = await fetch_dicts(
-                f"SELECT id FROM {_ST} ORDER BY importance ASC, last_accessed ASC LIMIT {n}"
+                f"SELECT id FROM {_ST()} ORDER BY importance ASC, last_accessed ASC LIMIT {n}"
             )
             deleted = 0
             for r in rows:
                 rid = r.get("id")
                 if rid:
-                    await execute_sql(f"DELETE FROM {_ST} WHERE id = {int(rid)}")
+                    await execute_sql(f"DELETE FROM {_ST()} WHERE id = {int(rid)}")
                     deleted += 1
                     if vec:
-                        asyncio.create_task(vec.delete_memory(int(rid)))
+                        asyncio.create_task(vec.delete_memory(int(rid), collection=_COLLECTION()))
             after = await _st_count()
             await push_tok(client_id, f"Deleted {deleted} rows. ST now={after}.\n")
         except Exception as e:
@@ -1347,6 +1359,7 @@ async def cmd_reset(client_id: str, session: dict):
     if history_len >= 4 and _memory_feature("enabled") and _memory_feature("reset_summarize"):
         try:
             from memory import summarize_and_save
+            set_model_context(session.get("model", ""))
             summarizer_model = _memory_cfg().get("summarizer_model", "summarizer-anthropic")
             _reset_suppress = session.get("tool_suppress", False)
             if not _reset_suppress:
@@ -1792,7 +1805,7 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                 elif cmd == "tools":
                     await cmd_tools(client_id, arg, session)
                 elif cmd == "db_query":
-                    await cmd_db_query(client_id, arg)
+                    await cmd_db_query(client_id, arg, session.get("model", ""))
                 elif cmd in ("search_ddgs", "search_google", "search_tavily", "search_xai"):
                     engine = cmd[len("search_"):]
                     await cmd_search(client_id, engine, arg)
@@ -1832,17 +1845,17 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                 elif cmd == "memory":
                     await cmd_memory(client_id, arg)
                 elif cmd == "memstats":
-                    await cmd_memstats(client_id)
+                    await cmd_memstats(client_id, session.get("model", ""))
                 elif cmd == "membackfill":
-                    await cmd_membackfill(client_id)
+                    await cmd_membackfill(client_id, session.get("model", ""))
                 elif cmd == "memreconcile":
-                    await cmd_memreconcile(client_id)
+                    await cmd_memreconcile(client_id, session.get("model", ""))
                 elif cmd == "memreview":
-                    await cmd_memreview(client_id, arg)
+                    await cmd_memreview(client_id, arg, session.get("model", ""))
                 elif cmd == "memage":
                     await cmd_memage(client_id)
                 elif cmd == "memtrim":
-                    await cmd_memtrim(client_id, arg)
+                    await cmd_memtrim(client_id, arg, session.get("model", ""))
                 elif cmd == "stream":
                     await cmd_stream(client_id, arg, session)
                 elif get_plugin_command(cmd) is not None:
@@ -1882,7 +1895,7 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             await cmd_tools(client_id, arg, session)
             return
         if cmd == "db_query":
-            await cmd_db_query(client_id, arg)
+            await cmd_db_query(client_id, arg, session.get("model", ""))
             return
         if cmd in ("search_ddgs", "search_google", "search_tavily", "search_xai"):
             engine = cmd[len("search_"):]
@@ -1937,22 +1950,22 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             await cmd_memory(client_id, arg)
             return
         if cmd == "memstats":
-            await cmd_memstats(client_id)
+            await cmd_memstats(client_id, session.get("model", ""))
             return
         if cmd == "membackfill":
-            await cmd_membackfill(client_id)
+            await cmd_membackfill(client_id, session.get("model", ""))
             return
         if cmd == "memreconcile":
-            await cmd_memreconcile(client_id)
+            await cmd_memreconcile(client_id, session.get("model", ""))
             return
         if cmd == "memreview":
-            await cmd_memreview(client_id, arg)
+            await cmd_memreview(client_id, arg, session.get("model", ""))
             return
         if cmd == "memage":
             await cmd_memage(client_id)
             return
         if cmd == "memtrim":
-            await cmd_memtrim(client_id, arg)
+            await cmd_memtrim(client_id, arg, session.get("model", ""))
             return
         if cmd == "stream":
             await cmd_stream(client_id, arg, session)
@@ -2029,6 +2042,7 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             if model_cfg.get("conv_log") and (_sess_mem is None or _sess_mem):
                 try:
                     from memory import save_conversation_turn
+                    set_model_context(session.get("model", ""))
                     _, _, _topic = await save_conversation_turn(
                         user_text=stripped,
                         assistant_text=final,
