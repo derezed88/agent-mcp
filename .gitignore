@@ -27,6 +27,7 @@ server.log
 
 # Runtime state
 .aiops_session_id
+.llmemPID
 sprompt_backup/
 
 
