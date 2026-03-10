@@ -213,7 +213,8 @@
       "top_p": 1.0,
       "top_k": 1,
       "token_selection_setting": "custom",
-      "llm_tools_gates": []
+      "llm_tools_gates": [],
+      "memory_enabled": false
     },
     "qwen35": {
       "database": "qwen",
@@ -242,7 +243,8 @@
       "temperature": 0.1,
       "llm_tools": [],
       "system_prompt_folder": "system_prompt/007_judge",
-      "token_selection_setting": "custom"
+      "token_selection_setting": "custom",
+      "memory_enabled": false
     },
     "reviewer-gemini": {
       "database": "mymcp",
@@ -260,7 +262,8 @@
       "top_p": 0.95,
       "top_k": 40,
       "token_selection_setting": "custom",
-      "llm_tools_gates": []
+      "llm_tools_gates": [],
+      "memory_enabled": false
     },
     "summarizer-gemini": {
       "database": "mymcp",
@@ -282,7 +285,8 @@
       "top_p": 0.95,
       "top_k": 40,
       "token_selection_setting": "custom",
-      "llm_tools_gates": []
+      "llm_tools_gates": [],
+      "memory_enabled": false
     },
     "summarizer-anthropic": {
       "database": "mymcp",
@@ -302,7 +306,8 @@
       "system_prompt_folder": "system_prompt/003_claudeVSCode",
       "temperature": 0.4,
       "token_selection_setting": "custom",
-      "llm_tools_gates": []
+      "llm_tools_gates": [],
+      "memory_enabled": false
     },
     "samaritan-voice": {
       "database": "mymcp",
@@ -332,7 +337,8 @@
       "memory_scan": false,
       "conv_log": true,
       "agent_call_stream": true,
-      "stream_level": 3
+      "stream_level": 3,
+      "identity_name": "samaritan"
     },
     "samaritan-voice-fast": {
       "database": "mymcp",
@@ -362,7 +368,8 @@
       "memory_scan": false,
       "conv_log": true,
       "agent_call_stream": true,
-      "stream_level": 3
+      "stream_level": 3,
+      "identity_name": "samaritan"
     },
     "samaritan-reasoning": {
       "database": "mymcp",
@@ -390,7 +397,8 @@
       "max_tokens": 128000,
       "token_selection_setting": "default",
       "memory_scan": false,
-      "conv_log": true
+      "conv_log": true,
+      "identity_name": "samaritan"
     },
     "samaritan-execution": {
       "database": "mymcp",
@@ -430,7 +438,8 @@
       "temperature": 0.0,
       "llm_tools": [],
       "system_prompt_folder": "system_prompt/007_judge",
-      "token_selection_setting": "custom"
+      "token_selection_setting": "custom",
+      "memory_enabled": false
     }
   },
   "model_roles": {
