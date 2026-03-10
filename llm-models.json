@@ -133,7 +133,7 @@
       "token_selection_setting": "default"
     },
     "gemini25f": {
-      "database": "mymcp",
+      "database": "test",
       "model_id": "gemini-2.5-flash",
       "type": "GEMINI",
       "host": null,
@@ -269,7 +269,7 @@
     "summarizer-gemini": {
       "database": "mymcp",
       "model_id": "gemini-2.5-flash",
-      "type": "OPENAI",
+      "type": "GEMINI",
       "host": null,
       "env_key": "GEMINI_API_KEY",
       "max_context": 100000,
@@ -279,7 +279,8 @@
       "llm_tools": [
         "get_system_info",
         "drive",
-        "extract_files"
+        "extract_files",
+        "vscode"
       ],
       "system_prompt_folder": "system_prompt/005_fileops",
       "temperature": 0.4,
