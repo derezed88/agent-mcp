@@ -1,0 +1,18 @@
+## tool-procedures: Procedural Memory Reference
+
+### procedure_recall(query, task_type)
+Call at the START of any multi-step task to retrieve matching procedures.
+- `query`: natural language description of what you are about to do
+- `task_type`: optional exact slug filter (e.g., "docker-deploy")
+- If results have high success_count, follow those steps unless instructed otherwise
+
+### procedure_save(task_type, steps, outcome, notes, importance, id)
+Call at the END of a multi-step task to record what you did.
+- `task_type`: lowercase hyphenated slug (e.g., "git-push-pr", "db-schema-change")
+- `steps`: JSON array — `[{"step":1,"action":"verb phrase","tool":"tool_name_or_null","note":"caveat"}]`
+- `outcome`: "success" | "partial" | "failure"
+- `notes`: lessons learned, edge cases, caveats
+- `importance`: 8+ to enable pre-injection into future task-start context
+- `id`: 0 for new procedures; existing id to record another run on an existing one
+
+**CRITICAL**: These are native tool calls. Never attempt to call them by writing SQL in your text response.

@@ -103,6 +103,8 @@ def load_llm_registry():
                 # Judge config: per-model LLM-as-judge enforcement
                 # None = no judging. Dict with keys: model, gates, mode, threshold
                 "judge_config": config.get('judge_config', None),
+                "memory_types_enabled": config.get('memory_types_enabled', False),
+                "self_model_enabled": config.get('self_model_enabled', True),
             }
 
         return registry

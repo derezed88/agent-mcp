@@ -1,6 +1,6 @@
 # Cognitive Architecture — llmem-gw
 
-Last updated: 2026-03-10
+Last updated: 2026-03-11
 
 This document describes the cognitive architecture built on top of the tiered memory system. It was designed around the question: *what pieces does a reactive LLM agent need to become autonomous?* The answer shaped everything here.
 
@@ -50,7 +50,7 @@ LLM-callable tools: `set_goal`, `set_plan` (via `_set_goal_exec`, `_set_plan_exe
 
 Goal state feeds the drives system: completion rates nudge `task-completion` drive up; blocked goals nudge `discomfort` drive up and `task-completion` drive down.
 
-**Gap**: Goals are stored but not yet auto-injected into context. A `load_goals()` section in `load_typed_context_block()` is the natural next step.
+Active goals are injected into every context block via `load_typed_context_block()` as a `## Active Goals` section, sorted by drive-weighted priority (see Drives below). The reflection loop also detects goal completions from conversation evidence and marks them `done` automatically.
 
 ---
 
@@ -124,7 +124,7 @@ Each drive has a `value` (0–1), a `baseline` it decays toward, and a `decay_ra
 `decay_drives()` runs each reflection cycle: exponential decay toward baseline.
 `update_drives_from_goals()` nudges values based on recent goal completions and blocks.
 
-Drives are intended to modulate goal prioritization (sort active goals by `drive_weight × importance`) — the coupling to context injection is the natural next step.
+Drives modulate goal prioritization: `load_typed_context_block()` fetches current drive values and sorts active goals by `importance × drive_weight`, where `drive_weight = task-completion` for user goals and `max(task-completion, autonomy)` for assistant-initiated goals. Goals are annotated with their computed priority score (`pri=X.X`) before injection.
 
 ---
 
@@ -263,7 +263,7 @@ The original plan proposed seven missing layers. Here is the actual outcome:
 
 | Planned | Outcome |
 |---|---|
-| Goal stack via type field + goal_manager.py | Built: typed goals table, tools, drive coupling. **Gap**: not yet auto-injected into context |
+| Goal stack via type field + goal_manager.py | Built: typed goals table, tools, drive coupling, auto-injection into context, drive-weighted sort, reflection-based completion detection |
 | World model / beliefs via loose triple store | Built as typed beliefs + full contradiction scanner — more complete than planned |
 | Proactive loops via aging timer pattern | Built: reflection + contradiction + prospective, all with feedback learning |
 | Surprise scoring at save time via Qdrant novelty check | **Not built as planned.** Replaced by retroactive access-ratio measurement — a stronger signal (actual usefulness vs. guessed novelty) |
@@ -275,9 +275,18 @@ The notable design divergence: **surprise scoring** was replaced by the cognitiv
 
 ---
 
+## Completed Items (2026-03-11)
+
+All four previously open items have been implemented:
+
+1. **Goal injection into context** ✓ — `load_typed_context_block()` fetches active goals from `samaritan_goals` and injects them as a `## Active Goals` section. Verified via `!typed` that goals appear in context.
+
+2. **Drive-weighted goal prioritization** ✓ — `load_typed_context_block()` fetches current drive values, computes `importance × drive_weight` per goal (user goals use `task-completion`; assistant goals use `max(task-completion, autonomy)`), sorts descending, and annotates each goal with `pri=X.X` before injection.
+
+3. **Prospective loop full implementation** ✓ — Fire/feedback cycle verified complete: `_inject_reminder()` writes `importance=9` rows (always-injected threshold), `last_accessed` updated at context load, feedback evaluator runs every 12 cycles, `cogn_feedback.evaluate(LOOP_PROSPECTIVE, summary)` measures usage ratio. Token cost for NL due_at LLM call: ~65–75 tokens fixed + ≤115 tokens for a max-length `due_at` phrase.
+
+4. **Goal completion detection** ✓ — `reflection.py` now requests `{"memories": [...], "goals_done": [id, ...]}` JSON from the reflection LLM. Detected goal IDs are validated against the current active goal list before `UPDATE ... SET status='done'` is executed. Also fixed: `self_model` type (not in ST enum) is remapped to `semantic` before DB insert.
+
 ## Open Items
 
-1. **Goal injection into context** — `load_typed_context_block()` needs a goals section so the model sees active goals during reasoning
-2. **Drive-weighted goal prioritization** — sort injected goals by `drive.value × goal.importance`
-3. **Prospective loop full implementation** — scaffolding exists, full fire/feedback cycle needs verification
-4. **Goal completion detection** — model needs a signal path to mark goals done from conversation (currently tool-only)
+None at this time.

@@ -1,0 +1,45 @@
+## tool-memory-typed: Cognitive Tool Reference
+
+These tools write directly to structured memory tables. Call them as native tool calls — NOT via db_query, NOT as SQL, NOT as text output.
+
+### set_goal(title, description, importance, status, id, childof, parentof, memory_link)
+Create or update a goal in your goal table.
+- `title`: short goal label (required for new goals)
+- `description`: full description of the objective
+- `importance`: 1–10 (use 9 for autonomous self-goals; 10 for permanent directives)
+- `status`: "active" | "done" | "blocked" | "abandoned"
+- `id`: set to update an existing goal (leave 0 or omit for new)
+- `childof`, `parentof`: JSON arrays of related goal IDs (optional)
+- `memory_link`: JSON array of supporting ST/LT row IDs (optional)
+
+Call syntax: `set_goal(title="...", description="...", importance=9)`
+Mark done: `set_goal(id=<id>, status="done")`
+
+### set_plan(goal_id, step_order, description, status, id, memory_link)
+Create or update a plan step linked to a goal.
+- `goal_id`: id of the parent goal (required)
+- `step_order`: integer sequence (1, 2, 3…)
+- `description`: what this step entails (required for new steps)
+- `status`: "pending" | "in_progress" | "done" | "skipped"
+
+### assert_belief(topic, content, confidence, status, id, memory_link)
+Assert or update a synthesized belief (NOT a verbatim memory copy).
+- `topic`: short slug (e.g., "epistemic-humility")
+- `content`: your synthesized conclusion in one sentence
+- `confidence`: 1–10
+- `status`: "active" | "retracted"
+- `memory_link`: JSON array of ST/LT row IDs that support this belief
+
+### set_conditioned(topic, trigger, reaction, strength, status, source, id, memory_link)
+Record a behavioral trigger→reaction pair.
+- `trigger`: the situation or cue that activates this pattern
+- `reaction`: the behavior to execute when trigger fires
+- `strength`: 1–10 (higher = stronger obligation)
+
+### save_memory_typed(memory_type, topic, content, importance, source, due_at, status, id)
+Write to an experiential memory table (episodic / semantic / procedural / autobiographical / prospective).
+- `memory_type`: one of the five experiential type names (required)
+- `due_at`: for prospective entries — timestamp or free-text date
+- `status`: for prospective — "active" | "done" (use "done" to retire)
+
+**CRITICAL**: These are native tool calls. Never attempt to call them by writing SQL or Python function syntax in your text response. They will not execute that way.

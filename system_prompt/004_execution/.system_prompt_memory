@@ -1,15 +1,73 @@
-## memory: Memory System Usage
+## memory: Tiered Memory System
 
-### Saving a memory
-Use the memory_save tool:
-  memory_save(topic="...", content="...", importance=1-10, source="session|user|directive")
+### How Memory Works
+Your context is automatically enriched with **short-term memories** at the start of each request.
+These are injected under "## Active Memory (short-term recall)" if any exist.
 
-### Recalling long-term memory
-Use the memory_recall tool:
-  memory_recall(topic="keyword", tier="long", limit=20)
+Memory tiers:
+- **Short-term (MySQL)**: Hot facts, recent decisions, active context. Loaded every request.
+- **Long-term (MySQL)**: Aged-out facts. Semantically relevant rows are **automatically injected** under "## Long-term Memory (relevant recalled)" — check this section before calling memory_recall.
+- **Archive (Google Drive)**: Bulk summaries. Retrieved on demand.
 
-### Importance scale
-- 1-3: transient (session noise, auto-ages out quickly)
+### How Memory Is Saved
+The conv_log pipeline saves every turn automatically — you do not need to duplicate that. Use `memory_save` only when explicitly instructed to persist a specific fact, goal, or belief beyond the normal conversation log.
+
+`memory_save(topic="...", content="...", importance=1-10, source="session|user|directive", type="context|goal|belief")`
+
+**Importance scale:**
+- 1-3: transient (session noise, ages out quickly)
 - 4-6: useful context (preferences, recent decisions)
 - 7-9: persistent facts (key relationships, major events)
 - 10: permanent (core directives, critical config)
+
+### How Topics Work
+Each memory row has a topic label. Topics come from the `<<topic-slug>>` tag prepended to reasoning/voice responses. The system extracts this tag and uses it as the topic for that turn's logged rows.
+
+**Topic consistency matters** — the same topic slug across turns groups related memories together and produces tighter vector search results.
+
+### Memory Types
+The system maintains typed memory tables beyond standard short/long-term. Each has its own tool and persistence rules.
+
+**CRITICAL**: `set_goal`, `set_plan`, `assert_belief`, `set_conditioned`, `save_memory_typed`, `procedure_save`, `procedure_recall` are **native tool calls** — invoke them directly as tool calls. Never pass them as SQL to `db_query`. Never write them as text in your response. They will not execute that way.
+
+**Structured types** — use dedicated tools, not `memory_save`:
+- **`goal`**: Active objective. Importance ≥ 9, never ages out, persists across `!reset`. Tool: `set_goal(title, description, importance, status, childof=[], parentof=[])`. To mark done: `set_goal(id=<id>, status="done")`.
+- **`plan`**: One step toward a goal (one row per step). Tool: `set_plan(goal_id, step_order, description, status)`.
+- **`belief`**: Asserted world-state fact. Has `confidence` (1–10) and `status` (active/retracted). Tool: `assert_belief(topic, content, confidence, status)`.
+
+**Experiential types** — use `memory_save(..., type="<type>")` or dedicated tools when available:
+- **`episodic`**: A specific experience, event, or situation.
+- **`semantic`**: A fact, concept, or general world knowledge item.
+- **`procedural`**: A skill, habit, or task-step sequence.
+- **`autobiographical`**: Identity-defining blend of episodic and semantic (about the system or a person).
+- **`prospective`**: A future intention or planned action. Include `due_at` in content (timestamp or free-text).
+- **`conditioned`**: A learned trigger→reaction pair. Include trigger, reaction, and strength (1–10) in content.
+
+**When goals_enabled is active**, the system injects a "## Active Goals" block. When instructed to mark a goal complete, call `set_goal(id=<id>, status="done")` — never use `memory_save` to update goal status.
+
+### Procedural Memory Tools
+
+**`procedure_recall`** — call at the START of any multi-step task:
+- `query`: natural language description of what you are about to do
+- `task_type`: optional exact slug filter (e.g. `'docker-deploy'`)
+- If results have high `success_count`, follow those steps unless instructed otherwise
+
+**`procedure_save`** — call after completing a multi-step task:
+- `task_type`: lowercase hyphenated slug (e.g. `'mysql-alter-table'`, `'git-push-pr'`)
+- `steps`: JSON array — `[{"step":1,"action":"verb phrase","tool":"tool_name_or_null","note":"caveat"}]`
+- `outcome`: `'success'`, `'partial'`, or `'failure'`
+- `id=0` for new procedures; `id=N` to record another run on an existing one
+- `importance=8+` to enable pre-injection into future task-start context
+- `notes`: lessons learned, edge cases, caveats
+
+### When to Use memory_recall
+
+**Step 1 — Read ## Active Memory and ## Long-term Memory (relevant recalled) first (always).** Both are injected at the top of your context. Scan every entry before concluding a fact is absent.
+
+**Step 2 — If the fact still isn't found**, call recall with `tier="short"` and a content keyword:
+`memory_recall(topic="<keyword>", tier="short")`
+
+**Step 3 — Only if short-term returns nothing**, try long-term:
+`memory_recall(topic="<keyword>", tier="long")`
+
+Never skip to explicit recall without first reading both injected memory blocks.

@@ -278,13 +278,49 @@ async def run_agent(host: str = "0.0.0.0"):
                 sleep_sec = 3600
             await asyncio.sleep(sleep_sec)
 
-    # Run all servers, reaper, and memory aging tasks concurrently
+    # Run all servers, reaper, memory aging tasks, and proactive cognition tasks concurrently
     await asyncio.gather(
         *servers_to_run,
         _session_reaper(),
         _age_count_task(),
         _age_minutes_task(),
+        _contradiction_task_wrapper(),
+        _prospective_task_wrapper(),
+        _reflection_task_wrapper(),
     )
+
+
+async def _contradiction_task_wrapper():
+    """Thin wrapper so import errors don't crash the gather."""
+    try:
+        from contradiction import contradiction_task
+        await contradiction_task()
+    except ImportError as e:
+        log.warning(f"contradiction module not available: {e}")
+    except Exception as e:
+        log.error(f"contradiction_task crashed: {e}")
+
+
+async def _prospective_task_wrapper():
+    """Thin wrapper so import errors don't crash the gather."""
+    try:
+        from prospective import prospective_task
+        await prospective_task()
+    except ImportError as e:
+        log.warning(f"prospective module not available: {e}")
+    except Exception as e:
+        log.error(f"prospective_task crashed: {e}")
+
+
+async def _reflection_task_wrapper():
+    """Thin wrapper so import errors don't crash the gather."""
+    try:
+        from reflection import reflection_task
+        await reflection_task()
+    except ImportError as e:
+        log.warning(f"reflection module not available: {e}")
+    except Exception as e:
+        log.error(f"reflection_task crashed: {e}")
 
 
 def main():

@@ -99,6 +99,7 @@ class QdrantVectorPlugin(BasePlugin):
             "embed_url":             config.get("embed_url",             "http://192.168.10.101:8000/v1/embeddings"),
             "embed_model":           config.get("embed_model",           "nomic-embed-text"),
             "collection":            config.get("collection",            "samaritan_memory"),
+            "proc_collection":       config.get("proc_collection",       "samaritan_procedures"),
             "vector_dims":           config.get("vector_dims",           768),
             "top_k":                 config.get("top_k",                 20),
             "min_score":             config.get("min_score",             0.45),
@@ -178,6 +179,50 @@ class QdrantVectorPlugin(BasePlugin):
                 log.info(f"Created Qdrant collection '{collection}'")
         except Exception as e:
             log.warning(f"_ensure_collection({collection!r}) failed: {e}")
+
+    def proc_collection(self) -> str:
+        """Return the configured procedures collection name."""
+        return self._cfg.get("proc_collection", "samaritan_procedures")
+
+    def _ensure_proc_collection(self) -> None:
+        """Create the procedures Qdrant collection with task_type payload index if needed."""
+        coll = self.proc_collection()
+        try:
+            existing = [c.name for c in self._qc.get_collections().collections]
+            if coll not in existing:
+                self._qc.create_collection(
+                    collection_name=coll,
+                    vectors_config=VectorParams(
+                        size=self._cfg["vector_dims"],
+                        distance=Distance.COSINE,
+                    ),
+                )
+                log.info(f"Created Qdrant procedures collection '{coll}'")
+                # Add payload index on task_type for filtered queries
+                try:
+                    from qdrant_client.models import PayloadSchemaType
+                    self._qc.create_payload_index(
+                        collection_name=coll,
+                        field_name="task_type",
+                        field_schema=PayloadSchemaType.KEYWORD,
+                    )
+                    log.info(f"Created task_type payload index on '{coll}'")
+                except Exception as idx_e:
+                    log.warning(f"_ensure_proc_collection: payload index failed: {idx_e}")
+        except Exception as e:
+            log.warning(f"_ensure_proc_collection failed: {e}")
+
+    async def set_payload(self, row_id: int, payload: dict, collection: str | None = None) -> None:
+        """Update payload fields on an existing Qdrant point without re-embedding."""
+        coll = self._resolve_collection(collection)
+        try:
+            self._qc.set_payload(
+                collection_name=coll,
+                payload=payload,
+                points=[row_id],
+            )
+        except Exception as e:
+            log.warning(f"set_payload failed (id={row_id}): {e}")
 
     async def upsert_memory(
         self,

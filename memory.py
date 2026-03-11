@@ -61,6 +61,74 @@ def _SUM() -> str:
 def _COLLECTION() -> str:
     return get_tables_for_model().get("collection", "samaritan_memory")
 
+def _GOALS() -> str:
+    return get_tables_for_model().get("goals", "samaritan_goals")
+
+def _PLANS() -> str:
+    return get_tables_for_model().get("plans", "samaritan_plans")
+
+def _BELIEFS() -> str:
+    return get_tables_for_model().get("beliefs", "samaritan_beliefs")
+
+def _CONDITIONED() -> str:
+    return get_tables_for_model().get("conditioned", "samaritan_conditioned")
+
+def _EPISODIC() -> str:
+    return get_tables_for_model().get("episodic", "samaritan_episodic")
+
+def _SEMANTIC() -> str:
+    return get_tables_for_model().get("semantic", "samaritan_semantic")
+
+def _PROCEDURAL() -> str:
+    return get_tables_for_model().get("procedural", "samaritan_procedural")
+
+def _AUTOBIOGRAPHICAL() -> str:
+    return get_tables_for_model().get("autobiographical", "samaritan_autobiographical")
+
+def _PROSPECTIVE() -> str:
+    return get_tables_for_model().get("prospective", "samaritan_prospective")
+
+def _PROCEDURES() -> str:
+    """Structured procedural table (same physical table as _PROCEDURAL, distinct intent)."""
+    return get_tables_for_model().get("procedural", "samaritan_procedural")
+
+def _PROC_COLLECTION() -> str:
+    return get_tables_for_model().get("proc_collection", "samaritan_procedures")
+
+def _DRIVES() -> str:
+    return get_tables_for_model().get("drives", "samaritan_drives")
+
+# ---------------------------------------------------------------------------
+# Typed table metrics — write/read counters, reset on restart
+# ---------------------------------------------------------------------------
+
+_typed_metrics: dict[str, dict[str, int]] = {
+    "goals":           {"writes": 0, "reads": 0},
+    "plans":           {"writes": 0, "reads": 0},
+    "beliefs":         {"writes": 0, "reads": 0},
+    "conditioned":     {"writes": 0, "reads": 0},
+    "episodic":        {"writes": 0, "reads": 0},
+    "semantic":        {"writes": 0, "reads": 0},
+    "procedural":      {"writes": 0, "reads": 0},
+    "autobiographical":{"writes": 0, "reads": 0},
+    "prospective":     {"writes": 0, "reads": 0},
+    "procedures":      {"writes": 0, "reads": 0},
+    "drives":          {"writes": 0, "reads": 0},
+}
+
+def _typed_metric_write(table: str) -> None:
+    key = table.split("_")[-1]  # strip prefix → "goals"/"plans"/"beliefs"
+    if key in _typed_metrics:
+        _typed_metrics[key]["writes"] += 1
+
+def _typed_metric_read(table: str, count: int = 1) -> None:
+    key = table.split("_")[-1]
+    if key in _typed_metrics:
+        _typed_metrics[key]["reads"] += count
+
+def get_typed_metrics() -> dict:
+    return {k: dict(v) for k, v in _typed_metrics.items()}
+
 # ---------------------------------------------------------------------------
 # Config helpers (read from plugins-enabled.json at call time)
 # ---------------------------------------------------------------------------
@@ -73,6 +141,16 @@ def _mem_plugin_cfg() -> dict:
             return json.load(f).get("plugin_config", {}).get("memory", {})
     except Exception:
         return {}
+
+
+def _safe_int(value, default: int) -> int:
+    """Coerce value to int, falling back to default if conversion fails.
+    Guards against corrupted config values (e.g. LLM text written into an int field)."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        log.warning(f"_age_cfg: expected int for config value, got {value!r}; using default {default}")
+        return default
 
 
 def _age_cfg() -> dict:
@@ -90,18 +168,19 @@ def _age_cfg() -> dict:
       memory_age_entrycount       int   — legacy alias for short_hwm (kept for backwards compat)
     """
     cfg = _mem_plugin_cfg()
-    hwm = int(cfg.get("short_hwm", cfg.get("memory_age_entrycount", 100)))
+    hwm = _safe_int(cfg.get("short_hwm", cfg.get("memory_age_entrycount", 100)), 100)
     return {
         "auto_memory_age":            cfg.get("auto_memory_age",            True),
         "short_hwm":                  hwm,
-        "short_lwm":                  int(cfg.get("short_lwm",                  50)),
-        "recent_turns_protect":       int(cfg.get("recent_turns_protect",       10)),
-        "staleness_override_minutes": int(cfg.get("staleness_override_minutes", 2880)),
-        "chunk_importance_threshold": int(cfg.get("chunk_importance_threshold", 8)),
-        "memory_age_count_timer":     int(cfg.get("memory_age_count_timer",     60)),
-        "memory_age_minutes_timer":   int(cfg.get("memory_age_minutes_timer",   360)),
-        "memory_age_trigger_minutes": int(cfg.get("memory_age_trigger_minutes", 2880)),
+        "short_lwm":                  _safe_int(cfg.get("short_lwm",                  50),   50),
+        "recent_turns_protect":       _safe_int(cfg.get("recent_turns_protect",       10),   10),
+        "staleness_override_minutes": _safe_int(cfg.get("staleness_override_minutes", 2880), 2880),
+        "chunk_importance_threshold": _safe_int(cfg.get("chunk_importance_threshold", 8),    8),
+        "memory_age_count_timer":     _safe_int(cfg.get("memory_age_count_timer",     60),   60),
+        "memory_age_minutes_timer":   _safe_int(cfg.get("memory_age_minutes_timer",   360),  360),
+        "memory_age_trigger_minutes": _safe_int(cfg.get("memory_age_trigger_minutes", 2880), 2880),
         "memory_age_entrycount":      hwm,  # legacy alias
+        "protected_topic_prefixes": ["self-capability-", "self-failure-", "self-preference-", "self-summary"],
     }
 
 
@@ -178,6 +257,7 @@ async def save_memory(
     importance: int = 5,
     source: str = "session",
     session_id: str = "",
+    type: str = "context",
 ) -> int:
     """Insert a new short-term memory row. Returns new row id, or 0 if duplicate/error."""
     if not _mem_plugin_cfg().get("enabled", True):
@@ -187,6 +267,7 @@ async def save_memory(
     session_id = (session_id or "").replace("'", "''")[:255]
     source = source if source in ("session", "user", "directive", "assistant") else "session"
     importance = max(1, min(10, int(importance)))
+    mem_type = type if type in _MEMORY_TYPES else "context"
 
     # Dedup pass 1: exact match on topic+content in both tiers
     try:
@@ -233,8 +314,8 @@ async def save_memory(
 
     sql = (
         f"INSERT INTO {_ST()} "
-        f"(topic, content, importance, source, session_id) "
-        f"VALUES ('{topic}', '{content}', {importance}, '{source}', '{session_id}')"
+        f"(topic, content, importance, source, session_id, type) "
+        f"VALUES ('{topic}', '{content}', {importance}, '{source}', '{session_id}', '{mem_type}')"
     )
     try:
         row_id = await execute_insert(sql)
@@ -267,6 +348,15 @@ async def save_memory(
 # ---------------------------------------------------------------------------
 
 _TOPIC_TAG_RE = re.compile(r'^<<([a-z0-9][a-z0-9\-]*)>>\s*', re.IGNORECASE)
+_TYPE_TAG_RE  = re.compile(r'<<type:([a-z]+)>>\s*', re.IGNORECASE)
+
+# Valid memory types — must match the ENUM in the DB schema
+_MEMORY_TYPES = frozenset({
+    "context", "goal", "plan", "belief",
+    "episodic", "semantic", "procedural",
+    "autobiographical", "prospective", "conditioned",
+    "self_model",
+})
 
 
 def _extract_topic_tag(text: str) -> tuple[str | None, str]:
@@ -279,6 +369,21 @@ def _extract_topic_tag(text: str) -> tuple[str | None, str]:
     if m:
         return m.group(1).lower(), text[m.end():]
     return None, text
+
+
+def _extract_type_tag(text: str) -> tuple[str, str]:
+    """Extract <<type:X>> tag from anywhere in assistant text.
+
+    Returns (type_value, text_with_tag_stripped).
+    Falls back to 'context' if tag absent or value not in _MEMORY_TYPES.
+    """
+    m = _TYPE_TAG_RE.search(text)
+    if m:
+        val = m.group(1).lower()
+        mem_type = val if val in _MEMORY_TYPES else "context"
+        cleaned = text[:m.start()] + text[m.end():]
+        return mem_type, cleaned.strip()
+    return "context", text
 
 
 def _make_conv_topic(user_text: str) -> str:
@@ -337,6 +442,7 @@ async def save_conversation_turn(
     assistant_text: str,
     session_id: str = "",
     importance: int = 4,
+    memory_types_enabled: bool = False,
 ) -> tuple[int, int, str | None]:
     """Save a user prompt and assistant response as two verbatim memory rows.
 
@@ -347,6 +453,9 @@ async def save_conversation_turn(
     The extracted tag is fuzzy-matched against existing topics to prevent
     near-duplicate topic proliferation (e.g. 'kitchen-plumbing' → 'plumbing-issue').
 
+    When memory_types_enabled is True, also extracts <<type:X>> from the assistant
+    text and stores it as the type for both rows. Falls back to 'context'.
+
     Returns (user_row_id, assistant_row_id, topic_used).
     Row IDs of 0 mean duplicate/skipped.
     """
@@ -355,12 +464,18 @@ async def save_conversation_turn(
         topic_tag = await _normalize_topic(topic_tag)
     topic = topic_tag if topic_tag else _make_conv_topic(user_text)
 
+    if memory_types_enabled:
+        mem_type, asst_clean = _extract_type_tag(asst_clean)
+    else:
+        mem_type = "context"
+
     user_id = await save_memory(
         topic=topic,
         content=user_text,
         importance=importance,
         source="user",
         session_id=session_id,
+        type=mem_type,
     )
     asst_id = await save_memory(
         topic=topic,
@@ -368,6 +483,7 @@ async def save_conversation_turn(
         importance=importance,
         source="assistant",
         session_id=session_id,
+        type=mem_type,
     )
     return user_id, asst_id, topic
 
@@ -803,6 +919,10 @@ async def _age_topic_chunks(
             if not topic_name or topic_name.lower() == "topic":
                 continue
             if topic_name not in truly_protected:
+                # Skip self-model topics — they are protected by prefix
+                _protected_prefixes = cfg.get("protected_topic_prefixes", [])
+                if any(topic_name.startswith(p) for p in _protected_prefixes):
+                    continue
                 candidate_topics.append(topic_name)
     except Exception as e:
         log.error(f"_age_topic_chunks: candidate query failed: {e}")
@@ -976,11 +1096,710 @@ async def _update_lt_last_accessed(row_ids: list) -> None:
         log.debug(f"_update_lt_last_accessed failed: {e}")
 
 
+async def load_typed_context_block() -> str:
+    """
+    Return a formatted block of active goals, plans, and beliefs for prompt injection.
+    Only populated when memory_types_enabled models write to the typed tables.
+    Returns empty string if all tables are empty.
+    """
+    from database import fetch_dicts
+    lines = []
+
+    try:
+        goals = await fetch_dicts(
+            f"SELECT id, title, description, status, importance "
+            f"FROM {_GOALS()} WHERE status = 'active'"
+        )
+        if goals:
+            _typed_metric_read(_GOALS(), len(goals))
+            # Drive-weighted prioritization: score = importance × task_completion_drive
+            # Falls back to importance-only sort if drives unavailable
+            try:
+                drive_rows = await fetch_dicts(
+                    f"SELECT name, value FROM {_DRIVES()} WHERE status IS NULL OR status != 'inactive'"
+                )
+                drive_map = {d["name"]: float(d.get("value", 0.5)) for d in (drive_rows or [])}
+            except Exception:
+                drive_map = {}
+            tc = drive_map.get("task-completion", 0.7)
+            autonomy = drive_map.get("autonomy", 0.4)
+            # Score: blend task-completion and autonomy drives against importance
+            for g in goals:
+                imp = g.get("importance", 9)
+                source = g.get("source", "")
+                drive_weight = tc if source != "assistant" else max(tc, autonomy)
+                g["_priority"] = imp * drive_weight
+            goals.sort(key=lambda g: g["_priority"], reverse=True)
+            lines.append("## Active Goals\n")
+            for g in goals:
+                score = f"{g['_priority']:.1f}"
+                lines.append(
+                    f"  [id={g['id']} imp={g.get('importance',9)} pri={score}] "
+                    f"{g.get('title','')} — {g.get('description','')}"
+                )
+            lines.append("")
+    except Exception as e:
+        log.debug(f"load_typed_context_block: goals failed: {e}")
+
+    try:
+        beliefs = await fetch_dicts(
+            f"SELECT id, topic, content, confidence "
+            f"FROM {_BELIEFS()} WHERE status = 'active' ORDER BY confidence DESC"
+        )
+        if beliefs:
+            _typed_metric_read(_BELIEFS(), len(beliefs))
+            lines.append("## Active Beliefs\n")
+            for b in beliefs:
+                lines.append(
+                    f"  [id={b['id']} conf={b.get('confidence',7)}] "
+                    f"[{b.get('topic','')}] {b.get('content','')}"
+                )
+            lines.append("")
+    except Exception as e:
+        log.debug(f"load_typed_context_block: beliefs failed: {e}")
+
+    try:
+        plans = await fetch_dicts(
+            f"SELECT p.id, p.goal_id, p.step_order, p.description, p.status, g.title as goal_title "
+            f"FROM {_PLANS()} p "
+            f"LEFT JOIN {_GOALS()} g ON g.id = p.goal_id "
+            f"WHERE p.status IN ('pending','in_progress') "
+            f"ORDER BY p.goal_id, p.step_order"
+        )
+        if plans:
+            _typed_metric_read(_PLANS(), len(plans))
+            lines.append("## Active Plans\n")
+            by_goal: dict = {}
+            for p in plans:
+                gid = p.get("goal_id", "?")
+                by_goal.setdefault(gid, {"title": p.get("goal_title", f"goal {gid}"), "steps": []})
+                by_goal[gid]["steps"].append(p)
+            for gid, gdata in by_goal.items():
+                lines.append(f"  **{gdata['title']}**")
+                for step in gdata["steps"]:
+                    status_mark = "▶" if step.get("status") == "in_progress" else "○"
+                    lines.append(
+                        f"    {status_mark} [{step.get('step_order','?')}] {step.get('description','')}"
+                    )
+            lines.append("")
+    except Exception as e:
+        log.debug(f"load_typed_context_block: plans failed: {e}")
+
+    try:
+        conditioned = await fetch_dicts(
+            f"SELECT id, topic, `trigger`, `reaction`, strength "
+            f"FROM {_CONDITIONED()} WHERE status = 'active' ORDER BY strength DESC"
+        )
+        if conditioned:
+            _typed_metric_read(_CONDITIONED(), len(conditioned))
+            lines.append("## Conditioned Behaviors\n")
+            for c in conditioned:
+                lines.append(
+                    f"  [id={c['id']} strength={c.get('strength',5)}] "
+                    f"[{c.get('topic','')}] "
+                    f"TRIGGER: {c.get('trigger','')} → REACT: {c.get('reaction','')}"
+                )
+            lines.append("")
+    except Exception as e:
+        log.debug(f"load_typed_context_block: conditioned failed: {e}")
+
+    try:
+        autobio = await fetch_dicts(
+            f"SELECT id, topic, content, importance "
+            f"FROM {_AUTOBIOGRAPHICAL()} ORDER BY importance DESC LIMIT 20"
+        )
+        if autobio:
+            _typed_metric_read(_AUTOBIOGRAPHICAL(), len(autobio))
+            lines.append("## Autobiographical Memory\n")
+            for a in autobio:
+                lines.append(
+                    f"  [id={a['id']} imp={a.get('importance',7)}] "
+                    f"[{a.get('topic','')}] {a.get('content','')}"
+                )
+            lines.append("")
+    except Exception as e:
+        log.debug(f"load_typed_context_block: autobiographical failed: {e}")
+
+    try:
+        prospective = await fetch_dicts(
+            f"SELECT id, topic, content, due_at, importance "
+            f"FROM {_PROSPECTIVE()} WHERE status = 'pending' ORDER BY importance DESC"
+        )
+        if prospective:
+            _typed_metric_read(_PROSPECTIVE(), len(prospective))
+            lines.append("## Pending Intentions\n")
+            for p in prospective:
+                due = f" (due: {p['due_at']})" if p.get("due_at") else ""
+                lines.append(
+                    f"  [id={p['id']} imp={p.get('importance',7)}] "
+                    f"[{p.get('topic','')}]{due} {p.get('content','')}"
+                )
+            lines.append("")
+    except Exception as e:
+        log.debug(f"load_typed_context_block: prospective failed: {e}")
+
+    try:
+        drives = await fetch_dicts(
+            f"SELECT name, value, description FROM {_DRIVES()} ORDER BY value DESC"
+        )
+        if drives:
+            _typed_metric_read(_DRIVES(), len(drives))
+            lines.append("## Active Drives\n")
+            for d in drives:
+                bar = int(round(d.get("value", 0.5) * 10))
+                lines.append(
+                    f"  {d['name']}: {d.get('value', 0.5):.2f}  {'█' * bar}{'░' * (10 - bar)}"
+                    f"  — {d.get('description', '')}"
+                )
+            lines.append("")
+    except Exception as e:
+        log.debug(f"load_typed_context_block: drives failed: {e}")
+
+    try:
+        from database import fetch_dicts as _fetch_dicts_local
+        self_rows = await _fetch_dicts_local(
+            f"SELECT content FROM {_ST()} WHERE topic = 'self-summary' ORDER BY id DESC LIMIT 1"
+        )
+        if self_rows and self_rows[0].get("content"):
+            lines.append("## Self-Model\n")
+            lines.append(self_rows[0]["content"].strip() + "\n")
+    except Exception as e:
+        log.debug(f"load_typed_context_block: self-summary failed: {e}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Self-model: distill self-* rows into a standing summary
+# ---------------------------------------------------------------------------
+
+async def refresh_self_summary(llm_call_fn=None) -> str:
+    """
+    Distil all self-* rows (excluding self-summary) into a 3-5 bullet standing summary.
+    Saves the result as a new ST row with topic='self-summary', importance=10, type='self_model'.
+    Returns the summary string, or "" if no self-* rows exist.
+
+    llm_call_fn: optional async callable(model_key: str, prompt: str) -> str.
+                 Defaults to agents._call_llm_text with 'summarizer-anthropic'.
+    """
+    from database import fetch_dicts as _fd
+    from config import get_model_role
+
+    st_table = _ST()
+    lt_table = _LT()
+
+    try:
+        st_rows = await _fd(
+            f"SELECT id, topic, content, importance FROM {st_table} "
+            f"WHERE topic LIKE 'self-%' AND topic != 'self-summary' "
+            f"ORDER BY importance DESC, id DESC LIMIT 20"
+        ) or []
+        lt_rows = await _fd(
+            f"SELECT id, topic, content, importance FROM {lt_table} "
+            f"WHERE topic LIKE 'self-%' AND topic != 'self-summary' "
+            f"ORDER BY importance DESC, id DESC LIMIT 20"
+        ) or []
+    except Exception as e:
+        log.warning(f"refresh_self_summary: DB fetch failed: {e}")
+        return ""
+
+    all_rows = st_rows + lt_rows
+    if not all_rows:
+        log.debug("refresh_self_summary: no self-* rows found, skipping")
+        return ""
+
+    lines = []
+    for r in all_rows:
+        lines.append(f"[{r.get('topic','')} imp={r.get('importance',5)}] {r.get('content','')[:300]}")
+    rows_text = "\n".join(lines)
+
+    prompt = (
+        "You are a self-model distiller. Below are facts about an AI agent's capabilities, "
+        "failures, and preferences, recorded from its own experience.\n\n"
+        "Synthesise these into 3-5 concise bullet points (one sentence each) that capture "
+        "the most important standing truths about this agent. "
+        "Max 200 words total. Use plain text, no JSON. Start each bullet with '- '.\n\n"
+        f"SELF-MODEL ROWS:\n{rows_text}"
+    )
+
+    summary_text = ""
+    try:
+        if llm_call_fn is not None:
+            summary_text = await llm_call_fn(prompt)
+        else:
+            from agents import _call_llm_text
+            model_key = get_model_role("summarizer") or "summarizer-anthropic"
+            summary_text = await _call_llm_text(model_key, prompt)
+    except Exception as e:
+        log.warning(f"refresh_self_summary: LLM call failed: {e}")
+        return ""
+
+    if not summary_text:
+        return ""
+
+    summary_text = summary_text.strip()
+
+    try:
+        await save_memory(
+            topic="self-summary",
+            content=summary_text,
+            importance=10,
+            source="session",
+            type="self_model",
+        )
+        log.info("refresh_self_summary: saved new self-summary row")
+    except Exception as e:
+        log.warning(f"refresh_self_summary: save failed: {e}")
+
+    return summary_text
+
+
+# ---------------------------------------------------------------------------
+# Drive / Affect system — load, update, decay
+# ---------------------------------------------------------------------------
+
+async def load_drives() -> list[dict]:
+    """Return all drive rows ordered by value descending."""
+    from database import fetch_dicts
+    try:
+        rows = await fetch_dicts(
+            f"SELECT id, name, description, value, baseline, decay_rate, source "
+            f"FROM {_DRIVES()} ORDER BY value DESC"
+        )
+        _typed_metric_read(_DRIVES(), len(rows or []))
+        return rows or []
+    except Exception as e:
+        log.debug(f"load_drives failed: {e}")
+        return []
+
+
+async def update_drive(name: str, value: float, source: str = "user") -> bool:
+    """
+    Set a drive value by name (0.0-1.0). Creates the row if absent.
+    Returns True on success.
+    """
+    from database import execute_sql, execute_insert, fetch_dicts
+    value = max(0.0, min(1.0, float(value)))
+    name = name.strip().lower()[:64]
+    tbl = _DRIVES()
+    try:
+        existing = await fetch_dicts(
+            f"SELECT id FROM {tbl} WHERE name = '{name}' LIMIT 1"
+        )
+        if existing:
+            await execute_sql(
+                f"UPDATE {tbl} SET value={value:.4f}, source='{source}' WHERE name='{name}'"
+            )
+        else:
+            # Insert with default baseline=value (user is explicitly setting it)
+            await execute_insert(
+                f"INSERT INTO {tbl} (name, description, value, baseline, decay_rate, source) "
+                f"VALUES ('{name}', '', {value:.4f}, {value:.4f}, 0.05, '{source}')"
+            )
+        _typed_metric_write(tbl)
+        return True
+    except Exception as e:
+        log.warning(f"update_drive({name}={value}): {e}")
+        return False
+
+
+async def decay_drives() -> int:
+    """
+    Apply per-cycle decay toward each drive's baseline.
+    Called by reflection loop. Returns number of drives updated.
+    """
+    from database import fetch_dicts, execute_sql
+    tbl = _DRIVES()
+    try:
+        drives = await fetch_dicts(
+            f"SELECT id, name, value, baseline, decay_rate FROM {tbl}"
+        )
+    except Exception as e:
+        log.debug(f"decay_drives: fetch failed: {e}")
+        return 0
+
+    updated = 0
+    for d in (drives or []):
+        v = float(d.get("value", 0.5))
+        b = float(d.get("baseline", 0.5))
+        r = float(d.get("decay_rate", 0.05))
+        if abs(v - b) < 0.005:
+            continue
+        new_v = v + (b - v) * r
+        new_v = round(max(0.0, min(1.0, new_v)), 4)
+        try:
+            await execute_sql(
+                f"UPDATE {tbl} SET value={new_v} WHERE id={d['id']}"
+            )
+            updated += 1
+        except Exception as e:
+            log.debug(f"decay_drives: update id={d['id']} failed: {e}")
+
+    if updated:
+        log.debug(f"decay_drives: decayed {updated} drives toward baseline")
+    return updated
+
+
+async def update_drives_from_goals() -> dict:
+    """
+    Examine goal completion rates and nudge drive values accordingly.
+    Called at the end of each reflection cycle.
+
+    Rules:
+      - For every goal completed since last reflection: +0.1 to task-completion
+      - For every goal blocked: +0.05 to discomfort, -0.05 to task-completion
+      - If zero recent completions and >3 active goals: task-completion decays faster this cycle
+      - Always apply normal decay first (baseline pull)
+
+    Returns summary dict.
+    """
+    from database import fetch_dicts
+    summary = {"drives_updated": 0, "goals_done": 0, "goals_blocked": 0}
+
+    try:
+        goals = await fetch_dicts(
+            f"SELECT status FROM {_GOALS()}"
+        )
+    except Exception as e:
+        log.debug(f"update_drives_from_goals: goals fetch failed: {e}")
+        return summary
+
+    done_count    = sum(1 for g in (goals or []) if g.get("status") == "done")
+    blocked_count = sum(1 for g in (goals or []) if g.get("status") == "blocked")
+    active_count  = sum(1 for g in (goals or []) if g.get("status") == "active")
+
+    summary["goals_done"]    = done_count
+    summary["goals_blocked"] = blocked_count
+
+    # Apply standard decay toward baseline for all drives
+    decayed = await decay_drives()
+
+    # Load current drives to nudge
+    tbl = _DRIVES()
+    try:
+        drives = {d["name"]: d for d in (await fetch_dicts(f"SELECT * FROM {tbl}") or [])}
+    except Exception as e:
+        log.debug(f"update_drives_from_goals: drives fetch failed: {e}")
+        return summary
+
+    async def _nudge(name: str, delta: float) -> None:
+        if name not in drives:
+            return
+        current = float(drives[name].get("value", 0.5))
+        new_v = round(max(0.0, min(1.0, current + delta)), 4)
+        try:
+            await execute_sql(
+                f"UPDATE {tbl} SET value={new_v}, source='reflection' WHERE name='{name}'"
+            )
+            _typed_metric_write(tbl)
+            summary["drives_updated"] += 1
+        except Exception as e:
+            log.debug(f"_nudge({name}): {e}")
+
+    if done_count > 0:
+        await _nudge("task-completion", 0.05 * min(done_count, 3))
+    if blocked_count > 0:
+        await _nudge("discomfort",      0.05 * min(blocked_count, 2))
+        await _nudge("task-completion", -0.03 * min(blocked_count, 2))
+    if done_count == 0 and active_count > 3:
+        await _nudge("task-completion", -0.02)
+
+    log.info(
+        f"update_drives_from_goals: done={done_count} blocked={blocked_count} "
+        f"active={active_count} drives_updated={summary['drives_updated']} decayed={decayed}"
+    )
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Structured procedural memory — save / recall / inject
+# ---------------------------------------------------------------------------
+
+async def _upsert_procedure_vec(
+    row_id: int, topic: str, task_type: str,
+    embed_text: str, importance: int, outcome: str,
+) -> None:
+    """Fire-and-forget: embed procedure and upsert into samaritan_procedures collection."""
+    try:
+        from plugin_memory_vector_qdrant import get_vector_api
+        vec = get_vector_api()
+        if not vec:
+            return
+        coll = _PROC_COLLECTION()
+        vec._ensure_proc_collection()
+        await vec.upsert_memory(
+            row_id=row_id,
+            topic=topic,
+            content=embed_text,
+            importance=importance,
+            tier="procedure",
+            collection=coll,
+        )
+        # Add task_type and outcome as searchable payload fields
+        await vec.set_payload(row_id, {"task_type": task_type, "outcome": outcome}, collection=coll)
+    except Exception as e:
+        log.warning(f"_upsert_procedure_vec failed (id={row_id}): {e}")
+
+
+async def _update_procedure_outcome_vec(row_id: int, outcome: str) -> None:
+    """Lightweight payload-only update when only outcome changes — no re-embed."""
+    try:
+        from plugin_memory_vector_qdrant import get_vector_api
+        vec = get_vector_api()
+        if vec:
+            await vec.set_payload(row_id, {"outcome": outcome}, collection=_PROC_COLLECTION())
+    except Exception as e:
+        log.warning(f"_update_procedure_outcome_vec failed (id={row_id}): {e}")
+
+
+async def save_procedure(
+    topic: str,
+    task_type: str,
+    steps: list[dict],
+    outcome: str = "unknown",
+    notes: str = "",
+    importance: int = 7,
+    source: str = "assistant",
+    session_id: str = "",
+    id: int = 0,
+) -> int:
+    """
+    Save or update a structured procedure in samaritan_procedural.
+    id=0: INSERT new row.
+    id>0: UPDATE existing row (increments run_count, updates outcome/notes).
+    Returns the MySQL row_id.
+    """
+    from database import fetch_dicts
+    outcome = outcome if outcome in ("success", "partial", "failure", "unknown") else "unknown"
+    importance = max(1, min(10, int(importance)))
+    steps_json = json.dumps(steps).replace("'", "''")
+    embed_text = f"{task_type}: {topic}. Steps: " + "; ".join(s.get("action", "") for s in steps)
+    content_val = embed_text.replace("'", "''")
+
+    if id and id > 0:
+        # Fetch current state
+        rows = await fetch_dicts(
+            f"SELECT run_count, success_count, steps, notes FROM {_PROCEDURES()} WHERE id = {id}"
+        )
+        if not rows:
+            return 0
+        cur = rows[0]
+        new_run = int(cur.get("run_count") or 1) + 1
+        new_success = int(cur.get("success_count") or 0) + (1 if outcome == "success" else 0)
+        # Detect steps change for re-embed decision
+        old_steps = cur.get("steps") or ""
+        steps_changed = steps_json.replace("''", "'") != old_steps
+
+        note_append = ""
+        if notes:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            existing_notes = (cur.get("notes") or "").replace("'", "''")
+            note_append = f"{existing_notes} | {ts}: {notes.replace(chr(39), chr(39)*2)}"
+
+        parts = [
+            f"outcome = '{outcome}'",
+            f"run_count = {new_run}",
+            f"success_count = {new_success}",
+            f"last_run_at = NOW()",
+            f"steps = '{steps_json}'",
+            f"content = '{content_val}'",
+            f"importance = {importance}",
+        ]
+        if note_append:
+            parts.append(f"notes = '{note_append}'")
+        elif notes:
+            parts.append(f"notes = '{notes.replace(chr(39), chr(39)*2)}'")
+
+        sql = f"UPDATE {_PROCEDURES()} SET {', '.join(parts)} WHERE id = {id}"
+        await execute_sql(sql)
+        _typed_metric_write(_PROCEDURES())
+
+        if steps_changed:
+            asyncio.create_task(_upsert_procedure_vec(id, topic, task_type, embed_text, importance, outcome))
+        else:
+            asyncio.create_task(_update_procedure_outcome_vec(id, outcome))
+        return id
+    else:
+        # INSERT new
+        t = topic.replace("'", "''")
+        tt = task_type.replace("'", "''")
+        n = notes.replace("'", "''") if notes else ""
+        success_init = 1 if outcome == "success" else 0
+        sql = (
+            f"INSERT INTO {_PROCEDURES()} "
+            f"(topic, task_type, content, steps, outcome, run_count, success_count, notes, "
+            f"importance, source, session_id, last_run_at) "
+            f"VALUES ('{t}', '{tt}', '{content_val}', '{steps_json}', '{outcome}', "
+            f"1, {success_init}, '{n}', {importance}, '{source}', '{session_id}', NOW())"
+        )
+        row_id = await execute_insert(sql)
+        _typed_metric_write(_PROCEDURES())
+        asyncio.create_task(_upsert_procedure_vec(row_id, topic, task_type, embed_text, importance, outcome))
+        return row_id
+
+
+async def recall_procedures(
+    query: str,
+    task_type: str = "",
+    top_k: int = 5,
+    min_score: float = 0.50,
+) -> list[dict]:
+    """
+    Semantic search for procedures relevant to a query.
+    Filters by task_type if provided. Falls back to MySQL LIKE if Qdrant unavailable.
+    Returns list of dicts with full procedure fields including steps (parsed JSON).
+    """
+    from database import fetch_dicts
+    from plugin_memory_vector_qdrant import get_vector_api
+
+    vec = get_vector_api()
+    results = []
+
+    if vec:
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            coll = _PROC_COLLECTION()
+            vec._ensure_proc_collection()
+            vector = await vec.embed(query, prefix="search_query")
+            filter_must = []
+            if task_type:
+                filter_must.append(FieldCondition(key="task_type", match=MatchValue(value=task_type)))
+            qfilter = Filter(must=filter_must) if filter_must else None
+            response = vec._qc.query_points(
+                collection_name=coll,
+                query=vector,
+                query_filter=qfilter,
+                limit=top_k,
+                score_threshold=min_score,
+                with_payload=True,
+            )
+            ids = [r.id for r in response.points]
+            scores = {r.id: round(r.score, 4) for r in response.points}
+            if ids:
+                ids_str = ", ".join(str(i) for i in ids)
+                rows = await fetch_dicts(
+                    f"SELECT id, topic, task_type, steps, outcome, run_count, success_count, notes, importance "
+                    f"FROM {_PROCEDURES()} WHERE id IN ({ids_str})"
+                )
+                for row in rows:
+                    row["score"] = scores.get(row["id"], 0.0)
+                    if row.get("steps") and isinstance(row["steps"], str):
+                        try:
+                            row["steps"] = json.loads(row["steps"])
+                        except Exception:
+                            row["steps"] = []
+                results = sorted(rows, key=lambda r: r.get("score", 0), reverse=True)
+        except Exception as e:
+            log.warning(f"recall_procedures: Qdrant search failed: {e}")
+
+    if not results:
+        # MySQL fallback
+        try:
+            like = f"%{query[:60]}%"
+            tt_clause = f" AND task_type = '{task_type.replace(chr(39), chr(39)*2)}'" if task_type else ""
+            rows = await fetch_dicts(
+                f"SELECT id, topic, task_type, steps, outcome, run_count, success_count, notes, importance "
+                f"FROM {_PROCEDURES()} "
+                f"WHERE (task_type LIKE '{like}' OR topic LIKE '{like}'){tt_clause} "
+                f"ORDER BY importance DESC LIMIT {top_k}"
+            )
+            for row in rows:
+                if row.get("steps") and isinstance(row["steps"], str):
+                    try:
+                        row["steps"] = json.loads(row["steps"])
+                    except Exception:
+                        row["steps"] = []
+            results = rows
+        except Exception as e:
+            log.warning(f"recall_procedures: MySQL fallback failed: {e}")
+
+    if results:
+        _typed_metric_read(_PROCEDURES(), len(results))
+    return results
+
+
+async def load_procedure_context_block(task_hint: str = "") -> str:
+    """
+    Return a ## Relevant Procedures block for prompt injection.
+    Always injects importance >= 8 procedures.
+    Also runs semantic recall against task_hint if provided (score >= 0.55).
+    """
+    from database import fetch_dicts
+    lines = []
+    seen_ids: set[int] = set()
+
+    try:
+        # Always-inject: high-importance procedures
+        high_imp = await fetch_dicts(
+            f"SELECT id, topic, task_type, steps, outcome, run_count, success_count, notes "
+            f"FROM {_PROCEDURES()} WHERE importance >= 8 ORDER BY importance DESC LIMIT 10"
+        )
+        for row in high_imp:
+            seen_ids.add(row["id"])
+            if row.get("steps") and isinstance(row["steps"], str):
+                try:
+                    row["steps"] = json.loads(row["steps"])
+                except Exception:
+                    row["steps"] = []
+
+        # Semantic recall on task_hint (score >= 0.55, exclude already seen)
+        semantic_hits = []
+        if task_hint:
+            semantic_hits = await recall_procedures(query=task_hint, top_k=5, min_score=0.55)
+            semantic_hits = [r for r in semantic_hits if r["id"] not in seen_ids]
+
+        all_procs = high_imp + semantic_hits
+        if not all_procs:
+            return ""
+
+        _typed_metric_read(_PROCEDURES(), len(all_procs))
+        lines.append("## Relevant Procedures\n")
+        for p in all_procs:
+            steps_list = p.get("steps") or []
+            step_text = "\n".join(
+                f"    {s.get('step','?')}. {s.get('action','')} "
+                f"{'[' + s['tool'] + ']' if s.get('tool') else ''}"
+                f"{' // ' + s['note'] if s.get('note') else ''}"
+                for s in steps_list
+            )
+            score_str = f" score={p['score']}" if p.get("score") else ""
+            lines.append(
+                f"  [id={p['id']} task_type={p.get('task_type','')} "
+                f"outcome={p.get('outcome','?')} "
+                f"runs={p.get('success_count','?')}/{p.get('run_count','?')}{score_str}]\n"
+                f"  {p.get('topic','')}\n"
+                f"{step_text}"
+            )
+            if p.get("notes"):
+                lines.append(f"  Notes: {p['notes']}")
+            lines.append("")
+    except Exception as e:
+        log.debug(f"load_procedure_context_block failed: {e}")
+        return ""
+
+    return "\n".join(lines)
+
+
+async def _fetch_by_type(table: str, types_sql: str) -> list[dict]:
+    """Fetch all ST rows whose type is in types_sql (comma-separated quoted values)."""
+    from database import fetch_dicts
+    try:
+        return await fetch_dicts(
+            f"SELECT id, topic, content, importance, source, type "
+            f"FROM {table} WHERE type IN ({types_sql}) "
+            f"ORDER BY importance DESC"
+        )
+    except Exception as e:
+        log.warning(f"_fetch_by_type failed: {e}")
+        return []
+
+
 async def load_context_block(
     min_importance: int = 3,
     query: str = "",
     user_text: str = "",
     identity_name: str = "",
+    memory_types_enabled: bool = False,
 ) -> str:
     """
     Return a formatted string of memories for prompt injection (short-term + relevant long-term).
@@ -1007,6 +1826,8 @@ async def load_context_block(
     cfg = _mem_plugin_cfg()
     two_pass_threshold = int(cfg.get("two_pass_threshold", 5))
     two_pass_quality_floor = float(cfg.get("two_pass_quality_floor", 0.75))
+    # Types that are always injected regardless of semantic score (when memory_types_enabled)
+    _always_types: list[str] = cfg.get("always_inject_types", ["belief", "autobiographical"]) if memory_types_enabled else []
 
     # Strip vocative address of identity name from queries
     # ("Samaritan, tell me about X" → "tell me about X")
@@ -1034,13 +1855,29 @@ async def load_context_block(
         always_task      = asyncio.create_task(
             load_short_term(limit=10000, min_importance=always_importance)
         )
-        semantic_st, semantic_lt, always_rows, topics = await asyncio.gather(
-            semantic_st_task, semantic_lt_task, always_task, topics_task
-        )
+        # Always-inject by type: fetch active rows of high-priority types from ST
+        if _always_types:
+            _types_sql = ", ".join(f"'{t}'" for t in _always_types)
+            always_type_task = asyncio.create_task(
+                _fetch_by_type(_ST(), _types_sql)
+            )
+        else:
+            always_type_task = None
 
-        # Merge: always_rows first, then short-term semantic hits, then long-term hits
+        gather_args = [semantic_st_task, semantic_lt_task, always_task, topics_task]
+        if always_type_task:
+            gather_args.append(always_type_task)
+        gather_results = await asyncio.gather(*gather_args)
+        semantic_st, semantic_lt, always_rows, topics = gather_results[:4]
+        always_type_rows: list[dict] = gather_results[4] if always_type_task else []
+
+        # Merge: always_rows first, then always_type_rows, then short-term semantic hits
         seen_ids_st = {str(r.get("id", "")) for r in always_rows}
         merged_st = list(always_rows)
+        for row in always_type_rows:
+            if str(row.get("id", "")) not in seen_ids_st:
+                merged_st.append(row)
+                seen_ids_st.add(str(row.get("id", "")))
         for hit in semantic_st:
             if str(hit.get("id", "")) not in seen_ids_st:
                 merged_st.append(hit)
@@ -1190,7 +2027,9 @@ async def load_context_block(
             lines.append(f"**{topic}**")
             for item in items:
                 imp = item.get("importance", 5)
-                lines.append(f"  [imp={imp}] {item.get('content', '')}")
+                mem_type = item.get("type", "context")
+                type_tag = f" type={mem_type}" if memory_types_enabled and mem_type and mem_type != "context" else ""
+                lines.append(f"  [imp={imp}{type_tag}] {item.get('content', '')}")
             lines.append("")
 
     if semantic_lt:
@@ -1204,7 +2043,9 @@ async def load_context_block(
             lines.append(f"**{topic}**")
             for item in items:
                 imp = item.get("importance", 5)
-                lines.append(f"  [imp={imp}] {item.get('content', '')}")
+                mem_type = item.get("type", "context")
+                type_tag = f" type={mem_type}" if memory_types_enabled and mem_type and mem_type != "context" else ""
+                lines.append(f"  [imp={imp}{type_tag}] {item.get('content', '')}")
             lines.append("")
 
     if topics:

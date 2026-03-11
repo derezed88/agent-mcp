@@ -776,6 +776,20 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
     except Exception as exc:
         error_msg = f"{tool_name} error: {exc}"
         await push_tok(client_id, f"[{tool_name} error] {exc}\n")
+        # Record tool failure as a self-model memory row (fire-and-forget)
+        try:
+            from memory import save_memory as _save_memory_for_failure
+            _db_prefix_for_failure = sessions.get(client_id, {}).get("model", "")
+            asyncio.ensure_future(_save_memory_for_failure(
+                topic=f"self-failure-{tool_name}",
+                content=f"Tool '{tool_name}' failed with error: {str(exc)[:200]}",
+                importance=9,
+                source="session",
+                type="self_model",
+                session_id=client_id,
+            ))
+        except Exception:
+            pass
         return error_msg
 
 # --- General tool call extraction ---
@@ -1125,12 +1139,30 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
                     _content_to_str(m.get("content", ""))[:300] for m in recent
                 ).strip()
             _identity_name = LLM_REGISTRY.get(_model_key, {}).get("identity_name", "")
+            _mem_types_enabled = LLM_REGISTRY.get(_model_key, {}).get("memory_types_enabled", False)
             mem_block = await load_context_block(
                 min_importance=3, query=query_text, user_text=text,
                 identity_name=_identity_name,
+                memory_types_enabled=_mem_types_enabled,
             )
             if mem_block:
                 enrichments.append(mem_block)
+            # Inject typed context block (goals/plans/beliefs) and procedure block concurrently
+            if _mem_types_enabled:
+                try:
+                    from memory import load_typed_context_block, load_procedure_context_block
+                    _task_hint = current_topic or query_text[:200]
+                    typed_block, proc_block = await asyncio.gather(
+                        load_typed_context_block(),
+                        load_procedure_context_block(task_hint=_task_hint),
+                        return_exceptions=True,
+                    )
+                    if isinstance(proc_block, str) and proc_block:
+                        enrichments.insert(0, proc_block)
+                    if isinstance(typed_block, str) and typed_block:
+                        enrichments.insert(0, typed_block)  # prepend — structural context first
+                except Exception as _tb_err:
+                    log.debug(f"auto_enrich_context: typed/procedure block load failed: {_tb_err}")
             # Inject known topic list so the model reuses existing slugs rather than coining new ones
             try:
                 known_topics = await load_topic_list()
@@ -1238,6 +1270,10 @@ async def agentic_lc(model_key: str, messages: list[dict], client_id: str) -> st
             _iter_count += 1
             if not _suppress:
                 await push_tok(client_id, "\n[thinking…]\n")
+            log.info(
+                f"agentic_lc: LLM call iter={_iter_count} model={model_key} "
+                f"client={client_id} ctx_len={len(ctx)}"
+            )
             try:
                 if _stream_level >= 3:
                     # Level 3: accumulate astream() chunks, then sentence-push if no tool calls.

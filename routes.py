@@ -133,8 +133,32 @@ async def cmd_help(client_id: str):
         "  !membackfill                              - embed missing rows into Qdrant vector index\n"
         "  !memreconcile                             - remove orphaned Qdrant points not in MySQL\n"
         "  !memreview [approve N,N|reject N,N|clear] - AI topic review with HITL approval\n"
+        "  !memreview types                          - review typed memory tables (goals, beliefs, etc.) [memory_types_enabled]\n"
+        "  !memreview classify                       - classify untyped memory rows into memory types\n"
+        "  !memclassify [status|approve N|reject N]  - background classify (auto-apply ≥0.80, HITL <0.80)\n"
         "  !memage                                   - manually trigger one topic-chunk aging pass\n"
         "  !memtrim [N]                              - hard-delete N oldest ST rows (escape valve; default: trim to LWM)\n"
+        "\n"
+        "Proactive Cognition:\n"
+        "  !cogn                                     - status dashboard for all cognition timers + stats\n"
+        "  !cogn on|off                              - master enable/disable (runtime, no restart)\n"
+        "  !cogn contradiction|prospective|reflection on|off|run\n"
+        "                                            - per-loop toggle or immediate trigger\n"
+        "  !cogn interval contradiction|prospective|reflection <value>\n"
+        "                                            - set loop interval (h or m) at runtime\n"
+        "  !cogn model contradiction|prospective|reflection <key>\n"
+        "                                            - set loop model at runtime\n"
+        "  !cogn flags [clear]                       - view/retract open contradiction-flag beliefs\n"
+        "  !cogn feedback reset <loop>               - reset feedback streak/conditioning for a loop\n"
+        "  !cogn reset                               - revert all runtime overrides to json config\n"
+        "\n"
+        "Drive / Affect:\n"
+        "  !drives                                   - show current drive values\n"
+        "  !drives set <name> <0.0-1.0>              - set a drive value\n"
+        "  !drives set <name> <0.0-1.0> <description> - set drive value and description\n"
+        "  !drives baseline <name> <0.0-1.0>         - set baseline equilibrium for a drive\n"
+        "  !drives decay                             - manually trigger one decay cycle\n"
+        "  !drives seed                              - seed default drives from config if table empty\n"
         "\n"
         "Search & Extract:\n"
         "  !search_ddgs <query>                      - search via DuckDuckGo\n"
@@ -299,6 +323,8 @@ async def cmd_memory(client_id: str, arg: str):
         # Per-session on/off switch — stored in session dict, not global config
         val = subcmd in ("true", "on")
         sessions[client_id]["memory_enabled"] = val
+        from state import save_session_config
+        save_session_config(client_id, sessions[client_id])
         state_str = "ON" if val else "OFF"
         await push_tok(client_id,
             f"Memory logging {state_str} for this session.\n"
@@ -363,7 +389,7 @@ async def cmd_memstats(client_id: str, model_key: str = ""):
     """
     set_model_context(model_key)
     from database import execute_sql
-    from memory import _ST, _LT, _SUM, _COLLECTION, _age_cfg, _mem_plugin_cfg, get_retrieval_stats
+    from memory import _ST, _LT, _SUM, _COLLECTION, _age_cfg, _mem_plugin_cfg, get_retrieval_stats, get_typed_metrics, _GOALS, _PLANS, _BELIEFS
 
     lines = ["## Memory System Stats\n"]
 
@@ -448,6 +474,28 @@ async def cmd_memstats(client_id: str, model_key: str = ""):
         for row in src_rows:
             if len(row) >= 2:
                 lines.append(f"  {row[0]:<20} {row[1]:>4} rows")
+        lines.append("")
+
+    # ── Type distribution (short-term + long-term) ───────────────────────────
+    st_type_raw = await q(
+        f"SELECT type, COUNT(*) as n FROM {_ST()} GROUP BY type ORDER BY n DESC"
+    )
+    lt_type_raw = await q(
+        f"SELECT type, COUNT(*) as n FROM {_LT()} GROUP BY type ORDER BY n DESC"
+    )
+    st_type_rows = _rows_from(st_type_raw)
+    lt_type_rows = _rows_from(lt_type_raw)
+    if st_type_rows or lt_type_rows:
+        lines.append("**Memory type distribution**")
+        all_types = {}
+        for row in st_type_rows:
+            if len(row) >= 2:
+                all_types.setdefault(row[0], [0, 0])[0] = int(row[1])
+        for row in lt_type_rows:
+            if len(row) >= 2:
+                all_types.setdefault(row[0], [0, 0])[1] = int(row[1])
+        for t, (sc, lc) in sorted(all_types.items(), key=lambda x: -(x[1][0]+x[1][1])):
+            lines.append(f"  {t:<20} ST={sc:>4}  LT={lc:>4}")
         lines.append("")
 
     # ── Aging: long-term source of truth ─────────────────────────────────────
@@ -572,6 +620,24 @@ async def cmd_memstats(client_id: str, model_key: str = ""):
             lines.append(f"  pass-2 avg extra hits: {rstats['pass2_avg_extra']:.1f}")
         lines.append("")
 
+    # ── Typed tables (goals/plans/beliefs) ───────────────────────────────────
+    try:
+        goals_total   = _int_from(await q(f"SELECT COUNT(*) FROM {_GOALS()}"))
+        goals_active  = _int_from(await q(f"SELECT COUNT(*) FROM {_GOALS()} WHERE status='active'"))
+        plans_total   = _int_from(await q(f"SELECT COUNT(*) FROM {_PLANS()}"))
+        plans_pending = _int_from(await q(f"SELECT COUNT(*) FROM {_PLANS()} WHERE status IN ('pending','in_progress')"))
+        beliefs_total  = _int_from(await q(f"SELECT COUNT(*) FROM {_BELIEFS()}"))
+        beliefs_active = _int_from(await q(f"SELECT COUNT(*) FROM {_BELIEFS()} WHERE status='active'"))
+        tm = get_typed_metrics()
+        lines.append("**Typed Tables (goals / plans / beliefs)**")
+        lines.append(f"  goals    : {goals_active} active / {goals_total} total  writes={tm['goals']['writes']}  reads={tm['goals']['reads']}")
+        lines.append(f"  plans    : {plans_pending} pending / {plans_total} total  writes={tm['plans']['writes']}  reads={tm['plans']['reads']}")
+        lines.append(f"  beliefs  : {beliefs_active} active / {beliefs_total} total  writes={tm['beliefs']['writes']}  reads={tm['beliefs']['reads']}")
+        lines.append("  (writes/reads reset on restart)")
+        lines.append("")
+    except Exception as _te:
+        lines.append(f"**Typed Tables**: error — {_te}\n")
+
     # ── Config snapshot ───────────────────────────────────────────────────────
     mem_cfg = _mem_plugin_cfg()
     age_cfg = _age_cfg()
@@ -616,6 +682,44 @@ async def cmd_memstats(client_id: str, model_key: str = ""):
     status = "AGING NOW" if st_count >= hwm else ("near HWM" if pct_hwm >= 80 else "ok")
     lines.append(f"\n  ST pressure  [{bar}] {st_count}/{hwm} rows ({pct_hwm}%)  LWM={lwm}  [{status}]")
 
+    # ── Proactive Cognition timers (summary) ──────────────────────────────
+    try:
+        from contradiction import get_contradiction_stats, _cogn_cfg as _ccfg
+        from prospective import get_prospective_stats
+        from reflection import get_reflection_stats
+        cogn_cfg = _ccfg()
+        master_on = cogn_cfg["enabled"]
+        lines.append("\n**Proactive Cognition (use !cogn for full detail)**")
+        lines.append(f"  master: {'ON' if master_on else 'OFF'}")
+
+        cs = get_contradiction_stats()
+        cscan_on = cogn_cfg["contradiction_enabled"]
+        lines.append(
+            f"  contradiction  {'ON' if master_on and cscan_on else 'OFF'}  "
+            f"scans={cs['scans_run']}  flags={cs['flags_written']}  "
+            f"last={cs['last_scan_at'] or 'never'}"
+        )
+
+        ps = get_prospective_stats()
+        pscan_on = cogn_cfg.get("prospective_enabled", True)
+        lines.append(
+            f"  prospective    {'ON' if master_on and pscan_on else 'OFF'}  "
+            f"checks={ps['checks_run']}  fired={ps['rows_fired']}  "
+            f"last={ps['last_check_at'] or 'never'}"
+        )
+
+        rs = get_reflection_stats()
+        rscan_on = cogn_cfg.get("reflection_enabled", True)
+        lines.append(
+            f"  reflection     {'ON' if master_on and rscan_on else 'OFF'}  "
+            f"runs={rs['runs']}  saved={rs['memories_saved']}  "
+            f"last={rs['last_run_at'] or 'never'}"
+        )
+    except ImportError:
+        pass
+    except Exception as _cogn_err:
+        lines.append(f"\n**Proactive Cognition**: error — {_cogn_err}")
+
     await push_tok(client_id, "\n".join(lines))
     await conditional_push_done(client_id)
 
@@ -625,6 +729,8 @@ async def cmd_membackfill(client_id: str, model_key: str = ""):
     !membackfill — embed and upsert any MySQL memory rows missing from Qdrant.
     Compares all MySQL row IDs against Qdrant point IDs; only processes the gap.
     """
+    if await _guard_utility_model(client_id, model_key, "membackfill"):
+        return
     set_model_context(model_key)
     from database import fetch_dicts
     from memory import _ST, _LT, _COLLECTION
@@ -691,6 +797,8 @@ async def cmd_memreconcile(client_id: str, model_key: str = ""):
     Inverse of !membackfill: Qdrant has points that MySQL doesn't → delete from Qdrant.
     Reports metrics: total Qdrant points, MySQL rows, orphans found, orphans deleted.
     """
+    if await _guard_utility_model(client_id, model_key, "memreconcile"):
+        return
     set_model_context(model_key)
     from database import fetch_dicts
     from memory import _ST, _LT, _COLLECTION
@@ -760,20 +868,56 @@ async def cmd_memreconcile(client_id: str, model_key: str = ""):
 
 
 # ---------------------------------------------------------------------------
+# Utility model guard — prevents !mem* LLM commands from running when the
+# session model is a service model (summarizer, reviewer, classifier, judge).
+# These models are never end-user session models; running mem commands from
+# them would cause recursive llm_call loops.
+# ---------------------------------------------------------------------------
+
+_UTILITY_MODEL_PREFIXES = ("summarizer-", "reviewer-", "judge-", "extractor-")
+
+
+def _is_utility_model(model_key: str) -> bool:
+    """Return True if model_key is a service/utility model that should not run !mem* LLM commands."""
+    if not model_key:
+        return False
+    return any(model_key.startswith(p) for p in _UTILITY_MODEL_PREFIXES)
+
+
+async def _guard_utility_model(client_id: str, model_key: str, cmd_name: str) -> bool:
+    """Push an error and return True if the session is a utility model. Caller should return early."""
+    if _is_utility_model(model_key):
+        await push_tok(
+            client_id,
+            f"!{cmd_name} cannot run from a utility model session ({model_key}). "
+            f"Switch to an interactive model (e.g. samaritan-reasoning) to use this command."
+        )
+        await conditional_push_done(client_id)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # !memreview — AI-assisted topic review with HITL approval
 # ---------------------------------------------------------------------------
-_pending_reviews: dict[str, list[dict]] = {}  # client_id → list of proposals
+_pending_reviews: dict[str, list[dict]] = {}          # client_id → topic review proposals
+_pending_type_reviews: dict[str, list[dict]] = {}     # client_id → typed-memory review proposals
+_pending_classify_reviews: dict[str, list[dict]] = {} # client_id → memory reclassification proposals
 
 
 async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
     """
-    !memreview [approve N,N,...] [reject N,N,...] [clear]
+    !memreview [types] [approve N,N,...] [reject N,N,...] [clear]
 
-    No args: Calls reviewer model (config: reviewer_model) to analyse all topics and propose merges/renames.
+    No args: Calls reviewer model to analyse topic slugs and propose merges/renames.
+    types: Review typed memory tables (goals, beliefs, prospective, conditioned, etc.)
+           for stale/duplicate/status issues — when memory_types_enabled is active on the model.
     approve N,N,...: Execute approved proposals by number.
     reject N,N,...: Remove proposals from the pending list.
     clear: Discard all pending proposals.
     """
+    if await _guard_utility_model(client_id, model_key, "memreview"):
+        return
     set_model_context(model_key)
     from database import fetch_dicts, execute_sql
     from memory import _ST, _LT, _COLLECTION
@@ -784,14 +928,34 @@ async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
     # ── approve / reject / clear ─────────────────────────────────────────
     if subcmd == "clear":
         _pending_reviews.pop(client_id, None)
+        _pending_type_reviews.pop(client_id, None)
+        _pending_classify_reviews.pop(client_id, None)
         await push_tok(client_id, "Pending review proposals cleared.")
         await conditional_push_done(client_id)
         return
 
+    if subcmd == "types":
+        await cmd_memreview_types(client_id, model_key)
+        return
+
+    if subcmd == "classify":
+        await cmd_memreview_classify(client_id, model_key)
+        return
+
     if subcmd in ("approve", "reject"):
+        # Route to classify approval if only classify proposals are pending
+        if not _pending_reviews.get(client_id) and not _pending_type_reviews.get(client_id) \
+                and _pending_classify_reviews.get(client_id):
+            await _apply_classify_proposals(client_id, subcmd, parts)
+            return
+        # Route to typed-memory approval if topic proposals are absent but type proposals exist
+        if not _pending_reviews.get(client_id) and _pending_type_reviews.get(client_id):
+            await _apply_type_proposals(client_id, subcmd, parts)
+            return
+
         proposals = _pending_reviews.get(client_id, [])
         if not proposals:
-            await push_tok(client_id, "No pending proposals. Run !memreview first.")
+            await push_tok(client_id, "No pending proposals. Run !memreview or !memreview types first.")
             await conditional_push_done(client_id)
             return
 
@@ -1032,8 +1196,907 @@ async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
         reason = p.get("reason", "")
         if reason:
             lines.append(f"     Reason: {reason}")
+    lines.append("\nUsage: !memreview approve 1,3  |  !memreview reject 2  |  !memreview clear\n"
+                 "       !memreview types  — review typed memory tables (goals, beliefs, etc.)")
+    await push_tok(client_id, "\n".join(lines))
+    await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# !memreview types — review typed memory tables for staleness / duplicates
+# ---------------------------------------------------------------------------
+
+# Tables reviewed and their display label + key columns for the prompt
+_TYPE_REVIEW_TABLES = [
+    ("goals",          "title",   ["status", "description"]),
+    ("beliefs",        "topic",   ["status", "content", "confidence"]),
+    ("prospective",    "topic",   ["status", "content", "due_at"]),
+    ("conditioned",    "topic",   ["status", "trigger", "reaction", "strength"]),
+    ("episodic",       "topic",   ["content"]),
+    ("semantic",       "topic",   ["content"]),
+    ("procedural",     "topic",   ["content"]),
+    ("autobiographical", "topic", ["content"]),
+]
+
+# Actions the reviewer can propose for typed memory rows
+_TYPE_ACTIONS = {
+    "archive":       "Set status to 'done'/'retracted'/'extinguished' (soft-delete)",
+    "update_status": "Change status field (e.g. pending→done, active→retracted)",
+    "merge":         "Merge duplicate row into another (keeps to_id, removes from_id)",
+    "delete":        "Permanently delete row (use only for clearly invalid/test data)",
+}
+
+
+async def cmd_memreview_types(client_id: str, model_key: str = ""):
+    """Generate typed-memory review proposals via reviewer model."""
+    from database import fetch_dicts, get_tables_for_model
+    from memory import _mem_plugin_cfg
+    from config import get_model_role
+
+    set_model_context(model_key)
+
+    # Check memory_types_enabled on the model
+    mcfg = LLM_REGISTRY.get(model_key, {}) if model_key else {}
+    if not mcfg.get("memory_types_enabled", False):
+        await push_tok(client_id,
+            "memory_types_enabled is not set for this model. "
+            "!memreview types is only available when memory_types_enabled: true.")
+        await conditional_push_done(client_id)
+        return
+
+    tables = get_tables_for_model(model_key)
+    _review_model = _mem_plugin_cfg().get("reviewer_model") or get_model_role("reviewer")
+    await push_tok(client_id, f"Analysing typed memory tables with {_review_model}...\n")
+
+    # Gather rows from each typed table
+    table_sections = []
+    for logical_name, title_col, detail_cols in _TYPE_REVIEW_TABLES:
+        table_name = tables.get(logical_name)
+        if not table_name:
+            continue
+        try:
+            cols = ["id", title_col] + [c for c in detail_cols if c != title_col]
+            col_list = ", ".join(cols)
+            rows = await fetch_dicts(f"SELECT {col_list} FROM {table_name} LIMIT 100")
+        except Exception:
+            continue
+        if not rows:
+            continue
+
+        section_lines = [f"\n### {logical_name} ({len(rows)} rows)"]
+        for r in rows:
+            row_summary = f"  id={r.get('id')} {title_col}={str(r.get(title_col, ''))[:60]!r}"
+            for col in detail_cols:
+                val = r.get(col)
+                if val is not None:
+                    row_summary += f" {col}={str(val)[:40]!r}"
+            section_lines.append(row_summary)
+        table_sections.append("\n".join(section_lines))
+
+    if not table_sections:
+        await push_tok(client_id, "No typed memory rows found.")
+        await conditional_push_done(client_id)
+        return
+
+    action_descriptions = "\n".join(f"  - {k}: {v}" for k, v in _TYPE_ACTIONS.items())
+    prompt = (
+        "You are a memory hygiene reviewer for a personal AI typed-memory system.\n"
+        "Below are rows from typed memory tables (goals, beliefs, prospective intentions, conditioned responses, etc.).\n\n"
+        "Analyse the rows and propose actions for any that are:\n"
+        "- Clearly completed or obsolete (goals/plans/prospective)\n"
+        "- Contradicted by other rows (beliefs)\n"
+        "- Duplicates of another row\n"
+        "- Invalid or test data\n\n"
+        f"Available actions:\n{action_descriptions}\n\n"
+        "Rules:\n"
+        "- Only propose changes where there is a clear reason.\n"
+        "- Do NOT propose changes for rows that look healthy and current.\n"
+        "- For merge: from_id is removed, to_id is kept.\n"
+        "- If no changes are needed, return an empty proposals list.\n\n"
+        "Return ONLY valid JSON (no markdown fences, no commentary):\n"
+        '{"proposals": [{"action": "archive"|"update_status"|"merge"|"delete", '
+        '"table": "<table_logical_name>", "from_id": N, "to_id": N_or_null, '
+        '"new_status": "value_or_null", "reason": "brief explanation"}]}\n\n'
+        "## Typed Memory Tables\n"
+        + "\n".join(table_sections)
+    )
+
+    try:
+        from agents import llm_call as _llm_call
+        from state import current_client_id
+        token = current_client_id.set(client_id)
+        try:
+            result = await _llm_call(
+                model=_review_model,
+                prompt=prompt,
+                mode="text",
+                sys_prompt="none",
+                history="none",
+            )
+        finally:
+            current_client_id.reset(token)
+    except Exception as e:
+        await push_tok(client_id, f"Type review failed: {e}")
+        await conditional_push_done(client_id)
+        return
+
+    import json as _json
+    try:
+        raw = result.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        parsed = _json.loads(raw.strip())
+        proposals = parsed.get("proposals", [])
+    except (_json.JSONDecodeError, AttributeError) as e:
+        await push_tok(client_id, f"Failed to parse reviewer response:\n{result[:500]}\n\nError: {e}")
+        await conditional_push_done(client_id)
+        return
+
+    if not proposals:
+        await push_tok(client_id, "Reviewer found no changes needed. Typed memory looks clean.")
+        await conditional_push_done(client_id)
+        return
+
+    _pending_type_reviews[client_id] = proposals
+
+    lines = [f"**Typed Memory Review ({len(proposals)} proposals)**\n"]
+    for i, p in enumerate(proposals, 1):
+        action = p.get("action", "?")
+        table = p.get("table", "?")
+        from_id = p.get("from_id", "?")
+        to_id = p.get("to_id")
+        new_status = p.get("new_status")
+        reason = p.get("reason", "")
+        detail = f"id={from_id}"
+        if to_id:
+            detail += f" → id={to_id}"
+        if new_status:
+            detail += f" status→{new_status!r}"
+        lines.append(f"  {i}. [{action}] {table} {detail}")
+        if reason:
+            lines.append(f"     Reason: {reason}")
     lines.append("\nUsage: !memreview approve 1,3  |  !memreview reject 2  |  !memreview clear")
     await push_tok(client_id, "\n".join(lines))
+    await conditional_push_done(client_id)
+
+
+async def _apply_type_proposals(client_id: str, subcmd: str, parts: list[str]):
+    """Execute approve/reject against _pending_type_reviews."""
+    from database import fetch_dicts, execute_sql, get_tables_for_model
+
+    proposals = _pending_type_reviews.get(client_id, [])
+    if not proposals:
+        await push_tok(client_id, "No pending type proposals. Run !memreview types first.")
+        await conditional_push_done(client_id)
+        return
+
+    nums_str = parts[1] if len(parts) > 1 else ""
+    try:
+        nums = [int(n.strip()) for n in nums_str.split(",") if n.strip()]
+    except ValueError:
+        await push_tok(client_id, "Usage: !memreview approve 1,2,3 or !memreview reject 1,2")
+        await conditional_push_done(client_id)
+        return
+
+    if not nums:
+        await push_tok(client_id, "Specify proposal numbers: !memreview approve 1,3")
+        await conditional_push_done(client_id)
+        return
+
+    tables = get_tables_for_model()
+
+    if subcmd == "reject":
+        rejected = []
+        for n in sorted(nums, reverse=True):
+            if 1 <= n <= len(proposals):
+                p = proposals.pop(n - 1)
+                rejected.append(f"#{n} ({p.get('action','?')} {p.get('table','?')} id={p.get('from_id','?')})")
+        if not proposals:
+            _pending_type_reviews.pop(client_id, None)
+        await push_tok(client_id, f"Rejected: {', '.join(rejected) if rejected else 'none matched'}")
+        await conditional_push_done(client_id)
+        return
+
+    # ── approve ───────────────────────────────────────────────────────────
+    applied = []
+    errors = []
+
+    # Status column names per table type (for archive/update_status actions)
+    _status_cols = {
+        "goals":          ("status", "done"),
+        "plans":          ("status", "done"),
+        "beliefs":        ("status", "retracted"),
+        "prospective":    ("status", "done"),
+        "conditioned":    ("status", "extinguished"),
+    }
+
+    for n in sorted(nums):
+        if n < 1 or n > len(proposals):
+            errors.append(f"#{n}: out of range")
+            continue
+        p = proposals[n - 1]
+        action     = p.get("action", "")
+        logical    = p.get("table", "")
+        from_id    = p.get("from_id")
+        to_id      = p.get("to_id")
+        new_status = p.get("new_status")
+        table_name = tables.get(logical)
+
+        if not table_name:
+            errors.append(f"#{n}: unknown table '{logical}'")
+            continue
+        if not from_id:
+            errors.append(f"#{n}: missing from_id")
+            continue
+
+        try:
+            if action == "delete":
+                await execute_sql(f"DELETE FROM {table_name} WHERE id = {int(from_id)}")
+                applied.append(f"#{n}: deleted {logical} id={from_id}")
+
+            elif action == "archive":
+                status_col, archive_val = _status_cols.get(logical, ("status", "done"))
+                await execute_sql(
+                    f"UPDATE {table_name} SET {status_col} = '{archive_val}' WHERE id = {int(from_id)}"
+                )
+                applied.append(f"#{n}: archived {logical} id={from_id} → {status_col}='{archive_val}'")
+
+            elif action == "update_status":
+                if not new_status:
+                    errors.append(f"#{n}: update_status requires new_status")
+                    continue
+                status_col = _status_cols.get(logical, ("status", None))[0]
+                await execute_sql(
+                    f"UPDATE {table_name} SET {status_col} = '{new_status}' WHERE id = {int(from_id)}"
+                )
+                applied.append(f"#{n}: updated {logical} id={from_id} {status_col}→'{new_status}'")
+
+            elif action == "merge":
+                if not to_id:
+                    errors.append(f"#{n}: merge requires to_id")
+                    continue
+                await execute_sql(f"DELETE FROM {table_name} WHERE id = {int(from_id)}")
+                applied.append(f"#{n}: merged {logical} id={from_id} into id={to_id} (removed {from_id})")
+
+            else:
+                errors.append(f"#{n}: unknown action '{action}'")
+
+        except Exception as e:
+            errors.append(f"#{n}: {e}")
+
+    for n in sorted(nums, reverse=True):
+        if 1 <= n <= len(proposals):
+            proposals.pop(n - 1)
+    if not proposals:
+        _pending_type_reviews.pop(client_id, None)
+
+    result_lines = []
+    if applied:
+        result_lines.append("Applied:\n" + "\n".join(f"  {a}" for a in applied))
+    if errors:
+        result_lines.append("Errors:\n" + "\n".join(f"  {e}" for e in errors))
+    remaining = len(_pending_type_reviews.get(client_id, []))
+    if remaining:
+        result_lines.append(f"\n{remaining} proposal(s) still pending.")
+    await push_tok(client_id, "\n".join(result_lines) if result_lines else "No valid proposals to apply.")
+    await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# !memreview classify — reclassify unclassified (type='context') memory rows
+# ---------------------------------------------------------------------------
+
+_CLASSIFY_TYPES = [
+    "context", "goal", "plan", "belief",
+    "episodic", "semantic", "procedural",
+    "autobiographical", "prospective", "conditioned",
+]
+_CLASSIFY_BATCH = 50  # rows per LLM call
+
+
+async def cmd_memreview_classify(client_id: str, model_key: str = ""):
+    """
+    Scan ST+LT memory rows with type='context' (default/unclassified) and
+    propose type reclassifications via reviewer model with HITL approval.
+    """
+    from database import fetch_dicts
+    from memory import _ST, _LT, _mem_plugin_cfg
+    from config import get_model_role
+
+    set_model_context(model_key)
+
+    _review_model = _mem_plugin_cfg().get("reviewer_model") or get_model_role("reviewer")
+
+    # Gather unclassified rows from both tiers
+    st_rows = await fetch_dicts(
+        f"SELECT id, topic, content, importance, source, 'short' AS tier "
+        f"FROM {_ST()} WHERE type = 'context' ORDER BY id DESC LIMIT {_CLASSIFY_BATCH * 2}"
+    )
+    lt_rows = await fetch_dicts(
+        f"SELECT id, topic, content, importance, source, 'long' AS tier "
+        f"FROM {_LT()} WHERE type = 'context' ORDER BY id DESC LIMIT {_CLASSIFY_BATCH * 2}"
+    )
+    all_rows = st_rows + lt_rows
+
+    if not all_rows:
+        await push_tok(client_id, "No unclassified memory rows found (all rows already have a type).")
+        await conditional_push_done(client_id)
+        return
+
+    # Work in batches to stay within context limits
+    total_proposals: list[dict] = []
+    batch_count = (len(all_rows) + _CLASSIFY_BATCH - 1) // _CLASSIFY_BATCH
+    await push_tok(client_id,
+        f"Classifying {len(all_rows)} unclassified rows "
+        f"({batch_count} batch{'es' if batch_count > 1 else ''}) with {_review_model}...\n")
+
+    types_list = ", ".join(f'"{t}"' for t in _CLASSIFY_TYPES if t != "context")
+
+    for batch_idx in range(batch_count):
+        batch = all_rows[batch_idx * _CLASSIFY_BATCH : (batch_idx + 1) * _CLASSIFY_BATCH]
+        row_lines = []
+        for r in batch:
+            content_preview = str(r.get("content", ""))[:200]
+            row_lines.append(
+                f"  id={r['id']} tier={r['tier']} topic={r.get('topic','')!r} "
+                f"importance={r.get('importance',5)} source={r.get('source','?')!r}\n"
+                f"    content: {content_preview!r}"
+            )
+
+        prompt = (
+            "You are a memory classification assistant for a personal AI memory system.\n"
+            "Each row below is currently tagged as generic 'context'. Classify each row into "
+            "the most specific type that fits. Only reclassify rows where the type is clearly "
+            "not generic context — leave ambiguous rows as 'context'.\n\n"
+            f"Available types: {types_list}\n\n"
+            "Type definitions:\n"
+            "  goal: An active objective the system or user wants to achieve\n"
+            "  plan: An ordered step or task toward a goal\n"
+            "  belief: An asserted world-state fact (e.g. 'user prefers X', 'X is true about the world')\n"
+            "  episodic: A specific personal experience, event, or situation that occurred\n"
+            "  semantic: General knowledge, facts, concepts (not tied to a specific event)\n"
+            "  procedural: A skill, habit, or how-to sequence\n"
+            "  autobiographical: Identity-defining information about the system or a specific person\n"
+            "  prospective: A future intention, reminder, or planned action\n"
+            "  conditioned: A learned trigger→reaction association\n"
+            "  context: Generic conversation context (default — use when nothing more specific fits)\n\n"
+            "Return ONLY valid JSON, no markdown, no commentary:\n"
+            '{"classifications": [{"id": N, "tier": "short"|"long", "type": "<type>", "reason": "brief"}]}\n'
+            "Only include rows you are reclassifying (omit rows that should remain 'context').\n\n"
+            "## Rows\n" + "\n".join(row_lines)
+        )
+
+        try:
+            from agents import llm_call as _llm_call
+            from state import current_client_id
+            token = current_client_id.set(client_id)
+            try:
+                result = await _llm_call(
+                    model=_review_model,
+                    prompt=prompt,
+                    mode="text",
+                    sys_prompt="none",
+                    history="none",
+                )
+            finally:
+                current_client_id.reset(token)
+        except Exception as e:
+            await push_tok(client_id, f"Batch {batch_idx+1} failed: {e}")
+            continue
+
+        import json as _json
+        try:
+            raw = result.strip()
+            if raw.startswith("```"):
+                raw = "\n".join(raw.split("\n")[1:])
+            if raw.endswith("```"):
+                raw = "\n".join(raw.split("\n")[:-1])
+            parsed = _json.loads(raw.strip())
+            batch_proposals = parsed.get("classifications", [])
+            total_proposals.extend(batch_proposals)
+        except (_json.JSONDecodeError, AttributeError) as e:
+            await push_tok(client_id, f"Batch {batch_idx+1}: failed to parse response: {e}")
+
+    if not total_proposals:
+        await push_tok(client_id, "Classifier found no reclassifications needed — all rows look like generic context.")
+        await conditional_push_done(client_id)
+        return
+
+    # Filter out proposals that suggest keeping 'context' or have invalid types
+    valid_proposals = [
+        p for p in total_proposals
+        if p.get("type") in _CLASSIFY_TYPES and p.get("type") != "context" and p.get("id")
+    ]
+
+    if not valid_proposals:
+        await push_tok(client_id, "No reclassifications proposed after filtering.")
+        await conditional_push_done(client_id)
+        return
+
+    _pending_classify_reviews[client_id] = valid_proposals
+
+    lines = [f"**Memory Classification Review ({len(valid_proposals)} proposals)**\n"]
+    for i, p in enumerate(valid_proposals, 1):
+        tier_label = f"[{p.get('tier','?')}]"
+        lines.append(f"  {i}. {tier_label} id={p.get('id','?')} → type={p.get('type','?')!r}")
+        reason = p.get("reason", "")
+        if reason:
+            lines.append(f"     Reason: {reason}")
+    lines.append("\nUsage: !memreview approve 1,3  |  !memreview reject 2  |  !memreview clear")
+    await push_tok(client_id, "\n".join(lines))
+    await conditional_push_done(client_id)
+
+
+async def _apply_classify_proposals(client_id: str, subcmd: str, parts: list[str]):
+    """Execute approve/reject against _pending_classify_reviews."""
+    from database import execute_sql
+    from memory import _ST, _LT
+
+    proposals = _pending_classify_reviews.get(client_id, [])
+    if not proposals:
+        await push_tok(client_id, "No pending classification proposals. Run !memreview classify first.")
+        await conditional_push_done(client_id)
+        return
+
+    nums_str = parts[1] if len(parts) > 1 else ""
+    try:
+        nums = [int(n.strip()) for n in nums_str.split(",") if n.strip()]
+    except ValueError:
+        await push_tok(client_id, "Usage: !memreview approve 1,2,3 or !memreview reject 1,2")
+        await conditional_push_done(client_id)
+        return
+
+    if not nums:
+        await push_tok(client_id, "Specify proposal numbers: !memreview approve 1,3")
+        await conditional_push_done(client_id)
+        return
+
+    if subcmd == "reject":
+        rejected = []
+        for n in sorted(nums, reverse=True):
+            if 1 <= n <= len(proposals):
+                p = proposals.pop(n - 1)
+                rejected.append(f"#{n} (id={p.get('id','?')} → {p.get('type','?')})")
+        if not proposals:
+            _pending_classify_reviews.pop(client_id, None)
+        await push_tok(client_id, f"Rejected: {', '.join(rejected) if rejected else 'none matched'}")
+        await conditional_push_done(client_id)
+        return
+
+    # ── approve ───────────────────────────────────────────────────────────
+    applied = []
+    errors = []
+
+    for n in sorted(nums):
+        if n < 1 or n > len(proposals):
+            errors.append(f"#{n}: out of range")
+            continue
+        p = proposals[n - 1]
+        row_id  = p.get("id")
+        tier    = p.get("tier", "short")
+        new_type = p.get("type")
+
+        if not row_id or not new_type or new_type not in _CLASSIFY_TYPES:
+            errors.append(f"#{n}: invalid proposal (id={row_id} type={new_type})")
+            continue
+
+        table = _ST() if tier == "short" else _LT()
+        try:
+            await execute_sql(f"UPDATE {table} SET type = '{new_type}' WHERE id = {int(row_id)}")
+            applied.append(f"#{n}: [{tier}] id={row_id} → type='{new_type}'")
+        except Exception as e:
+            errors.append(f"#{n}: {e}")
+
+    for n in sorted(nums, reverse=True):
+        if 1 <= n <= len(proposals):
+            proposals.pop(n - 1)
+    if not proposals:
+        _pending_classify_reviews.pop(client_id, None)
+
+    result_lines = []
+    if applied:
+        result_lines.append("Applied:\n" + "\n".join(f"  {a}" for a in applied))
+    if errors:
+        result_lines.append("Errors:\n" + "\n".join(f"  {e}" for e in errors))
+    remaining = len(_pending_classify_reviews.get(client_id, []))
+    if remaining:
+        result_lines.append(f"\n{remaining} proposal(s) still pending.")
+    await push_tok(client_id, "\n".join(result_lines) if result_lines else "No valid proposals to apply.")
+    await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# !memclassify — Option B: auto-apply high-confidence, HITL for low-confidence
+# ---------------------------------------------------------------------------
+
+_AUTO_APPLY_THRESHOLD = 0.80   # confidence ≥ this → apply immediately
+_CLASSIFY_MODEL       = "summarizer-gemini"
+_CLASSIFY_BIG_BATCH   = 40     # rows per LLM call — keeps each call well under 30s
+
+# Per-client background task state
+_classify_tasks: dict[str, asyncio.Task]  = {}  # client_id → running task
+_classify_status: dict[str, dict]         = {}  # client_id → progress dict
+_classify_hitl: dict[str, list[dict]]     = {}  # client_id → low-confidence proposals
+
+
+async def cmd_memclassify(client_id: str, arg: str = "", model_key: str = ""):
+    """
+    !memclassify [status|approve N,N|reject N,N|cancel] [model=<key>]
+
+    No args / 'start': Launch background classification of all type='context' rows.
+      - High confidence (≥ 0.80): auto-applied immediately, logged.
+      - Low confidence (< 0.80):  queued for HITL approval.
+    status:      Show progress of running or completed classification.
+    approve N,N: Apply queued low-confidence proposals.
+    reject N,N:  Discard queued low-confidence proposals.
+    cancel:      Abort a running background classification.
+
+    model=<key>: Override the classification model for this run.
+      e.g. !memclassify model=samaritan-reasoning   (higher accuracy, slower)
+           !memclassify model=summarizer-gemini      (default, faster)
+    batch=N: Rows per LLM call (1–100, default 40). Larger = fewer round-trips.
+      e.g. !memclassify model=samaritan-reasoning batch=80
+    """
+    if await _guard_utility_model(client_id, model_key, "memclassify"):
+        return
+    from database import fetch_dicts, execute_sql
+    from memory import _ST, _LT, _mem_plugin_cfg
+    from config import get_model_role
+
+    set_model_context(model_key)
+
+    # Parse optional model=<key> and batch=N overrides anywhere in arg, e.g.:
+    #   !memclassify model=samaritan-reasoning batch=150
+    #   !memclassify start model=samaritan-reasoning
+    import re as _re_arg
+    _model_override = None
+    _batch_override = None
+    _arg_clean = arg.strip()
+    _mo = _re_arg.search(r'\bmodel=(\S+)', _arg_clean)
+    if _mo:
+        _model_override = _mo.group(1)
+        _arg_clean = (_arg_clean[:_mo.start()] + _arg_clean[_mo.end():]).strip()
+    _bo = _re_arg.search(r'\bbatch=(\d+)', _arg_clean)
+    if _bo:
+        _batch_override = max(1, min(int(_bo.group(1)), 100))
+        _arg_clean = (_arg_clean[:_bo.start()] + _arg_clean[_bo.end():]).strip()
+    _classify_model = _model_override or _CLASSIFY_MODEL
+    _classify_batch = _batch_override or _CLASSIFY_BIG_BATCH
+
+    parts = _arg_clean.split(maxsplit=1) if _arg_clean else []
+    subcmd = parts[0].lower() if parts else "start"
+
+    # ── status ───────────────────────────────────────────────────────────
+    if subcmd == "status":
+        st = _classify_status.get(client_id)
+        if not st:
+            await push_tok(client_id, "No classification job for this session. Run !memclassify to start.")
+            await conditional_push_done(client_id)
+            return
+        running = client_id in _classify_tasks and not _classify_tasks[client_id].done()
+        state   = "running" if running else ("failed" if st.get("error") else "complete")
+        lines = [
+            f"**Classification {state}**",
+            f"  Total unclassified: {st.get('total', '?')}",
+            f"  Processed: {st.get('processed', 0)}",
+            f"  Auto-applied: {st.get('auto_applied', 0)}",
+            f"  Pending HITL: {len(_classify_hitl.get(client_id, []))}",
+            f"  Kept as context: {st.get('kept_context', 0)}",
+        ]
+        if st.get("error"):
+            lines.append(f"  Error: {st['error']}")
+        if running:
+            lines.append(f"\n  Batch {st.get('batch', 0)}/{st.get('total_batches', '?')} in progress...")
+        elif _classify_hitl.get(client_id):
+            lines.append(f"\n{len(_classify_hitl[client_id])} low-confidence rows need review:")
+            for i, p in enumerate(_classify_hitl[client_id], 1):
+                lines.append(
+                    f"  {i}. [{p.get('tier','?')}] id={p.get('id','?')} "
+                    f"→ {p.get('type','?')!r}  conf={p.get('confidence',0):.2f}"
+                )
+                if p.get("reason"):
+                    lines.append(f"     {p['reason']}")
+            lines.append("\nUsage: !memclassify approve 1,3  |  !memclassify reject 2")
+        await push_tok(client_id, "\n".join(lines))
+        await conditional_push_done(client_id)
+        return
+
+    # ── cancel ────────────────────────────────────────────────────────────
+    if subcmd == "cancel":
+        task = _classify_tasks.get(client_id)
+        if task and not task.done():
+            task.cancel()
+            _classify_tasks.pop(client_id, None)
+            await push_tok(client_id, "Classification job cancelled.")
+        else:
+            await push_tok(client_id, "No running classification job to cancel.")
+        await conditional_push_done(client_id)
+        return
+
+    # ── approve / reject (HITL queue) ────────────────────────────────────
+    if subcmd in ("approve", "reject"):
+        proposals = _classify_hitl.get(client_id, [])
+        if not proposals:
+            await push_tok(client_id, "No pending low-confidence proposals. Run !memclassify status.")
+            await conditional_push_done(client_id)
+            return
+
+        nums_str = parts[1] if len(parts) > 1 else ""
+        try:
+            nums = [int(n.strip()) for n in nums_str.split(",") if n.strip()]
+        except ValueError:
+            await push_tok(client_id, "Usage: !memclassify approve 1,2,3 or !memclassify reject 1,2")
+            await conditional_push_done(client_id)
+            return
+        if not nums:
+            await push_tok(client_id, "Specify proposal numbers: !memclassify approve 1,3")
+            await conditional_push_done(client_id)
+            return
+
+        if subcmd == "reject":
+            rejected = []
+            for n in sorted(nums, reverse=True):
+                if 1 <= n <= len(proposals):
+                    p = proposals.pop(n - 1)
+                    rejected.append(f"#{n} (id={p.get('id','?')} {p.get('type','?')})")
+            if not proposals:
+                _classify_hitl.pop(client_id, None)
+            await push_tok(client_id, f"Rejected: {', '.join(rejected) if rejected else 'none matched'}")
+            await conditional_push_done(client_id)
+            return
+
+        applied, errors = [], []
+        for n in sorted(nums):
+            if n < 1 or n > len(proposals):
+                errors.append(f"#{n}: out of range")
+                continue
+            p = proposals[n - 1]
+            table = _ST() if p.get("tier") == "short" else _LT()
+            try:
+                await execute_sql(
+                    f"UPDATE {table} SET type = '{p['type']}' WHERE id = {int(p['id'])}"
+                )
+                applied.append(f"#{n}: [{p.get('tier','?')}] id={p['id']} → '{p['type']}'")
+            except Exception as e:
+                errors.append(f"#{n}: {e}")
+
+        for n in sorted(nums, reverse=True):
+            if 1 <= n <= len(proposals):
+                proposals.pop(n - 1)
+        if not proposals:
+            _classify_hitl.pop(client_id, None)
+
+        result_lines = []
+        if applied:
+            result_lines.append("Applied:\n" + "\n".join(f"  {a}" for a in applied))
+        if errors:
+            result_lines.append("Errors:\n" + "\n".join(f"  {e}" for e in errors))
+        remaining = len(_classify_hitl.get(client_id, []))
+        if remaining:
+            result_lines.append(f"\n{remaining} proposal(s) still pending.")
+        await push_tok(client_id, "\n".join(result_lines) if result_lines else "No valid proposals.")
+        await conditional_push_done(client_id)
+        return
+
+    # ── start (or re-start) ───────────────────────────────────────────────
+    # Block if the classify model is the same as the session model — calling
+    # llm_call with the session's own model would be a self-referential call.
+    if model_key and _classify_model == model_key:
+        await push_tok(
+            client_id,
+            f"!memclassify cannot use model={_classify_model!r} because that is the current session model. "
+            f"Specify a different model, e.g. !memclassify model={_CLASSIFY_MODEL}"
+        )
+        await conditional_push_done(client_id)
+        return
+
+    task = _classify_tasks.get(client_id)
+    if task and not task.done():
+        await push_tok(client_id,
+            "Classification already running. Use !memclassify status to check progress "
+            "or !memclassify cancel to abort.")
+        await conditional_push_done(client_id)
+        return
+
+    # Count unclassified rows
+    st_count = await fetch_dicts(f"SELECT COUNT(*) AS n FROM {_ST()} WHERE type = 'context'")
+    lt_count = await fetch_dicts(f"SELECT COUNT(*) AS n FROM {_LT()} WHERE type = 'context'")
+    total = (st_count[0]["n"] if st_count else 0) + (lt_count[0]["n"] if lt_count else 0)
+
+    if total == 0:
+        await push_tok(client_id, "No unclassified rows found — all rows already have a specific type.")
+        await conditional_push_done(client_id)
+        return
+
+    total_batches = (total + _classify_batch - 1) // _classify_batch
+    _classify_status[client_id] = {
+        "total": total,
+        "total_batches": total_batches,
+        "processed": 0,
+        "auto_applied": 0,
+        "kept_context": 0,
+        "batch": 0,
+    }
+    _classify_hitl[client_id] = []
+
+    # Snapshot model_key, classify model, and batch size for the background task
+    _model_key = model_key
+    _classify_model_snap = _classify_model
+    _classify_batch_snap = _classify_batch
+
+    async def _run_classification():
+        from database import fetch_dicts as _fetch, execute_sql as _exec
+        from memory import _ST as ST, _LT as LT
+        from agents import llm_call as _llm_call
+        from state import current_client_id
+        import json as _json
+
+        st_state = _classify_status[client_id]
+        set_model_context(_model_key)
+
+        types_list = ", ".join(f'"{t}"' for t in _CLASSIFY_TYPES if t != "context")
+        type_defs = (
+            "  goal: An active objective to achieve\n"
+            "  plan: An ordered step or task toward a goal\n"
+            "  belief: An asserted world-state fact (e.g. 'user prefers X')\n"
+            "  episodic: A specific personal experience, event, or situation that occurred\n"
+            "  semantic: General knowledge, facts, or concepts (not tied to a specific event)\n"
+            "  procedural: A skill, habit, or how-to sequence\n"
+            "  autobiographical: Identity-defining information about the system or a person\n"
+            "  prospective: A future intention, reminder, or planned action\n"
+            "  conditioned: A learned trigger→reaction association\n"
+            "  context: Generic conversation context (use when nothing more specific fits)"
+        )
+
+        offset = 0
+        batch_idx = 0
+
+        try:
+            while True:
+                set_model_context(_model_key)
+                # Fetch next batch across both tiers (ST first, then LT)
+                batch_rows = await _fetch(
+                    f"SELECT id, topic, content, importance, source, 'short' AS tier "
+                    f"FROM {ST()} WHERE type = 'context' "
+                    f"ORDER BY id ASC LIMIT {_classify_batch_snap}"
+                )
+                remaining_slots = _classify_batch_snap - len(batch_rows)
+                if remaining_slots > 0:
+                    lt_rows = await _fetch(
+                        f"SELECT id, topic, content, importance, source, 'long' AS tier "
+                        f"FROM {LT()} WHERE type = 'context' "
+                        f"ORDER BY id ASC LIMIT {remaining_slots}"
+                    )
+                    batch_rows.extend(lt_rows)
+
+                if not batch_rows:
+                    break
+
+                batch_idx += 1
+                st_state["batch"] = batch_idx
+
+                row_lines = []
+                for r in batch_rows:
+                    content_preview = str(r.get("content", ""))[:300]
+                    row_lines.append(
+                        f"id={r['id']} tier={r['tier']} topic={r.get('topic','')!r} "
+                        f"imp={r.get('importance',5)}\n  {content_preview!r}"
+                    )
+
+                prompt = (
+                    "You are a memory classification engine. Classify each memory row into "
+                    "the most specific type. For each row return a confidence score (0.0–1.0) "
+                    "reflecting how certain you are. Only deviate from 'context' when the type "
+                    "is clearly more specific — ambiguous rows should remain 'context' with "
+                    "high confidence.\n\n"
+                    f"Available types: {types_list}, context\n\n"
+                    f"Type definitions:\n{type_defs}\n\n"
+                    "Return ONLY valid JSON, no markdown:\n"
+                    '{"results": [{"id": N, "tier": "short"|"long", "type": "<type>", '
+                    '"confidence": 0.0-1.0, "reason": "brief"}]}\n'
+                    "Include ALL rows — even those staying as 'context'.\n\n"
+                    "## Rows\n" + "\n".join(row_lines)
+                )
+
+                try:
+                    token = current_client_id.set(client_id)
+                    try:
+                        result = await _llm_call(
+                            model=_classify_model_snap,
+                            prompt=prompt,
+                            mode="text",
+                            sys_prompt="none",
+                            history="none",
+                        )
+                    finally:
+                        current_client_id.reset(token)
+                except Exception as e:
+                    st_state["error"] = f"LLM call failed batch {batch_idx}: {e}"
+                    break
+
+                # llm_call returns "ERROR: ..." strings on timeout/failure instead of raising
+                if result.startswith("ERROR:"):
+                    st_state["error"] = f"Batch {batch_idx}: {result}"
+                    break
+
+                try:
+                    # Extract first {...} block — robust against markdown fences or preamble
+                    import re as _re
+                    m = _re.search(r'\{.*\}', result, _re.DOTALL)
+                    if not m:
+                        raise ValueError("no JSON object found in response")
+                    parsed = _json.loads(m.group(0))
+                    classifications = parsed.get("results", [])
+                except (ValueError, _json.JSONDecodeError, AttributeError) as e:
+                    st_state["error"] = f"Parse failed batch {batch_idx}: {e!r} — raw: {result[:200]!r}"
+                    break
+
+                auto_applied = 0
+                kept_context = 0
+                for c in classifications:
+                    row_id    = c.get("id")
+                    tier      = c.get("tier", "short")
+                    new_type  = c.get("type", "context")
+                    conf      = float(c.get("confidence", 0.0))
+
+                    if not row_id or new_type not in _CLASSIFY_TYPES:
+                        continue
+
+                    if new_type == "context":
+                        kept_context += 1
+                        continue
+
+                    table = ST() if tier == "short" else LT()
+
+                    if conf >= _AUTO_APPLY_THRESHOLD:
+                        try:
+                            await _exec(
+                                f"UPDATE {table} SET type = '{new_type}' WHERE id = {int(row_id)}"
+                            )
+                            auto_applied += 1
+                        except Exception as _ue:
+                            st_state.setdefault("db_errors", []).append(str(_ue))
+                            if len(st_state["db_errors"]) == 1:
+                                # Surface first error immediately so it shows in status
+                                st_state["error"] = f"DB update failed: {_ue}"
+                    else:
+                        # Queue for HITL
+                        _classify_hitl[client_id].append({
+                            "id":         row_id,
+                            "tier":       tier,
+                            "type":       new_type,
+                            "confidence": conf,
+                            "reason":     c.get("reason", ""),
+                        })
+
+                st_state["processed"]   += len(batch_rows)
+                st_state["auto_applied"] += auto_applied
+                st_state["kept_context"] += kept_context
+
+                # If we got fewer rows than the batch size, we're done
+                if len(batch_rows) < _classify_batch_snap:
+                    break
+
+                # Brief pause between batches to avoid rate-limiting
+                await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            st_state["error"] = "Cancelled"
+            raise
+        except Exception as e:
+            st_state["error"] = str(e)
+
+    task = asyncio.create_task(_run_classification())
+    _classify_tasks[client_id] = task
+
+    await push_tok(client_id,
+        f"Classification started in background: {total} unclassified rows, "
+        f"{total_batches} batch{'es' if total_batches > 1 else ''} of {_classify_batch}, "
+        f"model={_classify_model}, auto-apply threshold={_AUTO_APPLY_THRESHOLD}.\n"
+        f"Use !memclassify status to check progress and review low-confidence proposals."
+    )
     await conditional_push_done(client_id)
 
 
@@ -1111,6 +2174,560 @@ async def cmd_memtrim(client_id: str, arg: str, model_key: str = ""):
         after   = await _st_count()
         await push_tok(client_id, f"Deleted {deleted} rows. ST now={after}.\n")
 
+    await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# !cogn — proactive cognition timer control + stats
+# ---------------------------------------------------------------------------
+
+async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
+    """
+    !cogn — proactive cognition control panel.
+
+    Subcommands:
+      !cogn                          show status of all timers + stats
+      !cogn on / off                 master enable/disable (runtime)
+      !cogn contradiction on|off|run scanner toggle / trigger now
+      !cogn prospective on|off|run   prospective loop toggle / trigger now
+      !cogn reflection on|off|run    reflection loop toggle / trigger now
+      !cogn interval contradiction <h>   set scan interval (hours, float)
+      !cogn interval prospective <m>     set check interval (minutes, int)
+      !cogn interval reflection <h>      set reflection interval (hours, float)
+      !cogn model <loop> <key>       set model for a loop (contradiction|prospective|reflection)
+      !cogn flags [clear]            view/retract open contradiction-flag beliefs
+      !cogn feedback reset <loop>    reset feedback streak/strength for a loop
+      !cogn reset                    clear all runtime overrides (revert to json)
+    """
+    set_model_context(model_key)
+
+    try:
+        from contradiction import (
+            get_contradiction_stats, get_runtime_overrides,
+            set_runtime_override, clear_runtime_overrides,
+            _cogn_cfg,
+        )
+        from memory import _BELIEFS
+    except ImportError as e:
+        await push_tok(client_id, f"contradiction module not available: {e}")
+        await conditional_push_done(client_id)
+        return
+
+    parts = arg.strip().split() if arg.strip() else []
+
+    # ── !cogn flags [clear] ────────────────────────────────────────────────
+    if parts and parts[0] == "flags":
+        if len(parts) > 1 and parts[1] == "clear":
+            try:
+                tbl = _BELIEFS()
+                await execute_sql(
+                    f"UPDATE {tbl} SET status='retracted' "
+                    f"WHERE topic='contradiction-flag' AND status='active'"
+                )
+                await push_tok(client_id, "All open contradiction-flag beliefs retracted.\n")
+            except Exception as e:
+                await push_tok(client_id, f"Error clearing flags: {e}\n")
+        else:
+            try:
+                from database import fetch_dicts
+                rows = await fetch_dicts(
+                    f"SELECT id, content, confidence, created_at "
+                    f"FROM {_BELIEFS()} "
+                    f"WHERE topic='contradiction-flag' AND status='active' "
+                    f"ORDER BY created_at DESC"
+                )
+                if not rows:
+                    await push_tok(client_id, "No open contradiction-flag beliefs.\n")
+                else:
+                    flines = [f"## Open Contradiction Flags ({len(rows)})\n"]
+                    for r in rows:
+                        flines.append(
+                            f"  [id={r['id']}] {r.get('content','')[:160]}  "
+                            f"(created {r.get('created_at','')})"
+                        )
+                    await push_tok(client_id, "\n".join(flines) + "\n")
+            except Exception as e:
+                await push_tok(client_id, f"Error fetching flags: {e}\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !cogn feedback reset <loop> ───────────────────────────────────────
+    if parts and parts[0] == "feedback":
+        if len(parts) > 1 and parts[1] == "reset":
+            loop = parts[2] if len(parts) > 2 else ""
+            valid = ("contradiction", "prospective", "reflection")
+            if loop not in valid:
+                await push_tok(client_id, "Usage: !cogn feedback reset contradiction|prospective|reflection\n")
+            else:
+                try:
+                    from cogn_feedback import reset_feedback_state
+                    reset_feedback_state(loop)
+                    await push_tok(client_id, f"Feedback state reset for {loop}. Streak and strength cleared.\n")
+                except Exception as e:
+                    await push_tok(client_id, f"Error: {e}\n")
+        else:
+            await push_tok(client_id, "Usage: !cogn feedback reset contradiction|prospective|reflection\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !cogn reset ────────────────────────────────────────────────────────
+    if parts and parts[0] == "reset":
+        clear_runtime_overrides()
+        await push_tok(client_id, "Runtime overrides cleared. Config reverts to plugins-enabled.json.\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !cogn on / off ─────────────────────────────────────────────────────
+    if parts and parts[0] == "on":
+        set_runtime_override("enabled", True)
+        await push_tok(client_id, "Proactive cognition master switch: ON (runtime)\n")
+        await conditional_push_done(client_id)
+        return
+    if parts and parts[0] == "off":
+        set_runtime_override("enabled", False)
+        await push_tok(client_id, "Proactive cognition master switch: OFF (runtime)\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !cogn <loop> on|off|run ────────────────────────────────────────────
+    _loop_map = {
+        "contradiction": {
+            "flag":     "contradiction_enabled",
+            "run_fn":   lambda: __import__("contradiction").run_scan,
+            "trig_fn":  lambda: __import__("contradiction").trigger_now,
+            "label":    "Contradiction scanner",
+        },
+        "prospective": {
+            "flag":     "prospective_enabled",
+            "run_fn":   lambda: __import__("prospective").run_check,
+            "trig_fn":  lambda: __import__("prospective").trigger_now,
+            "label":    "Prospective memory loop",
+        },
+        "reflection": {
+            "flag":     "reflection_enabled",
+            "run_fn":   lambda: __import__("reflection").run_reflection,
+            "trig_fn":  lambda: __import__("reflection").trigger_now,
+            "label":    "Reflection loop",
+        },
+    }
+    if parts and parts[0] in _loop_map:
+        loop_name = parts[0]
+        lm = _loop_map[loop_name]
+        sub = parts[1] if len(parts) > 1 else ""
+        if sub == "on":
+            set_runtime_override(lm["flag"], True)
+            await push_tok(client_id, f"{lm['label']}: ON (runtime)\n")
+        elif sub == "off":
+            set_runtime_override(lm["flag"], False)
+            await push_tok(client_id, f"{lm['label']}: OFF (runtime)\n")
+        elif sub == "run":
+            await push_tok(client_id, f"Running {lm['label']} now...\n")
+            try:
+                lm["trig_fn"]()()
+                run_fn = lm["run_fn"]()
+                summary = await run_fn()
+                err = summary.get("error")
+                skip = summary.get("skipped_reason") or summary.get("skipped")
+                if skip:
+                    await push_tok(client_id, f"Skipped: {skip}\n")
+                elif err:
+                    await push_tok(client_id, f"Error: {err}\n")
+                else:
+                    parts_out = []
+                    for k, v in summary.items():
+                        if k != "error" and not k.startswith("skipped"):
+                            parts_out.append(f"{k}={v}")
+                    await push_tok(client_id, f"Done — {', '.join(parts_out)}\n")
+            except Exception as e:
+                await push_tok(client_id, f"Failed: {e}\n")
+        else:
+            await push_tok(client_id, f"Usage: !cogn {loop_name} on|off|run\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !cogn interval <loop> <value> ─────────────────────────────────────
+    if parts and parts[0] == "interval":
+        _interval_keys = {
+            "contradiction": ("contradiction_interval_h", "hours", float),
+            "prospective":   ("prospective_interval_m",   "minutes", int),
+            "reflection":    ("reflection_interval_h",    "hours", float),
+        }
+        if len(parts) < 3 or parts[1] not in _interval_keys:
+            await push_tok(client_id,
+                "Usage: !cogn interval contradiction <h>  |  "
+                "!cogn interval prospective <m>  |  !cogn interval reflection <h>\n")
+            await conditional_push_done(client_id)
+            return
+        key, unit, cast = _interval_keys[parts[1]]
+        try:
+            val = cast(parts[2])
+            if val < 0:
+                raise ValueError("must be >= 0")
+            set_runtime_override(key, val)
+            await push_tok(client_id, f"{parts[1]} interval set to {val} {unit} (runtime)\n")
+        except ValueError as e:
+            await push_tok(client_id, f"Invalid value: {e}\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !cogn model <loop> <key> ───────────────────────────────────────────
+    if parts and parts[0] == "model":
+        _model_keys = {
+            "contradiction": "contradiction_model",
+            "prospective":   "prospective_model",
+            "reflection":    "reflection_model",
+        }
+        if len(parts) < 3 or parts[1] not in _model_keys:
+            await push_tok(client_id,
+                "Usage: !cogn model contradiction|prospective|reflection <model_key>\n")
+            await conditional_push_done(client_id)
+            return
+        set_runtime_override(_model_keys[parts[1]], parts[2])
+        await push_tok(client_id, f"{parts[1]} model set to {parts[2]!r} (runtime)\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !cogn (status dashboard) ──────────────────────────────────────────
+    cfg = _cogn_cfg()
+    ovr = get_runtime_overrides()
+
+    def _bool(v: bool) -> str:
+        return "ON" if v else "OFF"
+
+    def _timer_h(h: float) -> str:
+        return f"{h}h" if h > 0 else "disabled"
+
+    def _timer_m(m: int) -> str:
+        return f"{m}m" if m > 0 else "disabled"
+
+    def _ovr(key: str) -> str:
+        return " [runtime]" if key in ovr else ""
+
+    master = cfg["enabled"]
+    lines = ["## Proactive Cognition Status\n"]
+
+    lines.append("**Timers**")
+    lines.append(f"  {'master':<30}: {_bool(master)}{_ovr('enabled')}")
+
+    suffix = "" if master else "  (master OFF)"
+    # Contradiction
+    cscan = cfg["contradiction_enabled"]
+    lines.append(
+        f"  {'contradiction':<30}: {_bool(master and cscan)}{_ovr('contradiction_enabled')}  "
+        f"every {_timer_h(cfg['contradiction_interval_h'])}{_ovr('contradiction_interval_h')}  "
+        f"model={cfg['contradiction_model']}{_ovr('contradiction_model')}{suffix}"
+    )
+    # Prospective
+    pscan = cfg.get("prospective_enabled", True)
+    lines.append(
+        f"  {'prospective':<30}: {_bool(master and pscan)}{_ovr('prospective_enabled')}  "
+        f"every {_timer_m(cfg.get('prospective_interval_m', 5))}{_ovr('prospective_interval_m')}  "
+        f"model={cfg.get('prospective_model','?')}{_ovr('prospective_model')}{suffix}"
+    )
+    # Reflection
+    rscan = cfg.get("reflection_enabled", True)
+    lines.append(
+        f"  {'reflection':<30}: {_bool(master and rscan)}{_ovr('reflection_enabled')}  "
+        f"every {_timer_h(cfg.get('reflection_interval_h', 6))}{_ovr('reflection_interval_h')}  "
+        f"model={cfg.get('reflection_model','?')}{_ovr('reflection_model')}{suffix}"
+    )
+    lines.append("")
+
+    # Feedback state helper
+    def _fb_line(fb: dict | None) -> str:
+        if not fb:
+            return "  feedback: (not yet evaluated)"
+        v = fb.get("verdict", "?")
+        r = fb.get("ratio")
+        s = fb.get("strength", 0)
+        streak = fb.get("streak", 0)
+        ratio_s = f"{r:.2f}" if r is not None else "n/a"
+        _verdict_icon = {
+            "useful": "✓", "neutral": "~", "low": "↓",
+            "throttle": "⚠ THROTTLED", "extinguish": "✗ EXTINGUISHED",
+            "insufficient_data": "?",
+        }
+        icon = _verdict_icon.get(v, v)
+        return f"  feedback: {icon}  ratio={ratio_s}  strength={s}/10  streak={streak}"
+
+    # Contradiction stats
+    try:
+        from contradiction import get_contradiction_stats
+        cs = get_contradiction_stats()
+        lines.append("**Contradiction Scanner** (since restart)")
+        lines.append(
+            f"  scans={cs['scans_run']}  pairs={cs['pairs_evaluated']}  "
+            f"found={cs['contradictions_found']}  flags={cs['flags_written']}  "
+            f"auto_retracted={cs['auto_retracted']}"
+        )
+        lines.append(
+            f"  last={cs['last_scan_at'] or 'never'}  "
+            f"dur={cs['last_scan_duration_s']}s  "
+            f"last_pairs={cs['last_scan_pairs']}  last_flags={cs['last_scan_flags']}"
+        )
+        lines.append(_fb_line(cs.get("last_feedback")))
+        if cs["last_error"]:
+            lines.append(f"  last_error={cs['last_error']}")
+    except ImportError:
+        pass
+    lines.append("")
+
+    # Prospective stats
+    try:
+        from prospective import get_prospective_stats
+        ps = get_prospective_stats()
+        lines.append("**Prospective Memory Loop** (since restart)")
+        lines.append(
+            f"  checks={ps['checks_run']}  evaluated={ps['rows_evaluated']}  "
+            f"fired={ps['rows_fired']}  reminders={ps['reminders_written']}"
+        )
+        lines.append(f"  last={ps['last_check_at'] or 'never'}")
+        lines.append(_fb_line(ps.get("last_feedback")))
+        if ps["last_error"]:
+            lines.append(f"  last_error={ps['last_error']}")
+    except ImportError:
+        pass
+    lines.append("")
+
+    # Reflection stats
+    try:
+        from reflection import get_reflection_stats
+        rs = get_reflection_stats()
+        lines.append("**Reflection Loop** (since restart)")
+        lines.append(
+            f"  runs={rs['runs']}  turns_processed={rs['turns_processed']}  "
+            f"memories_saved={rs['memories_saved']}  skipped={rs['memories_skipped']}"
+        )
+        lines.append(
+            f"  last={rs['last_run_at'] or 'never'}  "
+            f"dur={rs['last_run_duration_s']}s  last_saved={rs['last_run_saved']}"
+        )
+        lines.append(_fb_line(rs.get("last_feedback")))
+        if rs["last_error"]:
+            lines.append(f"  last_error={rs['last_error']}")
+    except ImportError:
+        pass
+    lines.append("")
+
+    # Feedback config
+    try:
+        from cogn_feedback import get_feedback_state, _fb_cfg
+        fb_cfg = _fb_cfg()
+        fb_state = get_feedback_state()
+        lines.append("**Feedback Evaluator Config**")
+        lines.append(
+            f"  throttle_at_strength={fb_cfg['feedback_strength_throttle']}  "
+            f"extinguish_at_strength={fb_cfg['feedback_strength_extinguish']}  "
+            f"low_ratio<{fb_cfg['feedback_low_ratio']}  "
+            f"high_ratio>={fb_cfg['feedback_high_ratio']}  "
+            f"min_rows={fb_cfg['feedback_min_rows']}"
+        )
+        for lname, st in fb_state.items():
+            cid = st.get("conditioned_id", 0)
+            lines.append(
+                f"  {lname:<14} conditioned_id={cid}  "
+                f"streak={st.get('consecutive_low',0)}  "
+                f"strength={st.get('current_strength',0)}  "
+                f"last_ratio={st.get('last_ratio','n/a')}"
+            )
+    except ImportError:
+        pass
+    lines.append("")
+
+    # Open contradiction flags
+    try:
+        open_flags_raw = await execute_sql(
+            f"SELECT COUNT(*) FROM {_BELIEFS()} "
+            f"WHERE topic='contradiction-flag' AND status='active'"
+        )
+        open_flags = 0
+        for ln in open_flags_raw.strip().splitlines():
+            ln = ln.strip()
+            if ln.isdigit():
+                open_flags = int(ln)
+                break
+            lp = ln.split()
+            if lp and lp[-1].isdigit():
+                open_flags = int(lp[-1])
+                break
+        lines.append(f"**Open contradiction flags**: {open_flags}"
+                     + ("  (!cogn flags to view  |  !cogn flags clear)" if open_flags else ""))
+    except Exception:
+        pass
+
+    if ovr:
+        lines.append("")
+        lines.append(f"**Active runtime overrides**: {list(ovr.keys())}  (!cogn reset to revert)")
+
+    lines.append("")
+    lines.append(
+        "**Commands**:\n"
+        "  !cogn on|off\n"
+        "  !cogn contradiction|prospective|reflection on|off|run\n"
+        "  !cogn interval contradiction|prospective|reflection <value>\n"
+        "  !cogn model contradiction|prospective|reflection <key>\n"
+        "  !cogn flags [clear]  |  !cogn reset"
+    )
+
+    await push_tok(client_id, "\n".join(lines))
+    await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# !drives — affect/motivational drive control
+# ---------------------------------------------------------------------------
+
+async def cmd_drives(client_id: str, arg: str, model_key: str = ""):
+    """
+    !drives                            — show current drive values
+    !drives set <name> <val>           — set drive value (0.0-1.0)
+    !drives set <name> <val> <desc...> — set drive value and description
+    !drives baseline <name> <val>      — set baseline equilibrium
+    !drives decay                      — manually trigger one decay cycle
+    !drives seed                       — seed default drives from config
+    """
+    set_model_context(model_key)
+    from memory import load_drives, update_drive, decay_drives, _DRIVES
+    from database import execute_sql, fetch_dicts, execute_insert
+
+    parts = arg.strip().split() if arg.strip() else []
+
+    # ── !drives set <name> <val> [description...] ──────────────────────────
+    if parts and parts[0] == "set":
+        if len(parts) < 3:
+            await push_tok(client_id, "Usage: !drives set <name> <0.0-1.0> [description]\n")
+            await conditional_push_done(client_id)
+            return
+        name = parts[1].lower()
+        try:
+            val = float(parts[2])
+        except ValueError:
+            await push_tok(client_id, f"Invalid value: {parts[2]} (must be 0.0-1.0)\n")
+            await conditional_push_done(client_id)
+            return
+        desc = " ".join(parts[3:]) if len(parts) > 3 else None
+        ok = await update_drive(name, val, source="user")
+        if ok and desc is not None:
+            tbl = _DRIVES()
+            desc_esc = desc.replace("'", "''")
+            try:
+                await execute_sql(
+                    f"UPDATE {tbl} SET description='{desc_esc}' WHERE name='{name}'"
+                )
+            except Exception as e:
+                await push_tok(client_id, f"Value set but description update failed: {e}\n")
+                await conditional_push_done(client_id)
+                return
+        await push_tok(client_id, f"Drive '{name}' set to {val:.2f}\n" if ok
+                       else f"Failed to update drive '{name}'\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !drives baseline <name> <val> ──────────────────────────────────────
+    if parts and parts[0] == "baseline":
+        if len(parts) < 3:
+            await push_tok(client_id, "Usage: !drives baseline <name> <0.0-1.0>\n")
+            await conditional_push_done(client_id)
+            return
+        name = parts[1].lower()
+        try:
+            val = max(0.0, min(1.0, float(parts[2])))
+        except ValueError:
+            await push_tok(client_id, f"Invalid value: {parts[2]}\n")
+            await conditional_push_done(client_id)
+            return
+        tbl = _DRIVES()
+        try:
+            await execute_sql(
+                f"UPDATE {tbl} SET baseline={val:.4f} WHERE name='{name}'"
+            )
+            await push_tok(client_id, f"Drive '{name}' baseline set to {val:.2f}\n")
+        except Exception as e:
+            await push_tok(client_id, f"Failed: {e}\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !drives decay ───────────────────────────────────────────────────────
+    if parts and parts[0] == "decay":
+        n = await decay_drives()
+        await push_tok(client_id, f"Decay cycle complete — {n} drives adjusted toward baseline\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !drives seed ────────────────────────────────────────────────────────
+    if parts and parts[0] == "seed":
+        from memory import _mem_plugin_cfg
+        import os, json as _json
+        try:
+            path = os.path.join(os.path.dirname(__file__), "plugins-enabled.json")
+            with open(path) as f:
+                cfg_data = _json.load(f)
+            defaults = cfg_data.get("plugin_config", {}).get("drives", {}).get("defaults", [])
+        except Exception as e:
+            await push_tok(client_id, f"Failed to load drive defaults from plugins-enabled.json: {e}\n")
+            await conditional_push_done(client_id)
+            return
+
+        if not defaults:
+            await push_tok(client_id, "No drive defaults found in plugins-enabled.json → plugin_config.drives.defaults\n")
+            await conditional_push_done(client_id)
+            return
+
+        tbl = _DRIVES()
+        seeded = 0
+        skipped = 0
+        for d in defaults:
+            name = str(d.get("name", "")).strip().lower()[:64]
+            if not name:
+                continue
+            desc = str(d.get("description", "")).replace("'", "''")
+            val  = float(d.get("value", 0.5))
+            base = float(d.get("baseline", val))
+            dr   = float(d.get("decay_rate", 0.05))
+            try:
+                existing = await fetch_dicts(
+                    f"SELECT id FROM {tbl} WHERE name='{name}' LIMIT 1"
+                )
+                if existing:
+                    skipped += 1
+                    continue
+                await execute_insert(
+                    f"INSERT INTO {tbl} (name, description, value, baseline, decay_rate, source) "
+                    f"VALUES ('{name}', '{desc}', {val:.4f}, {base:.4f}, {dr:.4f}, 'system')"
+                )
+                seeded += 1
+            except Exception as e:
+                await push_tok(client_id, f"  Failed to seed '{name}': {e}\n")
+        await push_tok(client_id, f"Seeded {seeded} drives, skipped {skipped} (already exist)\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !drives (status) ────────────────────────────────────────────────────
+    drives = await load_drives()
+    if not drives:
+        await push_tok(client_id,
+            "No drives configured. Use `!drives seed` to seed defaults, "
+            "or `!drives set <name> <0.0-1.0> <description>` to create one.\n")
+        await conditional_push_done(client_id)
+        return
+
+    lines = ["**Active Drives**\n"]
+    lines.append(f"{'Name':<22} {'Value':>6}  {'Baseline':>8}  Bar                    Description")
+    lines.append("-" * 90)
+    for d in drives:
+        v = float(d.get("value", 0.5))
+        b = float(d.get("baseline", 0.5))
+        bar = int(round(v * 20))
+        arrow = "▲" if v > b + 0.05 else ("▼" if v < b - 0.05 else "─")
+        lines.append(
+            f"{d['name']:<22} {v:>6.2f}  {b:>8.2f}  "
+            f"{'█' * bar}{'░' * (20 - bar)} {arrow}  "
+            f"{(d.get('description') or '')[:40]}"
+        )
+    lines.append("")
+    lines.append("**Commands**: !drives set <name> <val>  |  !drives baseline <name> <val>  "
+                 "|  !drives decay  |  !drives seed")
+    await push_tok(client_id, "\n".join(lines) + "\n")
     await conditional_push_done(client_id)
 
 
@@ -1343,6 +2960,8 @@ async def cmd_set_model(client_id: str, key: str, session: dict):
         old_cfg = LLM_REGISTRY.get(old_model, {})
         new_cfg = LLM_REGISTRY.get(key, {})
         session["model"] = key
+        from state import save_session_config
+        save_session_config(client_id, session)
         # Recompute effective window and trim history immediately
         trimmed = _notify_chain_model_switch(session, old_model, key, old_cfg, new_cfg)
         prev_len = len(session.get("history", []))
@@ -1371,7 +2990,8 @@ async def cmd_reset(client_id: str, session: dict):
     # Summarize departing history into short-term memory before clearing.
     # Skip entirely when memory.enabled is false — just wipe history.
     from agents import _memory_feature, _memory_cfg
-    if history_len >= 4 and _memory_feature("enabled") and _memory_feature("reset_summarize"):
+    _sess_mem_enabled = session.get("memory_enabled", None)
+    if history_len >= 4 and _memory_feature("enabled") and _memory_feature("reset_summarize") and (_sess_mem_enabled is None or _sess_mem_enabled):
         try:
             from memory import summarize_and_save
             set_model_context(session.get("model", ""))
@@ -1760,6 +3380,8 @@ async def cmd_stream(client_id: str, arg: str, session: dict):
         await push_tok(client_id, "\n".join(lines) + "\n")
     elif arg in LEVELS:
         session["stream_level"] = int(arg)
+        from state import save_session_config
+        save_session_config(client_id, session)
         await push_tok(client_id, f"Stream level set to {arg}: {LEVELS[arg]}\n")
     else:
         await push_tok(client_id, "Usage: !stream [0-3]\n" + "\n".join(f"  {k}: {v}" for k, v in LEVELS.items()) + "\n")
@@ -1778,15 +3400,20 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                 f"Try again later or ask an administrator to increase !maxusers.")
             await push_done(client_id)
             return
-        model_key = raw_payload.get("default_model", DEFAULT_MODEL)
-        if model_key not in LLM_REGISTRY:
-            model_key = DEFAULT_MODEL
+        prior_history = load_history(client_id)
+        prior_cfg = load_session_config(client_id)
+        # Restore persisted model; payload default_model only applies for brand-new sessions
+        _saved_model = prior_cfg.get("model")
+        if _saved_model and _saved_model in LLM_REGISTRY:
+            model_key = _saved_model
+        else:
+            model_key = raw_payload.get("default_model", DEFAULT_MODEL)
+            if model_key not in LLM_REGISTRY:
+                model_key = DEFAULT_MODEL
         model_cfg = LLM_REGISTRY.get(model_key, {})
         import plugin_history_default as _phd
         effective_ctx = _phd.compute_effective_max_ctx(model_cfg)
         import time as _time_init
-        prior_history = load_history(client_id)
-        prior_cfg = load_session_config(client_id)
         _model_tool_suppress = model_cfg.get("tool_suppress", get_default_tool_suppress())
         # Explicit user override (prior_cfg has the key) wins; otherwise model setting wins.
         _effective_tool_suppress = prior_cfg["tool_suppress"] if "tool_suppress" in prior_cfg else _model_tool_suppress
@@ -1806,6 +3433,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             "memory_scan_suppress": _effective_mss,
             "agent_call_stream": _effective_stream,
             "stream_level": _effective_stream_level,
+            "auto_enrich": prior_cfg.get("auto_enrich", True),
+            "memory_enabled": prior_cfg["memory_enabled"] if "memory_enabled" in prior_cfg else None,
             "_client_id": client_id,
             "created_at": _time_init.time(),
             "tool_subscriptions": {},
@@ -1914,10 +3543,16 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                     await cmd_memreconcile(client_id, session.get("model", ""))
                 elif cmd == "memreview":
                     await cmd_memreview(client_id, arg, session.get("model", ""))
+                elif cmd == "memclassify":
+                    await cmd_memclassify(client_id, arg, session.get("model", ""))
                 elif cmd == "memage":
                     await cmd_memage(client_id)
                 elif cmd == "memtrim":
                     await cmd_memtrim(client_id, arg, session.get("model", ""))
+                elif cmd == "cogn":
+                    await cmd_cogn(client_id, arg, session.get("model", ""))
+                elif cmd == "drives":
+                    await cmd_drives(client_id, arg, session.get("model", ""))
                 elif cmd == "stream":
                     await cmd_stream(client_id, arg, session)
                 elif get_plugin_command(cmd) is not None:
@@ -2023,11 +3658,20 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "memreview":
             await cmd_memreview(client_id, arg, session.get("model", ""))
             return
+        if cmd == "memclassify":
+            await cmd_memclassify(client_id, arg, session.get("model", ""))
+            return
         if cmd == "memage":
             await cmd_memage(client_id)
             return
         if cmd == "memtrim":
             await cmd_memtrim(client_id, arg, session.get("model", ""))
+            return
+        if cmd == "cogn":
+            await cmd_cogn(client_id, arg, session.get("model", ""))
+            return
+        if cmd == "drives":
+            await cmd_drives(client_id, arg, session.get("model", ""))
             return
         if cmd == "stream":
             await cmd_stream(client_id, arg, session)
@@ -2116,6 +3760,7 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                         user_text=stripped,
                         assistant_text=final,
                         session_id=client_id,
+                        memory_types_enabled=model_cfg.get("memory_types_enabled", False),
                     )
                     if _topic:
                         session["current_topic"] = _topic
@@ -2159,9 +3804,12 @@ async def endpoint_stream(request: Request):
     from state import get_or_create_shorthand_id, load_history, load_session_config
     if client_id not in sessions:
         import plugin_history_default as _phd
-        _mcfg = LLM_REGISTRY.get(DEFAULT_MODEL, {})
         prior_history = load_history(client_id)
         prior_cfg = load_session_config(client_id)
+        # Restore persisted model; fall back to DEFAULT_MODEL for new sessions
+        _saved_model = prior_cfg.get("model")
+        _init_model = _saved_model if (_saved_model and _saved_model in LLM_REGISTRY) else DEFAULT_MODEL
+        _mcfg = LLM_REGISTRY.get(_init_model, {})
         _model_tool_suppress = _mcfg.get("tool_suppress", get_default_tool_suppress())
         # Explicit user override (prior_cfg has the key) wins; otherwise model setting wins.
         _effective_tool_suppress = prior_cfg["tool_suppress"] if "tool_suppress" in prior_cfg else _model_tool_suppress
@@ -2171,7 +3819,7 @@ async def endpoint_stream(request: Request):
         _model_stream_level = _mcfg.get("stream_level", None)
         _effective_stream_level = prior_cfg.get("stream_level", _model_stream_level if _model_stream_level is not None else 0)
         sessions[client_id] = {
-            "model": DEFAULT_MODEL,
+            "model": _init_model,
             "history": prior_history,
             "history_max_ctx": _phd.compute_effective_max_ctx(_mcfg),
             "tool_preview_length": prior_cfg.get("tool_preview_length", get_default_tool_preview_length()),
@@ -2179,6 +3827,8 @@ async def endpoint_stream(request: Request):
             "memory_scan_suppress": _effective_mss,
             "agent_call_stream": _effective_stream,
             "stream_level": _effective_stream_level,
+            "auto_enrich": prior_cfg.get("auto_enrich", True),
+            "memory_enabled": prior_cfg["memory_enabled"] if "memory_enabled" in prior_cfg else None,
             "_client_id": client_id,
             "tool_subscriptions": {},
             "tool_list_injected": False,

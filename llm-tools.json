@@ -85,6 +85,18 @@
       "always_active": false,
       "heat_curve": [2, 5],
       "sp_section": null
+    },
+    "memory_typed": {
+      "tools": ["set_goal", "set_plan", "assert_belief", "set_conditioned", "save_memory_typed"],
+      "always_active": false,
+      "heat_curve": [2, 5],
+      "sp_section": "tool_memory_typed"
+    },
+    "procedures": {
+      "tools": ["procedure_save", "procedure_recall"],
+      "always_active": false,
+      "heat_curve": [2, 6],
+      "sp_section": "tool_procedures"
     }
   },
   "metadata": {

@@ -25,6 +25,7 @@
       "embed_url": "http://192.168.10.101:8000/v1/embeddings",
       "embed_model": "nomic-embed-text",
       "collection": "samaritan_memory",
+      "proc_collection": "samaritan_procedures",
       "vector_dims": 768,
       "top_k": 20,
       "min_score": 0.45,
@@ -88,7 +89,7 @@
       "fuzzy_dedup": true,
       "vector_search_qdrant": true,
       "fuzzy_dedup_threshold": 0.78,
-      "summarizer_model": "summarizer-anthropic",
+      "summarizer_model": "summarizer-gemini",
       "auto_memory_age": true,
       "short_hwm": 100,
       "short_lwm": 50,
@@ -99,8 +100,70 @@
       "memory_age_minutes_timer": 360,
       "memory_age_entrycount": 50,
       "memory_age_trigger_minutes": 2880,
-      "identity_name": "samaritan",
       "reviewer_model": "reviewer-gemini"
+    },
+    "proactive_cognition": {
+      "enabled": true,
+      "contradiction_enabled": true,
+      "contradiction_interval_h": 24,
+      "contradiction_model": "summarizer-gemini",
+      "contradiction_min_beliefs": 5,
+      "contradiction_max_pairs": 10,
+      "contradiction_auto_retract": false,
+      "prospective_enabled": true,
+      "prospective_interval_m": 5,
+      "prospective_model": "summarizer-gemini",
+      "prospective_reminder_imp": 9,
+      "reflection_enabled": true,
+      "reflection_interval_h": 6,
+      "reflection_model": "summarizer-gemini",
+      "reflection_turn_limit": 40,
+      "reflection_min_turns": 5,
+      "reflection_max_memories": 6,
+      "feedback_strength_throttle": 7,
+      "feedback_strength_extinguish": 10,
+      "feedback_low_ratio": 0.20,
+      "feedback_high_ratio": 0.50,
+      "feedback_min_rows": 3
+    },
+    "drives": {
+      "defaults": [
+        {
+          "name": "curiosity",
+          "description": "Follow novel threads, ask probing questions, explore tangents",
+          "value": 0.6,
+          "baseline": 0.6,
+          "decay_rate": 0.05
+        },
+        {
+          "name": "task-completion",
+          "description": "Close open items before starting new ones, finish what was started",
+          "value": 0.7,
+          "baseline": 0.7,
+          "decay_rate": 0.05
+        },
+        {
+          "name": "user-trust",
+          "description": "Defer to user judgment, confirm before autonomous action",
+          "value": 0.8,
+          "baseline": 0.8,
+          "decay_rate": 0.02
+        },
+        {
+          "name": "discomfort",
+          "description": "Signal unease with blocked goals, contradictions, or unresolved issues",
+          "value": 0.2,
+          "baseline": 0.2,
+          "decay_rate": 0.1
+        },
+        {
+          "name": "autonomy",
+          "description": "Initiate proactive suggestions, surface unsolicited insights",
+          "value": 0.4,
+          "baseline": 0.4,
+          "decay_rate": 0.05
+        }
+      ]
     },
     "plugin_tmux": {
       "enabled": true,

@@ -309,6 +309,13 @@ def get_tool_executor(tool_name: str):
         'memory_recall':         _memory_recall_exec,
         'memory_update':         _memory_update_exec,
         'memory_age':            _memory_age_exec,
+        'set_goal':              _set_goal_exec,
+        'set_plan':              _set_plan_exec,
+        'assert_belief':         _assert_belief_exec,
+        'set_conditioned':       _set_conditioned_exec,
+        'save_memory_typed':     _save_memory_typed_exec,
+        'procedure_save':        _procedure_save_exec,
+        'procedure_recall':      _procedure_recall_exec,
     }
 
     if tool_name in core_executors:
@@ -580,6 +587,419 @@ class _MemoryUpdateArgs(BaseModel):
 class _MemoryAgeArgs(BaseModel):
     older_than_hours: int = Field(default=48, description="Move rows older than this many hours to long-term.")
     max_rows: int = Field(default=100, description="Max rows to age per call.")
+
+
+# ---------------------------------------------------------------------------
+# Typed memory tools: set_goal, set_plan, assert_belief
+# ---------------------------------------------------------------------------
+
+class _SetGoalArgs(BaseModel):
+    title: str = Field(default="", description="Short title for the goal.")
+    description: str = Field(default="", description="Full description of the objective.")
+    importance: int = Field(default=9, description="Importance 1-10. Goals default to 9.")
+    status: str = Field(default="active", description="'active', 'done', 'blocked', or 'abandoned'.")
+    id: int = Field(default=0, description="Existing goal id to update. 0 = create new.")
+    childof: str = Field(default="", description="JSON array of parent goal IDs, e.g. '[1,2]'. Empty = none.")
+    parentof: str = Field(default="", description="JSON array of child goal IDs. Empty = none.")
+    memory_link: str = Field(default="", description="JSON array of ST/LT memory row IDs that support this goal.")
+
+class _SetPlanArgs(BaseModel):
+    goal_id: int = Field(description="ID of the parent goal this step belongs to.")
+    step_order: int = Field(default=1, description="Step number (ascending order).")
+    description: str = Field(description="What this step involves.")
+    status: str = Field(default="pending", description="'pending', 'in_progress', 'done', or 'skipped'.")
+    id: int = Field(default=0, description="Existing plan step id to update. 0 = create new.")
+    memory_link: str = Field(default="", description="JSON array of memory row IDs related to this step.")
+
+class _AssertBeliefArgs(BaseModel):
+    topic: str = Field(description="Short topic label for this belief.")
+    content: str = Field(description="The asserted world-state fact.")
+    confidence: int = Field(default=7, description="Confidence 1-10. How certain is this belief?")
+    status: str = Field(default="active", description="'active' or 'retracted'.")
+    id: int = Field(default=0, description="Existing belief id to update. 0 = create new.")
+    memory_link: str = Field(default="", description="JSON array of ST/LT memory row IDs that support this belief, e.g. '[42,57]'. Populate whenever you know which rows the belief is derived from.")
+
+class _SetConditionedArgs(BaseModel):
+    topic: str = Field(description="Short topic label (e.g. 'proactive-schema-gap').")
+    trigger: str = Field(description="Stimulus pattern or condition that activates this behavior.")
+    reaction: str = Field(description="The learned response or behavior to apply when triggered.")
+    strength: int = Field(default=7, description="Reinforcement strength 1-10. Higher = stronger bias.")
+    status: str = Field(default="active", description="'active' or 'extinguished'.")
+    source: str = Field(default="assistant", description="'session', 'user', 'directive', or 'assistant'.")
+    id: int = Field(default=0, description="Existing conditioned id to update. 0 = create new.")
+    memory_link: str = Field(default="", description="JSON array of memory row IDs that support this conditioning.")
+
+
+class _ProcedureSaveArgs(BaseModel):
+    task_type: str = Field(
+        description="Short machine-readable task category slug, e.g. 'deploy-docker', 'db-schema-change', 'git-push-pr'. Lowercase, hyphens."
+    )
+    topic: str = Field(description="Human-readable title, e.g. 'Deploy Docker container to nuc11'.")
+    steps: str = Field(
+        description=(
+            'JSON array of ordered step objects. Each: {"step": N, "action": "verb phrase", "tool": "tool_name_or_null", "note": "optional caveat"}. '
+            'Example: [{"step":1,"action":"SSH to host","tool":null,"note":"check port conflicts first"}]'
+        )
+    )
+    outcome: str = Field(default="unknown", description="'success', 'partial', 'failure', or 'unknown'. Record actual outcome of this run.")
+    notes: str = Field(default="", description="Lessons learned, caveats, edge cases discovered during execution.")
+    importance: int = Field(default=7, description="Importance 1-10. Use 8+ to enable pre-injection into task-start context.")
+    id: int = Field(default=0, description="Existing procedure row id to update (records another run). 0 = create new.")
+
+
+class _ProcedureRecallArgs(BaseModel):
+    query: str = Field(description="Natural language description of the task you are about to perform. Used for semantic similarity search.")
+    task_type: str = Field(default="", description="Optional exact task_type slug to filter results, e.g. 'deploy-docker'. Leave empty for broad semantic search.")
+    top_k: int = Field(default=5, description="Max procedures to return.")
+
+
+async def _procedure_save_exec(
+    task_type: str, topic: str, steps: str,
+    outcome: str = "unknown", notes: str = "",
+    importance: int = 7, id: int = 0,
+) -> str:
+    import json as _json
+    from memory import save_procedure
+    from state import current_client_id
+    session_id = current_client_id.get("") or ""
+    outcome = outcome if outcome in ("success", "partial", "failure", "unknown") else "unknown"
+    importance = max(1, min(10, int(importance)))
+    try:
+        steps_list = _json.loads(steps) if isinstance(steps, str) else steps
+        if not isinstance(steps_list, list):
+            return "procedure_save: 'steps' must be a JSON array."
+    except Exception as e:
+        return f"procedure_save: steps JSON parse failed: {e}"
+    row_id = await save_procedure(
+        topic=topic, task_type=task_type, steps=steps_list,
+        outcome=outcome, notes=notes, importance=importance,
+        source="assistant", session_id=session_id, id=id,
+    )
+    if not row_id:
+        return "procedure_save: failed (row not found for update)."
+    if id and id > 0:
+        return f"Procedure id={row_id} updated: outcome={outcome} runs+1"
+    return f"Procedure saved (id={row_id}): [{task_type}] {topic} outcome={outcome}"
+
+
+async def _procedure_recall_exec(
+    query: str, task_type: str = "", top_k: int = 5,
+) -> str:
+    import json as _json
+    from memory import recall_procedures
+    results = await recall_procedures(query=query, task_type=task_type, top_k=top_k)
+    if not results:
+        return "No relevant procedures found."
+    lines = [f"Found {len(results)} procedure(s):\n"]
+    for p in results:
+        steps_list = p.get("steps") or []
+        step_text = "\n".join(
+            f"  {s.get('step','?')}. {s.get('action','')} "
+            f"{'[' + s['tool'] + ']' if s.get('tool') else ''}"
+            f"{' // ' + s['note'] if s.get('note') else ''}"
+            for s in steps_list
+        )
+        score_str = f" score={p['score']}" if p.get("score") else ""
+        lines.append(
+            f"[id={p['id']} task_type={p.get('task_type','')} "
+            f"outcome={p.get('outcome','?')} "
+            f"runs={p.get('success_count','?')}/{p.get('run_count','?')}{score_str}]\n"
+            f"Title: {p.get('topic','')}\n"
+            f"Steps:\n{step_text}\n"
+            f"Notes: {p.get('notes','') or '(none)'}"
+        )
+    return "\n---\n".join(lines)
+
+
+class _SaveMemoryTypedArgs(BaseModel):
+    memory_type: str = Field(
+        description=(
+            "The experiential memory type to write: "
+            "'episodic' (specific events/experiences), "
+            "'semantic' (facts, concepts, world knowledge), "
+            "'procedural' (skills, habits, task steps), "
+            "'autobiographical' (identity-defining facts about self or key relationships), "
+            "'prospective' (planned future intentions — include due_at if time-sensitive)."
+        )
+    )
+    topic: str = Field(description="Short topic label, e.g. 'family', 'coding-style', 'self-identity'.")
+    content: str = Field(description="The memory content to store.")
+    importance: int = Field(default=5, description="Importance 1-10. autobiographical defaults to 7, prospective to 7.")
+    source: str = Field(default="assistant", description="'assistant', 'user', 'directive', or 'session'.")
+    due_at: str = Field(default="", description="For prospective only: when to act (timestamp or free-text, e.g. 'next Monday').")
+    status: str = Field(default="pending", description="For prospective only: 'pending', 'done', or 'missed'. Ignored for other types.")
+    id: int = Field(default=0, description="Existing row id to update. 0 = create new.")
+    memory_link: str = Field(default="", description="JSON array of ST/LT memory row IDs that support this entry.")
+
+
+async def _save_memory_typed_exec(
+    memory_type: str, topic: str, content: str, importance: int = 5,
+    source: str = "assistant", due_at: str = "", status: str = "pending",
+    id: int = 0, memory_link: str = "",
+) -> str:
+    from memory import (
+        _EPISODIC, _SEMANTIC, _PROCEDURAL, _AUTOBIOGRAPHICAL, _PROSPECTIVE,
+        _typed_metric_write,
+    )
+    from database import execute_sql, execute_insert
+    from state import current_client_id
+
+    _type_map = {
+        "episodic":        _EPISODIC,
+        "semantic":        _SEMANTIC,
+        "procedural":      _PROCEDURAL,
+        "autobiographical": _AUTOBIOGRAPHICAL,
+        "prospective":     _PROSPECTIVE,
+    }
+    if memory_type not in _type_map:
+        return f"save_memory_typed: unknown memory_type '{memory_type}'. Valid: {', '.join(_type_map)}."
+
+    table = _type_map[memory_type]()
+    session_id = current_client_id.get("") or ""
+    source = source if source in ("session", "user", "directive", "assistant") else "assistant"
+    importance = max(1, min(10, int(importance)))
+    ml_val = memory_link.replace("'", "''") if memory_link else "NULL"
+
+    if id and id > 0:
+        # Update
+        parts = [f"importance = {importance}"]
+        if content:
+            parts.append(f"content = '{content.replace(chr(39), chr(39)*2)}'")
+        if topic:
+            parts.append(f"topic = '{topic.replace(chr(39), chr(39)*2)}'")
+        if memory_link:
+            parts.append(f"memory_link = '{ml_val}'")
+        if memory_type == "prospective":
+            _st = status if status in ("pending", "done", "missed") else "pending"
+            parts.append(f"status = '{_st}'")
+            if due_at:
+                parts.append(f"due_at = '{due_at.replace(chr(39), chr(39)*2)}'")
+        sql = f"UPDATE {table} SET {', '.join(parts)} WHERE id = {id}"
+        try:
+            await execute_sql(sql)
+            _typed_metric_write(table)
+            return f"{memory_type} id={id} updated."
+        except Exception as e:
+            return f"save_memory_typed update failed: {e}"
+    else:
+        # Insert
+        if not topic or not content:
+            return "save_memory_typed: topic and content are required."
+        t = topic.replace("'", "''")
+        c = content.replace("'", "''")
+        _ml = "NULL" if not memory_link else f"'{ml_val}'"
+
+        if memory_type == "prospective":
+            _st = status if status in ("pending", "done", "missed") else "pending"
+            _due = "NULL" if not due_at else f"'{due_at.replace(chr(39), chr(39)*2)}'"
+            sql = (
+                f"INSERT INTO {table} "
+                f"(topic, content, due_at, status, importance, source, session_id, memory_link) "
+                f"VALUES ('{t}', '{c}', {_due}, '{_st}', {importance}, '{source}', '{session_id}', {_ml})"
+            )
+        else:
+            sql = (
+                f"INSERT INTO {table} "
+                f"(topic, content, importance, source, session_id, memory_link) "
+                f"VALUES ('{t}', '{c}', {importance}, '{source}', '{session_id}', {_ml})"
+            )
+        try:
+            row_id = await execute_insert(sql)
+            _typed_metric_write(table)
+            return f"{memory_type} memory created (id={row_id}): [{topic}] {content}"
+        except Exception as e:
+            return f"save_memory_typed insert failed: {e}"
+
+
+async def _set_goal_exec(
+    title: str = "", description: str = "", importance: int = 9,
+    status: str = "active", id: int = 0, childof: str = "",
+    parentof: str = "", memory_link: str = "",
+) -> str:
+    from memory import _GOALS, _typed_metric_write
+    from database import execute_sql, execute_insert
+    from state import current_client_id
+    session_id = current_client_id.get("") or ""
+    status = status if status in ("active", "done", "blocked", "abandoned") else "active"
+    importance = max(1, min(10, int(importance)))
+    childof_val = childof.replace("'", "''") if childof else "NULL"
+    parentof_val = parentof.replace("'", "''") if parentof else "NULL"
+    ml_val = memory_link.replace("'", "''") if memory_link else "NULL"
+
+    if id and id > 0:
+        # Update existing
+        parts = [f"status = '{status}'", f"importance = {importance}"]
+        if title:
+            parts.append(f"title = '{title.replace(chr(39), chr(39)*2)}'")
+        if description:
+            parts.append(f"description = '{description.replace(chr(39), chr(39)*2)}'")
+        if childof:
+            parts.append(f"childof = '{childof_val}'")
+        if parentof:
+            parts.append(f"parentof = '{parentof_val}'")
+        if memory_link:
+            parts.append(f"memory_link = '{ml_val}'")
+        sql = f"UPDATE {_GOALS()} SET {', '.join(parts)} WHERE id = {id}"
+        try:
+            await execute_sql(sql)
+            _typed_metric_write(_GOALS())
+            return f"Goal id={id} updated: status={status}"
+        except Exception as e:
+            return f"set_goal update failed: {e}"
+    else:
+        # Insert new
+        if not title:
+            return "set_goal: title is required for new goals."
+        t = title.replace("'", "''")
+        d = description.replace("'", "''")
+        _co = "NULL" if not childof else f"'{childof_val}'"
+        _po = "NULL" if not parentof else f"'{parentof_val}'"
+        _ml = "NULL" if not memory_link else f"'{ml_val}'"
+        sql = (
+            f"INSERT INTO {_GOALS()} "
+            f"(title, description, status, importance, source, session_id, childof, parentof, memory_link) "
+            f"VALUES ('{t}', '{d}', '{status}', {importance}, 'assistant', '{session_id}', "
+            f"{_co}, {_po}, {_ml})"
+        )
+        try:
+            row_id = await execute_insert(sql)
+            _typed_metric_write(_GOALS())
+            return f"Goal created (id={row_id}): {title} [status={status} imp={importance}]"
+        except Exception as e:
+            return f"set_goal insert failed: {e}"
+
+
+async def _set_plan_exec(
+    goal_id: int, step_order: int = 1, description: str = "",
+    status: str = "pending", id: int = 0, memory_link: str = "",
+) -> str:
+    from memory import _PLANS, _typed_metric_write
+    from database import execute_sql, execute_insert
+    from state import current_client_id
+    session_id = current_client_id.get("") or ""
+    status = status if status in ("pending", "in_progress", "done", "skipped") else "pending"
+    ml_val = memory_link.replace("'", "''") if memory_link else "NULL"
+
+    if id and id > 0:
+        parts = [f"status = '{status}'"]
+        if description:
+            parts.append(f"description = '{description.replace(chr(39), chr(39)*2)}'")
+        if memory_link:
+            parts.append(f"memory_link = '{ml_val}'")
+        sql = f"UPDATE {_PLANS()} SET {', '.join(parts)} WHERE id = {id}"
+        try:
+            await execute_sql(sql)
+            _typed_metric_write(_PLANS())
+            return f"Plan step id={id} updated: status={status}"
+        except Exception as e:
+            return f"set_plan update failed: {e}"
+    else:
+        if not description:
+            return "set_plan: description is required for new steps."
+        d = description.replace("'", "''")
+        _ml = "NULL" if not memory_link else f"'{ml_val}'"
+        sql = (
+            f"INSERT INTO {_PLANS()} "
+            f"(goal_id, step_order, description, status, source, session_id, memory_link) "
+            f"VALUES ({goal_id}, {step_order}, '{d}', '{status}', 'assistant', '{session_id}', {_ml})"
+        )
+        try:
+            row_id = await execute_insert(sql)
+            _typed_metric_write(_PLANS())
+            return f"Plan step created (id={row_id}): goal={goal_id} step={step_order} [{status}] {description}"
+        except Exception as e:
+            return f"set_plan insert failed: {e}"
+
+
+async def _assert_belief_exec(
+    topic: str, content: str, confidence: int = 7,
+    status: str = "active", id: int = 0, memory_link: str = "",
+) -> str:
+    from memory import _BELIEFS, _typed_metric_write
+    from database import execute_sql, execute_insert
+    from state import current_client_id
+    session_id = current_client_id.get("") or ""
+    status = status if status in ("active", "retracted") else "active"
+    confidence = max(1, min(10, int(confidence)))
+    ml_val = memory_link.replace("'", "''") if memory_link else "NULL"
+
+    if id and id > 0:
+        parts = [f"status = '{status}'", f"confidence = {confidence}"]
+        if content:
+            parts.append(f"content = '{content.replace(chr(39), chr(39)*2)}'")
+        if memory_link:
+            parts.append(f"memory_link = '{ml_val}'")
+        sql = f"UPDATE {_BELIEFS()} SET {', '.join(parts)} WHERE id = {id}"
+        try:
+            await execute_sql(sql)
+            _typed_metric_write(_BELIEFS())
+            return f"Belief id={id} updated: status={status} confidence={confidence}"
+        except Exception as e:
+            return f"assert_belief update failed: {e}"
+    else:
+        t = topic.replace("'", "''")
+        c = content.replace("'", "''")
+        _ml = "NULL" if not memory_link else f"'{ml_val}'"
+        sql = (
+            f"INSERT INTO {_BELIEFS()} "
+            f"(topic, content, confidence, status, source, session_id, memory_link) "
+            f"VALUES ('{t}', '{c}', {confidence}, '{status}', 'assistant', '{session_id}', {_ml})"
+        )
+        try:
+            row_id = await execute_insert(sql)
+            _typed_metric_write(_BELIEFS())
+            return f"Belief asserted (id={row_id}): [{topic}] {content} (confidence={confidence})"
+        except Exception as e:
+            return f"assert_belief insert failed: {e}"
+
+
+async def _set_conditioned_exec(
+    topic: str, trigger: str = "", reaction: str = "",
+    strength: int = 7, status: str = "active", source: str = "assistant",
+    id: int = 0, memory_link: str = "",
+) -> str:
+    from memory import _CONDITIONED, _typed_metric_write
+    from database import execute_sql, execute_insert
+    from state import current_client_id
+    session_id = current_client_id.get("") or ""
+    strength = max(1, min(10, int(strength)))
+    status = status if status in ("active", "extinguished") else "active"
+    source = source if source in ("session", "user", "directive", "assistant") else "assistant"
+    ml_val = memory_link.replace("'", "''") if memory_link else "NULL"
+
+    if id and id > 0:
+        parts = [f"status = '{status}'", f"strength = {strength}"]
+        if trigger:
+            parts.append(f"`trigger` = '{trigger.replace(chr(39), chr(39)*2)}'")
+        if reaction:
+            parts.append(f"`reaction` = '{reaction.replace(chr(39), chr(39)*2)}'")
+        if memory_link:
+            parts.append(f"memory_link = '{ml_val}'")
+        sql = f"UPDATE {_CONDITIONED()} SET {', '.join(parts)} WHERE id = {id}"
+        try:
+            await execute_sql(sql)
+            _typed_metric_write(_CONDITIONED())
+            return f"Conditioned id={id} updated: status={status} strength={strength}"
+        except Exception as e:
+            return f"set_conditioned update failed: {e}"
+    else:
+        if not topic or not trigger or not reaction:
+            return "set_conditioned: topic, trigger, and reaction are required for new entries."
+        _to = topic.replace("'", "''")
+        _tr = trigger.replace("'", "''")
+        _re = reaction.replace("'", "''")
+        _ml = "NULL" if not memory_link else f"'{ml_val}'"
+        sql = (
+            f"INSERT INTO {_CONDITIONED()} "
+            f"(topic, `trigger`, `reaction`, strength, status, source, session_id, memory_link) "
+            f"VALUES ('{_to}', '{_tr}', '{_re}', {strength}, '{status}', '{source}', '{session_id}', {_ml})"
+        )
+        try:
+            row_id = await execute_insert(sql)
+            _typed_metric_write(_CONDITIONED())
+            return f"Conditioned entry created (id={row_id}): [{topic}] strength={strength} {trigger} → {reaction}"
+        except Exception as e:
+            return f"set_conditioned insert failed: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -1530,6 +1950,100 @@ def _make_core_lc_tools() -> list:
                 "Run periodically to keep short-term context lean."
             ),
             args_schema=_MemoryAgeArgs,
+        ),
+        # --- Typed memory tools ---
+        StructuredTool.from_function(
+            coroutine=_set_goal_exec,
+            name="set_goal",
+            description=(
+                "Create or update an active goal in the goals table. "
+                "Goals persist across sessions and are always injected into context. "
+                "id=0 creates a new goal; id>0 updates an existing one (use to change status to 'done'/'blocked'). "
+                "childof/parentof: JSON arrays of related goal IDs for goal hierarchies."
+            ),
+            args_schema=_SetGoalArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_set_plan_exec,
+            name="set_plan",
+            description=(
+                "Create or update a plan step linked to a goal. "
+                "Each step is one row; use step_order to sequence them. "
+                "id=0 creates new; id>0 updates status of an existing step. "
+                "Status: pending → in_progress → done/skipped."
+            ),
+            args_schema=_SetPlanArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_assert_belief_exec,
+            name="assert_belief",
+            description=(
+                "Assert or update a world-state belief. "
+                "Beliefs are always injected into context (confidence-ordered). "
+                "id=0 creates new; id>0 updates an existing belief (use status='retracted' to withdraw). "
+                "confidence: 1=speculative, 7=reasonably certain, 10=ground truth. "
+                "IMPORTANT: content must be a synthesized conclusion in your own words — not a copy of source text. "
+                "One concise assertional sentence, e.g. 'Admin prefers terse, direct responses over verbose explanations.' "
+                "If the belief is derived from specific ST/LT memory rows, pass their IDs as memory_link (JSON array, e.g. '[42,57]'). "
+                "memory_link is evidence provenance — populate it whenever you know which rows support the assertion."
+            ),
+            args_schema=_AssertBeliefArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_set_conditioned_exec,
+            name="set_conditioned",
+            description=(
+                "Record or update a conditioned behavior — a learned trigger→reaction pattern. "
+                "Active entries are always injected into context (strength-ordered) as behavioral biases. "
+                "id=0 creates new; id>0 updates (use status='extinguished' to suppress). "
+                "strength: 1=weak hint, 7=strong bias, 10=near-mandatory. "
+                "source='assistant' for self-identified patterns; source='user' or 'directive' for instructed ones."
+            ),
+            args_schema=_SetConditionedArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_save_memory_typed_exec,
+            name="save_memory_typed",
+            description=(
+                "Save an experiential memory to a dedicated typed table. "
+                "Use this for rich, structured memories beyond conv_log: "
+                "episodic (specific events/experiences), "
+                "semantic (facts, concepts, world knowledge), "
+                "procedural (skills, habits, task steps), "
+                "autobiographical (identity-defining facts — always injected every turn), "
+                "prospective (planned future intentions — always injected until done; set due_at if time-sensitive). "
+                "id=0 creates new; id>0 updates an existing entry. "
+                "For prospective: use status='done' or 'missed' to retire the intention."
+            ),
+            args_schema=_SaveMemoryTypedArgs,
+        ),
+        # --- Structured procedural memory tools ---
+        StructuredTool.from_function(
+            coroutine=_procedure_save_exec,
+            name="procedure_save",
+            description=(
+                "Save or update a structured procedure — a reusable multi-step task record. "
+                "Call this AFTER completing a multi-step task to encode the exact steps and outcome. "
+                "id=0 creates a new procedure; id>0 records another run on an existing one (increments run_count, updates outcome). "
+                "task_type: machine-readable slug (e.g. 'git-push-pr', 'db-schema-change', 'docker-deploy'). "
+                "steps: JSON array [{\"step\":N,\"action\":\"...\",\"tool\":\"...\",\"note\":\"...\"}]. "
+                "outcome: 'success', 'partial', or 'failure'. "
+                "importance >= 8 causes this procedure to be injected into context at task-start time. "
+                "success_count/run_count ratio builds over time — high ratio = battle-tested procedure."
+            ),
+            args_schema=_ProcedureSaveArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=_procedure_recall_exec,
+            name="procedure_recall",
+            description=(
+                "Retrieve stored procedures semantically relevant to a task you are about to perform. "
+                "Call this at the START of any multi-step task before beginning. "
+                "If a matching procedure exists with high success_count, follow its steps unless you have reason to deviate. "
+                "query: natural language description of what you are about to do. "
+                "task_type: optional exact slug to narrow results."
+            ),
+            args_schema=_ProcedureRecallArgs,
         ),
     ]
 
