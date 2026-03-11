@@ -471,12 +471,12 @@ Type `!help` to see all commands. Some useful ones to start:
 ```
 Clients                 Server                          Backends
 ───────                 ──────                          ────────
-shell.py    ──SSE──►   llmem-gw.py                     OpenAI API
-open-webui  ─HTTP──►   ┌──────────────────────────┐    Gemini API
-LM Studio   ─HTTP──►   │ routes.py                │    xAI API
+shell.py     ──SSE──►  llmem-gw.py                     OpenAI API
+open-webui   ─HTTP──►  ┌──────────────────────────┐    Gemini API
+LM Studio    ─HTTP──►  │ routes.py                │    xAI API
 Slack ─Socket Mode──►  │ agents.py (agentic_lc)   │    llama.cpp / Ollama
-api_client  ─HTTP──►   │   LangChain bind_tools() │
-Agent B ────HTTP──►    │   ChatOpenAI             │──► MySQL
+api_client   ─HTTP──►  │   LangChain bind_tools() │
+Agent B ──────HTTP──►  │   ChatOpenAI             │──► MySQL
                        │   ChatGoogleGenerativeAI │──► Google Drive
                        │ plugin_*.py              │──► Web search APIs
                        └──────────────────────────┘
