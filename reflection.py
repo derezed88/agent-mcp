@@ -7,21 +7,19 @@ Runs as a background asyncio task. On each cycle it:
      reflection_turn_limit rows).
   2. Calls reflection_model with a structured prompt:
        "What did I learn? What should I follow up on? What patterns do I notice?"
-  3. Parses the JSON response — an array of {topic, content, importance, type}
-     objects — and saves each as a new short-term memory row via save_memory().
-     source='assistant', type from response (defaults to 'context').
-  4. Saves a reflection summary row to samaritan_memory_shortterm with
-     topic='reflection-summary' so it appears in context.
+  3. Parses the JSON response — an array of {topic, content, importance}
+     objects — and saves each to the cognition table (origin='reflection')
+     via save_cognition().
+  4. Goal health outputs (replan/abandon) also go to cognition (origin='goal_health').
 
-Reflection rows are tagged source='assistant' and carry a 'reflection' flag in
-topic ('reflection-summary') so the contradiction scanner, aging logic, and
-context injection all treat them like any other assistant memory. The fuzzy-dedup
-gate prevents redundant saves between cycles.
+Cognition rows are stored in their own table, separate from conversation
+memory (ST/LT), so they are not affected by !memreview topic renames or
+memory aging cycles. The fuzzy-dedup gate prevents redundant saves between cycles.
 
 Config (plugins-enabled.json → plugin_config.proactive_cognition):
     enabled:                    bool   — master switch
     reflection_enabled:         bool   — this loop (default true when master on)
-    reflection_interval_h:      float  — hours between runs (default 6)
+    reflection_interval_m:      int    — minutes between runs (default 60)
     reflection_model:           str    — model key (default "summarizer-gemini")
     reflection_turn_limit:      int    — max ST rows to pull per cycle (default 40)
     reflection_min_turns:       int    — skip if fewer recent turns than this (default 5)
@@ -94,11 +92,17 @@ def _rcogn_cfg() -> dict:
     base = {
         "enabled":               raw.get("enabled",               False),
         "reflection_enabled":    raw.get("reflection_enabled",    True),
-        "reflection_interval_h": float(raw.get("reflection_interval_h", 6.0)),
+        "reflection_interval_m": int(raw.get("reflection_interval_m", 60)),
         "reflection_model":      raw.get("reflection_model",      "summarizer-gemini"),
         "reflection_turn_limit": int(raw.get("reflection_turn_limit",  40)),
         "reflection_min_turns":  int(raw.get("reflection_min_turns",   5)),
         "reflection_max_memories": int(raw.get("reflection_max_memories", 6)),
+        # Goal health pass — quit logic thresholds
+        "goal_health_enabled":          raw.get("goal_health_enabled", True),
+        "goal_health_failure_replan":    int(raw.get("goal_health_failure_replan", 3)),
+        "goal_health_failure_abandon":   int(raw.get("goal_health_failure_abandon", 5)),
+        "goal_health_autonomy_threshold": float(raw.get("goal_health_autonomy_threshold", 0.6)),
+        "goal_health_model":            raw.get("goal_health_model", "samaritan-reasoning"),
     }
     base.update(ovr)
     return base
@@ -247,6 +251,476 @@ async def _call_llm(model_key: str, turns_text: str, max_memories: int,
 
 
 # ---------------------------------------------------------------------------
+# Second-pass goal completion scan (reasoning model)
+# ---------------------------------------------------------------------------
+
+_GOAL_SCAN_SYSTEM = (
+    "You check whether active goals have been completed based on conversation evidence. "
+    "For each goal, determine if the conversation shows the objective was ACTUALLY ACHIEVED "
+    "(not just planned, discussed, or intended). Be strict — only mark done when there is "
+    "clear evidence the goal's deliverable exists or the action was performed."
+)
+
+_GOAL_SCAN_USER = (
+    "ACTIVE GOALS:\n{goals_block}\n\n"
+    "RECENT CONVERSATION:\n{turns_text}\n\n"
+    "Return ONLY a JSON object: {{\"goals_done\": [<id>, ...]}}\n"
+    "Return {{\"goals_done\": []}} if no goals were clearly completed.\n"
+    "Do NOT include goals that were merely discussed or planned."
+)
+
+_GOAL_SCAN_MODEL = "samaritan-reasoning"
+
+
+async def _scan_goal_completions(turns_text: str,
+                                  active_goals: list[dict]) -> list[int]:
+    """
+    Second-pass goal completion scan using the reasoning model.
+    Separated from memory extraction for higher-quality judgment.
+    """
+    if not active_goals:
+        return []
+
+    from config import LLM_REGISTRY
+    from agents import _build_lc_llm, _content_to_str
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    model_key = _GOAL_SCAN_MODEL
+    if model_key not in LLM_REGISTRY:
+        log.warning(f"reflection: goal-scan model {model_key!r} not in registry, skipping")
+        return []
+
+    goals_block = "\n".join(
+        f"  [id={g['id']}] {g.get('title', '')} — {g.get('description', '')}"
+        for g in active_goals
+    )
+    prompt = _GOAL_SCAN_USER.format(goals_block=goals_block, turns_text=turns_text)
+
+    try:
+        cfg = LLM_REGISTRY[model_key]
+        timeout = cfg.get("llm_call_timeout", 90)
+        llm = _build_lc_llm(model_key)
+        msgs = [SystemMessage(content=_GOAL_SCAN_SYSTEM), HumanMessage(content=prompt)]
+        response = await asyncio.wait_for(llm.ainvoke(msgs), timeout=timeout)
+        raw = _content_to_str(response.content)
+    except Exception as e:
+        log.warning(f"reflection: goal-scan LLM call failed: {e}")
+        return []
+
+    if not raw:
+        return []
+
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = "\n".join(cleaned.split("\n")[1:])
+    if cleaned.endswith("```"):
+        cleaned = "\n".join(cleaned.split("\n")[:-1])
+
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return [int(x) for x in parsed.get("goals_done", []) if str(x).isdigit()]
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning(f"reflection: goal-scan JSON parse failed: {e}. raw={raw[:200]}")
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Goal health pass — failure escalation + proposal + quit logic
+# ---------------------------------------------------------------------------
+#
+# Runs after memory extraction + goal completion in each reflection cycle.
+# Three responsibilities:
+#
+# 1. FAILURE COUNTING — For each active goal, count self-failure-* rows whose
+#    content mentions the goal's title/keywords. Increment the goal's
+#    failure_count column.
+#
+# 2. ESCALATION LADDER:
+#    - failure_count >= replan_threshold (default 3): ask reasoning model
+#      to propose new plan steps (replan). Writes self-failure-* summary.
+#    - failure_count >= abandon_threshold (default 5): auto-abandon the goal
+#      with a reason, write self-failure-* lesson learned.
+#
+# 3. GOAL PROPOSALS — After evaluating health, ask reasoning model to propose
+#    new goals based on patterns (self-failure remediation, curiosity threads).
+#    Proposals are gated by the autonomy drive:
+#    - autonomy >= threshold: auto-create with source='assistant', status='active'
+#    - autonomy < threshold: save as status='proposed' for user review via !cogn goals
+#
+# 4. ABANDON GUARD — Proposals are checked against abandoned goals via semantic
+#    similarity. If a proposal resembles an abandoned goal, it's blocked.
+#    (Implemented in _set_goal_exec as a code-level check.)
+
+_GOAL_HEALTH_SYSTEM = (
+    "You evaluate the health of active goals and propose actions.\n\n"
+    "For each goal, you receive its title, description, failure_count, and "
+    "any recent self-failure rows mentioning this goal.\n\n"
+    "Return a JSON object with two keys:\n"
+    '  "actions": array of action objects\n'
+    '  "proposals": array of new goal proposals\n\n'
+    "Action types:\n"
+    '  {"goal_id": N, "action": "replan", "reason": "why current approach fails", '
+    '"new_steps": ["step1", "step2"]}\n'
+    '  {"goal_id": N, "action": "abandon", "reason": "why this is unachievable"}\n'
+    '  {"goal_id": N, "action": "ok"} — goal is healthy, no action needed\n\n'
+    "Proposal format:\n"
+    '  {"title": "short title", "description": "what and why", '
+    '"trigger": "self-failure|curiosity|pattern", "importance": 5-8}\n\n'
+    "Rules:\n"
+    "- Only propose 'abandon' when failure is structural (missing capability, "
+    "external dependency, repeated identical failure pattern)\n"
+    "- Only propose 'replan' when the approach is clearly wrong but the goal is achievable\n"
+    "- Proposals should address gaps you see — remediate failures, explore curiosity threads\n"
+    "- Max 2 proposals per cycle. Quality over quantity.\n"
+    "- Do NOT propose goals that duplicate active or recently abandoned goals.\n"
+    '- Return {"actions": [], "proposals": []} if everything is healthy.'
+)
+
+_GOAL_HEALTH_USER = (
+    "ACTIVE GOALS:\n{goals_block}\n\n"
+    "RECENT SELF-FAILURE PATTERNS:\n{failures_block}\n\n"
+    "ABANDONED GOALS (do NOT re-propose):\n{abandoned_block}\n\n"
+    "CURRENT DRIVES:\n{drives_block}\n\n"
+    "Evaluate each goal's health and propose up to 2 new goals if warranted."
+)
+
+
+async def _run_goal_health(
+    active_goals: list[dict],
+    turns_text: str,
+) -> dict:
+    """
+    Goal health pass. Returns summary dict with actions taken and proposals.
+    """
+    cfg = _rcogn_cfg()
+    if not cfg.get("goal_health_enabled", True):
+        return {"skipped": "goal_health_enabled=false"}
+    if not active_goals:
+        return {"skipped": "no active goals"}
+
+    replan_thresh = cfg["goal_health_failure_replan"]
+    abandon_thresh = cfg["goal_health_failure_abandon"]
+    autonomy_thresh = cfg["goal_health_autonomy_threshold"]
+    model_key = cfg["goal_health_model"]
+
+    from database import fetch_dicts, execute_sql, execute_insert
+    from memory import _GOALS, _ST, _typed_metric_write, _COGNITION, save_cognition
+    from memory import load_drives
+
+    summary = {
+        "replanned": [], "abandoned": [], "proposed": [],
+        "auto_created": [], "pending_review": [],
+    }
+
+    # ── 1. Failure counting ─────────────────────────────────────────────
+    # Count failure rows from cognition table
+    try:
+        failure_rows = await fetch_dicts(
+            f"SELECT id, topic, content FROM {_COGNITION()} "
+            f"WHERE origin IN ('tool_failure', 'goal_health') "
+            f"ORDER BY created_at DESC LIMIT 100"
+        ) or []
+    except Exception as e:
+        log.warning(f"goal_health: failure rows fetch failed: {e}")
+        failure_rows = []
+
+    # Match failures to goals by keyword overlap
+    goal_failures: dict[int, list[dict]] = {g["id"]: [] for g in active_goals}
+    for g in active_goals:
+        keywords = set(
+            w.lower() for w in
+            (g.get("title", "") + " " + g.get("description", "")).split()
+            if len(w) > 3  # skip short words
+        )
+        for fr in failure_rows:
+            content_lower = (fr.get("content") or "").lower()
+            # Match if ≥2 keywords appear in the failure content
+            matches = sum(1 for kw in keywords if kw in content_lower)
+            if matches >= 2:
+                goal_failures[g["id"]].append(fr)
+
+    # Update failure_count in DB
+    for g in active_goals:
+        new_fc = len(goal_failures.get(g["id"], []))
+        old_fc = int(g.get("failure_count", 0))
+        if new_fc != old_fc:
+            try:
+                await execute_sql(
+                    f"UPDATE {_GOALS()} SET failure_count={new_fc} "
+                    f"WHERE id={g['id']}"
+                )
+            except Exception as e:
+                log.debug(f"goal_health: failure_count update failed id={g['id']}: {e}")
+        g["failure_count"] = new_fc  # update in-memory for LLM prompt
+
+    # ── 2. Fetch context for LLM ────────────────────────────────────────
+    # Abandoned goals (for dedup guard)
+    try:
+        abandoned = await fetch_dicts(
+            f"SELECT id, title, description, abandon_reason FROM {_GOALS()} "
+            f"WHERE status='abandoned' ORDER BY updated_at DESC LIMIT 20"
+        ) or []
+    except Exception:
+        abandoned = []
+
+    # Current drives — convert list[dict] to name→value dict
+    try:
+        _drive_rows = await load_drives()
+        drives = {d["name"]: float(d.get("value", 0.5)) for d in _drive_rows}
+    except Exception:
+        drives = {}
+
+    # ── 3. Build prompt and call LLM ────────────────────────────────────
+    goals_lines = []
+    for g in active_goals:
+        fc = g.get("failure_count", 0)
+        ac = g.get("attempt_count", 0)
+        goals_lines.append(
+            f"  [id={g['id']} failures={fc} attempts={ac}] "
+            f"{g.get('title', '')} — {g.get('description', '')}"
+        )
+    goals_block = "\n".join(goals_lines) if goals_lines else "(none)"
+
+    fail_lines = []
+    for gid, frs in goal_failures.items():
+        if frs:
+            gtitle = next((g["title"] for g in active_goals if g["id"] == gid), "?")
+            for fr in frs[:3]:  # max 3 per goal in prompt
+                fail_lines.append(f"  [{gtitle}] {fr.get('content', '')[:200]}")
+    failures_block = "\n".join(fail_lines) if fail_lines else "(none)"
+
+    abandoned_lines = [
+        f"  [id={a['id']}] {a.get('title') or ''} — reason: {a.get('abandon_reason') or 'n/a'}"
+        for a in abandoned
+    ]
+    abandoned_block = "\n".join(abandoned_lines) if abandoned_lines else "(none)"
+
+    drives_block = "\n".join(
+        f"  {name}: {val:.2f}" for name, val in drives.items()
+    ) if drives else "(no drives loaded)"
+
+    prompt = _GOAL_HEALTH_USER.format(
+        goals_block=goals_block,
+        failures_block=failures_block,
+        abandoned_block=abandoned_block,
+        drives_block=drives_block,
+    )
+
+    # Call reasoning model
+    from config import LLM_REGISTRY
+    from agents import _build_lc_llm, _content_to_str
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    if model_key not in LLM_REGISTRY:
+        log.warning(f"goal_health: model {model_key!r} not in registry")
+        return summary
+
+    try:
+        llm = _build_lc_llm(model_key)
+        timeout = LLM_REGISTRY[model_key].get("llm_call_timeout", 90)
+        msgs = [SystemMessage(content=_GOAL_HEALTH_SYSTEM), HumanMessage(content=prompt)]
+        response = await asyncio.wait_for(llm.ainvoke(msgs), timeout=timeout)
+        raw = _content_to_str(response.content)
+    except Exception as e:
+        log.warning(f"goal_health: LLM call failed: {e}")
+        return summary
+
+    if not raw:
+        return summary
+
+    # Parse response
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = "\n".join(cleaned.split("\n")[1:])
+    if cleaned.endswith("```"):
+        cleaned = "\n".join(cleaned.split("\n")[:-1])
+
+    try:
+        parsed = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning(f"goal_health: JSON parse failed: {e}. raw={raw[:300]}")
+        return summary
+
+    if not isinstance(parsed, dict):
+        return summary
+
+    # ── 4. Process actions ──────────────────────────────────────────────
+    valid_ids = {g["id"] for g in active_goals}
+    actions = parsed.get("actions", [])
+    for act in actions:
+        if not isinstance(act, dict):
+            continue
+        gid = act.get("goal_id")
+        action = act.get("action", "")
+        reason = str(act.get("reason", ""))[:500]
+
+        if gid not in valid_ids:
+            continue
+
+        goal = next((g for g in active_goals if g["id"] == gid), None)
+        if not goal:
+            continue
+        fc = goal.get("failure_count", 0)
+
+        if action == "abandon" and fc >= abandon_thresh:
+            # Auto-abandon
+            try:
+                await execute_sql(
+                    f"UPDATE {_GOALS()} SET status='abandoned', "
+                    f"abandon_reason='{reason.replace(chr(39), chr(39)*2)}' "
+                    f"WHERE id={gid} AND status='active'"
+                )
+                _typed_metric_write(_GOALS())
+                summary["abandoned"].append(gid)
+                log.info(
+                    f"goal_health: auto-abandoned goal id={gid} "
+                    f"(failures={fc} >= {abandon_thresh}): {reason}"
+                )
+                # Write lesson learned
+                await save_cognition(
+                    origin="goal_health",
+                    topic=goal.get("title", f"goal-{gid}"),
+                    content=f"Goal '{goal.get('title', '')}' abandoned after {fc} failures. "
+                            f"Reason: {reason}",
+                    importance=8,
+                )
+            except Exception as e:
+                log.warning(f"goal_health: abandon failed id={gid}: {e}")
+
+        elif action == "replan" and fc >= replan_thresh:
+            # Log replan suggestion — the reasoning model proposed new steps
+            new_steps = act.get("new_steps", [])
+            steps_str = "; ".join(str(s) for s in new_steps[:5])
+            try:
+                await save_cognition(
+                    origin="goal_health",
+                    topic=goal.get("title", f"goal-{gid}"),
+                    content=f"Goal '{goal.get('title', '')}' needs replanning "
+                            f"(failures={fc}): {reason}. Suggested steps: {steps_str}",
+                    importance=7,
+                )
+                summary["replanned"].append(gid)
+                log.info(
+                    f"goal_health: replan suggested for goal id={gid} "
+                    f"(failures={fc} >= {replan_thresh})"
+                )
+            except Exception as e:
+                log.warning(f"goal_health: replan save failed id={gid}: {e}")
+
+    # ── 5. Process proposals — drive-gated ──────────────────────────────
+    proposals = parsed.get("proposals", [])[:2]  # max 2
+
+    autonomy_val = float(drives.get("autonomy", 0.4))
+    auto_create = autonomy_val >= autonomy_thresh
+
+    for prop in proposals:
+        if not isinstance(prop, dict):
+            continue
+        title = str(prop.get("title", ""))[:255].strip()
+        desc = str(prop.get("description", ""))[:1000].strip()
+        imp = max(5, min(8, int(prop.get("importance", 6))))
+
+        if not title:
+            continue
+
+        # Abandon guard: check if this resembles an abandoned goal
+        if _proposal_resembles_abandoned(title, desc, abandoned):
+            log.info(f"goal_health: proposal blocked (resembles abandoned): {title}")
+            continue
+
+        # Duplicate guard: check active goals
+        if _proposal_resembles_active(title, active_goals):
+            log.info(f"goal_health: proposal blocked (resembles active): {title}")
+            continue
+
+        if auto_create:
+            # Autonomy high enough — create directly
+            t = title.replace("'", "''")
+            d = desc.replace("'", "''")
+            try:
+                row_id = await execute_insert(
+                    f"INSERT INTO {_GOALS()} "
+                    f"(title, description, status, importance, source, session_id) "
+                    f"VALUES ('{t}', '{d}', 'active', {imp}, 'assistant', 'reflection')"
+                )
+                _typed_metric_write(_GOALS())
+                summary["auto_created"].append({"id": row_id, "title": title})
+                log.info(
+                    f"goal_health: auto-created goal id={row_id} "
+                    f"(autonomy={autonomy_val:.2f} >= {autonomy_thresh}): {title}"
+                )
+            except Exception as e:
+                log.warning(f"goal_health: auto-create failed: {e}")
+        else:
+            # Autonomy too low — save as proposed for user review
+            t = title.replace("'", "''")
+            d = desc.replace("'", "''")
+            try:
+                row_id = await execute_insert(
+                    f"INSERT INTO {_GOALS()} "
+                    f"(title, description, status, importance, source, session_id) "
+                    f"VALUES ('{t}', '{d}', 'active', {imp}, 'assistant', 'reflection-proposed')"
+                )
+                _typed_metric_write(_GOALS())
+                # Mark as proposed by setting a low importance so it doesn't dominate
+                # and session_id='reflection-proposed' for easy querying
+                summary["pending_review"].append({"id": row_id, "title": title})
+                log.info(
+                    f"goal_health: proposed goal id={row_id} "
+                    f"(autonomy={autonomy_val:.2f} < {autonomy_thresh}, needs review): {title}"
+                )
+            except Exception as e:
+                log.warning(f"goal_health: proposal save failed: {e}")
+
+    return summary
+
+
+def _proposal_resembles_abandoned(
+    title: str, desc: str, abandoned: list[dict], threshold: float = 0.5
+) -> bool:
+    """
+    Keyword overlap check: does the proposal share enough words with an
+    abandoned goal to be considered a retry?
+    """
+    prop_words = set(
+        w.lower() for w in (title + " " + desc).split() if len(w) > 3
+    )
+    if not prop_words:
+        return False
+    for ab in abandoned:
+        ab_words = set(
+            w.lower() for w in
+            (ab.get("title", "") + " " + ab.get("description", "")).split()
+            if len(w) > 3
+        )
+        if not ab_words:
+            continue
+        overlap = len(prop_words & ab_words)
+        ratio = overlap / min(len(prop_words), len(ab_words))
+        if ratio >= threshold:
+            return True
+    return False
+
+
+def _proposal_resembles_active(title: str, active_goals: list[dict]) -> bool:
+    """Check if a proposal duplicates an active goal by title similarity."""
+    title_lower = title.lower()
+    for g in active_goals:
+        gt = g.get("title", "").lower()
+        # Exact substring match or very high word overlap
+        if title_lower in gt or gt in title_lower:
+            return True
+        gt_words = set(w for w in gt.split() if len(w) > 3)
+        title_words = set(w for w in title_lower.split() if len(w) > 3)
+        if gt_words and title_words:
+            overlap = len(gt_words & title_words)
+            if overlap / min(len(gt_words), len(title_words)) >= 0.7:
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Core run logic
 # ---------------------------------------------------------------------------
 
@@ -286,34 +760,41 @@ async def run_reflection() -> dict:
             from memory import _GOALS
             from database import fetch_dicts as _fd
             active_goals = await _fd(
-                f"SELECT id, title, description FROM {_GOALS()} WHERE status = 'active'"
+                f"SELECT id, title, description, attempt_count, failure_count "
+                f"FROM {_GOALS()} WHERE status = 'active'"
             ) or []
         except Exception as _ge:
             log.debug(f"reflection: goals fetch failed: {_ge}")
 
         items, goals_done = await _call_llm(model_key, turns_text, max_memories, active_goals)
 
-        from memory import save_memory
+        # Second-pass: dedicated goal completion scan using reasoning model
+        if active_goals:
+            try:
+                goals_done_2 = await _scan_goal_completions(turns_text, active_goals)
+                # Merge: union of both passes
+                goals_done = list(set(goals_done) | set(goals_done_2))
+                if goals_done_2:
+                    log.info(f"reflection: goal-scan (reasoning) detected completions: {goals_done_2}")
+            except Exception as e:
+                log.warning(f"reflection: goal-scan second pass failed: {e}")
+
+        from memory import save_cognition as _save_cogn
         for item in items:
             if not isinstance(item, dict):
                 continue
             topic   = str(item.get("topic", "reflection"))[:255]
             content = str(item.get("content", ""))[:2000]
             imp     = max(1, min(10, int(item.get("importance", 6))))
-            mtype   = str(item.get("type", "context"))
-            # self_model is not an ST enum value — store as semantic with topic prefix intact
-            if mtype == "self_model":
-                mtype = "semantic"
 
             if not topic or not content:
                 continue
 
-            new_id = await save_memory(
+            new_id = await _save_cogn(
+                origin="reflection",
                 topic=topic,
                 content=content,
                 importance=imp,
-                source="assistant",
-                type=mtype,
             )
             if new_id:
                 summary["saved"] += 1
@@ -342,6 +823,20 @@ async def run_reflection() -> dict:
                     log.warning(f"reflection: goal mark-done failed id={gid}: {_ge2}")
             if marked:
                 summary["goals_marked_done"] = marked
+
+        # Goal health pass — failure escalation, replanning, proposals
+        if active_goals:
+            try:
+                gh_summary = await _run_goal_health(active_goals, turns_text)
+                summary["goal_health"] = gh_summary
+                if gh_summary.get("abandoned"):
+                    log.info(f"reflection: goal_health abandoned: {gh_summary['abandoned']}")
+                if gh_summary.get("auto_created"):
+                    log.info(f"reflection: goal_health auto-created: {gh_summary['auto_created']}")
+                if gh_summary.get("pending_review"):
+                    log.info(f"reflection: goal_health pending review: {gh_summary['pending_review']}")
+            except Exception as e:
+                log.warning(f"reflection: goal_health pass failed: {e}")
 
     except Exception as e:
         log.error(f"reflection: run error: {e}")
@@ -414,9 +909,12 @@ async def run_reflection() -> dict:
 
 async def reflection_task() -> None:
     """
-    Long-running asyncio task. Loops every reflection_interval_h hours.
+    Long-running asyncio task. Loops every reflection_interval_m minutes.
     Wakes early if trigger_now() is called.
     """
+    from timer_registry import register_timer, timer_sleep
+    register_timer("reflection", "cogn")
+
     global _wake_event
     _wake_event = asyncio.Event()
 
@@ -432,8 +930,8 @@ async def reflection_task() -> None:
                 pass
             continue
 
-        interval_h = cfg["reflection_interval_h"]
-        if interval_h <= 0:
+        interval_m = cfg["reflection_interval_m"]
+        if interval_m <= 0:
             await asyncio.sleep(3600)
             continue
 
@@ -443,7 +941,25 @@ async def reflection_task() -> None:
             log.warning(f"reflection_task: unhandled error: {e}")
             _stats["last_error"] = str(e)
 
-        sleep_sec = interval_h * 3600
+        # Backoff: jump to 24h when both contradiction (cap 60m) and
+        # prospective (cap 120m) have hit their caps
+        from state import backoff_interval, idle_seconds, fmt_interval
+        try:
+            with open(_PLUGINS_PATH) as _f:
+                _pcog = json.load(_f).get("plugin_config", {}).get("proactive_cognition", {})
+        except Exception:
+            _pcog = {}
+        contra_base = int(_pcog.get("contradiction_interval_m", 2))
+        prosp_base = int(_pcog.get("prospective_interval_m", 1))
+        contra_eff = backoff_interval(contra_base, 60)
+        prosp_eff = backoff_interval(prosp_base, 120)
+        if contra_eff >= 60 and prosp_eff >= 120:
+            effective_m = 1440  # 24 hours
+            log.info(f"reflection: backoff {interval_m}m → 1440m (siblings at cap, idle {idle_seconds()/60:.0f}m)")
+        else:
+            effective_m = interval_m
+        sleep_sec = effective_m * 60
+        timer_sleep("reflection", sleep_sec, interval_desc=fmt_interval(effective_m))
         _wake_event.clear()
         try:
             await asyncio.wait_for(_wake_event.wait(), timeout=sleep_sec)

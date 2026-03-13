@@ -98,6 +98,9 @@ def _PROC_COLLECTION() -> str:
 def _DRIVES() -> str:
     return get_tables_for_model().get("drives", "samaritan_drives")
 
+def _COGNITION() -> str:
+    return get_tables_for_model().get("cognition", "samaritan_cognition")
+
 # ---------------------------------------------------------------------------
 # Typed table metrics — write/read counters, reset on restart
 # ---------------------------------------------------------------------------
@@ -180,7 +183,6 @@ def _age_cfg() -> dict:
         "memory_age_minutes_timer":   _safe_int(cfg.get("memory_age_minutes_timer",   360),  360),
         "memory_age_trigger_minutes": _safe_int(cfg.get("memory_age_trigger_minutes", 2880), 2880),
         "memory_age_entrycount":      hwm,  # legacy alias
-        "protected_topic_prefixes": ["self-capability-", "self-failure-", "self-preference-", "self-summary"],
     }
 
 
@@ -565,6 +567,87 @@ async def save_lt_memory(
 
 
 # ---------------------------------------------------------------------------
+# Cognition: save / load (system-internal cognitive loop outputs)
+# ---------------------------------------------------------------------------
+
+_COGNITION_ORIGINS = frozenset({
+    "reflection", "goal_health", "self_model",
+    "prospective", "tool_log", "tool_failure", "summary",
+})
+
+
+async def save_cognition(
+    origin: str,
+    topic: str,
+    content: str,
+    importance: int = 5,
+    source: str = "session",
+    session_id: str = "",
+) -> int:
+    """Insert a cognitive loop output row. Returns new row id, or 0 on error/duplicate."""
+    if origin not in _COGNITION_ORIGINS:
+        log.warning(f"save_cognition: unknown origin {origin!r}, falling back to 'reflection'")
+        origin = "reflection"
+    topic      = topic.replace("'", "''")[:255]
+    content    = content.replace("'", "''")
+    session_id = (session_id or "").replace("'", "''")[:255]
+    source     = source if source in ("session", "user", "directive", "assistant") else "session"
+    importance = max(1, min(10, int(importance)))
+
+    # Exact dedup
+    try:
+        dup = await execute_sql(
+            f"SELECT 1 FROM {_COGNITION()} "
+            f"WHERE origin = '{origin}' AND topic = '{topic}' AND content = '{content}' LIMIT 1"
+        )
+        if "1" in dup.strip():
+            return 0
+    except Exception as e:
+        log.warning(f"save_cognition dedup check failed: {e}")
+
+    sql = (
+        f"INSERT INTO {_COGNITION()} "
+        f"(origin, topic, content, importance, source, session_id) "
+        f"VALUES ('{origin}', '{topic}', '{content}', {importance}, '{source}', '{session_id}')"
+    )
+    try:
+        row_id = await execute_insert(sql)
+        log.info(f"save_cognition: origin={origin} topic={topic!r} id={row_id}")
+        return row_id
+    except Exception as e:
+        log.error(f"save_cognition failed: {e}")
+        return 0
+
+
+async def load_cognition(
+    origin: str | None = None,
+    topic_like: str | None = None,
+    limit: int = 100,
+    min_importance: int = 1,
+) -> list[dict]:
+    """Query cognition rows by origin and/or topic pattern."""
+    from database import fetch_dicts
+    clauses = [f"importance >= {min_importance}"]
+    if origin:
+        clauses.append(f"origin = '{origin}'")
+    if topic_like:
+        clauses.append(f"topic LIKE '{topic_like}'")
+    where = " AND ".join(clauses)
+    sql = (
+        f"SELECT id, origin, topic, content, importance, source, session_id, "
+        f"created_at, last_accessed "
+        f"FROM {_COGNITION()} "
+        f"WHERE {where} "
+        f"ORDER BY created_at DESC LIMIT {limit}"
+    )
+    try:
+        return await fetch_dicts(sql) or []
+    except Exception as e:
+        log.warning(f"load_cognition failed: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Short-term: load (returns list of dicts, most important first)
 # ---------------------------------------------------------------------------
 
@@ -775,11 +858,15 @@ async def _summarize_chunk_to_lt(
             for item in parsed.get("summary", []):
                 if not isinstance(item, dict):
                     continue
+                lt_source = str(item.get("source", "session"))
+                # Summaries are never verbatim chat — force non-assistant source
+                if lt_source == "assistant":
+                    lt_source = "session"
                 new_id = await save_lt_memory(
                     topic=str(item.get("topic", "general"))[:255],
                     content=str(item.get("content", ""))[:2000],
                     importance=int(item.get("importance", 5)),
-                    source=str(item.get("source", "session")),
+                    source=lt_source,
                     session_id=session_id,
                 )
                 if new_id:
@@ -938,24 +1025,17 @@ async def _age_topic_chunks(
             if not topic_name or topic_name.lower() == "topic":
                 continue
             if topic_name not in truly_protected:
-                # Skip self-model topics — they are protected by prefix
-                _protected_prefixes = cfg.get("protected_topic_prefixes", [])
-                if any(topic_name.startswith(p) for p in _protected_prefixes):
-                    continue
                 candidate_topics.append(topic_name)
     except Exception as e:
         log.error(f"_age_topic_chunks: candidate query failed: {e}")
         return totals
 
     # --- Step 2b: if no candidates but ST > HWM, force-unprotect the topic
-    # with the most rows (skip prefix-protected).  This prevents a single
-    # dominant topic from blocking aging entirely.
+    # with the most rows.  This prevents a single dominant topic from
+    # blocking aging entirely.
     if not candidate_topics and current > hwm:
-        _protected_prefixes = cfg.get("protected_topic_prefixes", [])
         forced: list[tuple[str, int]] = []
         for topic in truly_protected:
-            if any(topic.startswith(p) for p in _protected_prefixes):
-                continue
             t_escaped = topic.replace("'", "''")
             try:
                 cnt_raw = await execute_sql(
@@ -1425,7 +1505,9 @@ async def load_typed_context_block() -> str:
     try:
         from database import fetch_dicts as _fetch_dicts_local
         self_rows = await _fetch_dicts_local(
-            f"SELECT content FROM {_ST()} WHERE topic = 'self-summary' ORDER BY id DESC LIMIT 1"
+            f"SELECT content FROM {_COGNITION()} "
+            f"WHERE origin = 'self_model' AND topic = 'self-summary' "
+            f"ORDER BY id DESC LIMIT 1"
         )
         if self_rows and self_rows[0].get("content"):
             lines.append("## Self-Model\n")
@@ -1487,8 +1569,8 @@ async def load_typed_context_block() -> str:
 
 async def refresh_self_summary(llm_call_fn=None) -> str:
     """
-    Distil all self-* rows (excluding self-summary) into a 3-5 bullet standing summary.
-    Saves the result as a new ST row with topic='self-summary', importance=10, type='self_model'.
+    Distil all cognition rows (reflection, tool_failure, goal_health) into a 3-5 bullet standing summary.
+    Saves the result to the cognition table with origin='self_model', topic='self-summary', importance=10.
     Returns the summary string, or "" if no self-* rows exist.
 
     llm_call_fn: optional async callable(model_key: str, prompt: str) -> str.
@@ -1497,25 +1579,16 @@ async def refresh_self_summary(llm_call_fn=None) -> str:
     from database import fetch_dicts as _fd
     from config import get_model_role
 
-    st_table = _ST()
-    lt_table = _LT()
-
     try:
-        st_rows = await _fd(
-            f"SELECT id, topic, content, importance FROM {st_table} "
-            f"WHERE topic LIKE 'self-%' AND topic != 'self-summary' "
-            f"ORDER BY importance DESC, id DESC LIMIT 20"
-        ) or []
-        lt_rows = await _fd(
-            f"SELECT id, topic, content, importance FROM {lt_table} "
-            f"WHERE topic LIKE 'self-%' AND topic != 'self-summary' "
-            f"ORDER BY importance DESC, id DESC LIMIT 20"
+        all_rows = await _fd(
+            f"SELECT id, loop, topic, content, importance FROM {_COGNITION()} "
+            f"WHERE origin IN ('reflection', 'tool_failure', 'goal_health') "
+            f"AND topic != 'self-summary' "
+            f"ORDER BY importance DESC, id DESC LIMIT 40"
         ) or []
     except Exception as e:
         log.warning(f"refresh_self_summary: DB fetch failed: {e}")
         return ""
-
-    all_rows = st_rows + lt_rows
     if not all_rows:
         log.debug("refresh_self_summary: no self-* rows found, skipping")
         return ""
@@ -1552,12 +1625,11 @@ async def refresh_self_summary(llm_call_fn=None) -> str:
     summary_text = summary_text.strip()
 
     try:
-        await save_memory(
+        await save_cognition(
+            origin="self_model",
             topic="self-summary",
             content=summary_text,
             importance=10,
-            source="session",
-            type="self_model",
         )
         log.info("refresh_self_summary: saved new self-summary row")
     except Exception as e:
@@ -2463,11 +2535,10 @@ async def summarize_and_save(
         "Output ONLY valid JSON — a list of objects with keys: "
         "topic (short kebab-case string), content (one concise sentence written from your perspective), "
         "importance (1-10 int), "
-        "source ('user' = fact the user stated; 'assistant' = your own conclusion/estimate/recommendation; "
-        "'session' = neutral shared context). "
-        "Most ASSISTANT-turn content should be source='assistant'. Most USER-turn content should be source='user'. "
-        "Examples of source='assistant': your probability estimates, your recommendations, your assessments of people or situations. "
-        "Examples of source='user': things the user explicitly told you, their preferences, their plans. "
+        "source ('user' = fact the user stated; 'session' = your own conclusion, estimate, recommendation, "
+        "or neutral shared context — anything that is NOT a verbatim user statement). "
+        "Most USER-turn content should be source='user'. Your own conclusions, assessments, and recommendations "
+        "should be source='session'. Do NOT use source='assistant'. "
         f"{topics_hint}"
         "Output 3-8 items maximum. No markdown, no explanation, just the JSON array.\n\n"
         f"CONVERSATION:\n{history_text}"
@@ -2501,8 +2572,12 @@ async def summarize_and_save(
                     content = str(item.get("content", ""))[:2000]
                     importance = int(item.get("importance", 5))
                     source = str(item.get("source", "session"))
+                    # Summaries are never verbatim chat — force non-assistant source
+                    if source == "assistant":
+                        source = "session"
                     if topic and content:
-                        new_id = await save_memory(
+                        new_id = await save_cognition(
+                            origin="summary",
                             topic=topic,
                             content=content,
                             importance=importance,

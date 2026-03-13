@@ -124,19 +124,28 @@ async def _nl_is_overdue(due_at_text: str, model_key: str) -> bool:
     """
     Ask a cheap LLM whether a natural-language due_at phrase is overdue right now.
     Returns False on any error or ambiguity.
+
+    Uses JSON output format ({"overdue": true/false}) for reliable parsing
+    across both large and small models.
     """
     from config import LLM_REGISTRY
     from agents import _build_lc_llm, _content_to_str
     from langchain_core.messages import SystemMessage, HumanMessage
+    import json as _json, re as _re
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     prompt = (
-        f"Current date/time: {now_str}\n\n"
-        f"A scheduled reminder has due_at = \"{due_at_text}\"\n\n"
-        "Is this reminder overdue or due right now? Answer only: YES or NO.\n"
-        "When uncertain, answer NO."
+        f"Current date: {now_str}\n"
+        f"Due date: {due_at_text}\n"
+        "Is the due date before the current date?"
     )
-    system = "You evaluate whether a scheduled reminder is overdue. Answer only YES or NO."
+    system = (
+        "You compare dates. Given a current date and a due date, determine if "
+        "the due date is in the past. Return ONLY a JSON object: "
+        '{"overdue": true} or {"overdue": false}. No other text. '
+        "If the due date is not a date (e.g. an event description), return "
+        '{"overdue": false}.'
+    )
     try:
         if model_key not in LLM_REGISTRY:
             return False
@@ -145,8 +154,32 @@ async def _nl_is_overdue(due_at_text: str, model_key: str) -> bool:
         llm = _build_lc_llm(model_key)
         msgs = [SystemMessage(content=system), HumanMessage(content=prompt)]
         response = await asyncio.wait_for(llm.ainvoke(msgs), timeout=timeout)
-        answer = _content_to_str(response.content).strip().upper()
-        return answer.startswith("YES")
+        raw = _content_to_str(response.content).strip()
+
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        raw = raw.strip()
+
+        # Try JSON parse
+        try:
+            obj = _json.loads(raw)
+            return bool(obj.get("overdue", False))
+        except (_json.JSONDecodeError, ValueError):
+            pass
+
+        # Fallback: regex for {"overdue": true/false}
+        m = _re.search(r'"overdue"\s*:\s*(true|false)', raw, _re.IGNORECASE)
+        if m:
+            return m.group(1).lower() == "true"
+
+        # Legacy fallback: YES/NO (for models that still use that format)
+        upper = raw.upper()
+        if upper.startswith("YES"):
+            return True
+        return False
     except Exception as e:
         log.debug(f"prospective: NL due_at check failed: {e}")
         return False
@@ -185,17 +218,16 @@ async def _fetch_pending() -> list[dict]:
 
 
 async def _inject_reminder(row: dict, reminder_imp: int) -> bool:
-    """Write a high-importance reminder row into short-term memory. Returns True on success."""
-    from memory import save_memory
+    """Write a high-importance reminder row into cognition table. Returns True on success."""
+    from memory import save_cognition
     due_note = f" (was due: {row['due_at']})" if row.get("due_at") else ""
     content = f"[PROSPECTIVE REMINDER]{due_note} {row.get('content', '')}".strip()
     try:
-        rid = await save_memory(
-            topic="prospective-reminder",
+        rid = await save_cognition(
+            origin="prospective",
+            topic=row.get("topic", "prospective-reminder"),
             content=content,
             importance=reminder_imp,
-            source="assistant",
-            type="prospective",
         )
         return rid > 0
     except Exception as e:
@@ -246,6 +278,17 @@ async def run_check() -> dict:
             if wrote:
                 _stats["reminders_written"] += 1
                 summary["reminders"] += 1
+                # Notify
+                import asyncio as _asyncio
+                try:
+                    import notifier as _notifier
+                    _asyncio.ensure_future(_notifier.fire_event(
+                        "prospective_reminder",
+                        f"topic={row.get('topic')!r}  due_at={row.get('due_at') or 'now'}",
+                        (row.get("content") or "")[:200],
+                    ))
+                except Exception:
+                    pass
 
             await _mark_done(row["id"])
             log.info(
@@ -285,6 +328,9 @@ async def prospective_task() -> None:
     Long-running asyncio task. Loops every prospective_interval_m minutes.
     Wakes early if trigger_now() is called.
     """
+    from timer_registry import register_timer, timer_sleep
+    register_timer("prospective", "cogn")
+
     global _wake_event
     _wake_event = asyncio.Event()
 
@@ -311,7 +357,13 @@ async def prospective_task() -> None:
             log.warning(f"prospective_task: unhandled error: {e}")
             _stats["last_error"] = str(e)
 
-        sleep_sec = interval_m * 60
+        # Backoff: double interval for every 10 min of inactivity, cap at 120 min
+        from state import backoff_interval, idle_seconds, fmt_interval
+        effective_m = backoff_interval(interval_m, 120)
+        sleep_sec = effective_m * 60
+        if effective_m != interval_m:
+            log.info(f"prospective: backoff {interval_m}m → {effective_m:.0f}m (idle {idle_seconds()/60:.0f}m)")
+        timer_sleep("prospective", sleep_sec, interval_desc=fmt_interval(effective_m))
         _wake_event.clear()
         try:
             await asyncio.wait_for(_wake_event.wait(), timeout=sleep_sec)

@@ -726,7 +726,7 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
         _do_tool_log = _model_tool_log if _model_tool_log is not None else TOOL_CALL_LOG_DEFAULT
         if _do_tool_log:
             try:
-                from memory import save_memory
+                from memory import save_cognition
                 _log_topic = _sess_for_log.get("current_topic") or "tool-call"
                 _result_str = str(result)
                 # Compact result summary: first non-empty line, capped at 150 chars
@@ -762,11 +762,11 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
                     "status": "ok",
                     "result": _result_summary,
                 }
-                asyncio.ensure_future(save_memory(
+                asyncio.ensure_future(save_cognition(
+                    origin="tool_log",
                     topic=_log_topic,
                     content=json.dumps(_log_entry, ensure_ascii=False),
                     importance=3,
-                    source=_caller_model or "agent",
                     session_id=client_id,
                 ))
             except Exception as _tl_err:
@@ -832,16 +832,14 @@ async def execute_tool(client_id: str, tool_name: str, tool_args: dict) -> str:
         error_msg = f"{tool_name} error: {exc}"
         asyncio.ensure_future(_record_tool_stat(_et_model or "unknown", tool_name, success=False))
         await push_tok(client_id, f"[{tool_name} error] {exc}\n")
-        # Record tool failure as a self-model memory row (fire-and-forget)
+        # Record tool failure in cognition table (fire-and-forget)
         try:
-            from memory import save_memory as _save_memory_for_failure
-            _db_prefix_for_failure = sessions.get(client_id, {}).get("model", "")
-            asyncio.ensure_future(_save_memory_for_failure(
-                topic=f"self-failure-{tool_name}",
+            from memory import save_cognition as _save_cogn_failure
+            asyncio.ensure_future(_save_cogn_failure(
+                origin="tool_failure",
+                topic=tool_name,
                 content=f"Tool '{tool_name}' failed with error: {str(exc)[:200]}",
                 importance=9,
-                source="session",
-                type="self_model",
                 session_id=client_id,
             ))
         except Exception:

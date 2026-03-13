@@ -217,15 +217,15 @@ async def _upsert_conditioned(loop_name: str, strength: int, status: str = "acti
 
 async def _reflection_ratio(watermark: int, min_rows: int) -> tuple[float | None, int]:
     """
-    Check ST rows written since watermark (id > watermark, source='assistant').
+    Check cognition rows written since watermark (id > watermark, origin='reflection').
     Returns (ratio, new_watermark). ratio=None means too few rows to judge.
     """
-    from memory import _ST
+    from memory import _COGNITION
     from database import fetch_dicts, execute_sql
     try:
         rows = await fetch_dicts(
-            f"SELECT id, last_accessed, created_at FROM {_ST()} "
-            f"WHERE id > {watermark} AND source = 'assistant' "
+            f"SELECT id, last_accessed, created_at FROM {_COGNITION()} "
+            f"WHERE id > {watermark} AND origin = 'reflection' "
             f"ORDER BY id ASC"
         )
     except Exception as e:
@@ -252,16 +252,16 @@ async def _reflection_ratio(watermark: int, min_rows: int) -> tuple[float | None
 
 async def _prospective_ratio(min_rows: int) -> float | None:
     """
-    Check prospective-reminder rows in ST.
+    Check prospective rows in cognition table.
     A reminder is "used" if last_accessed > created_at (injected into a prompt after firing).
     Returns ratio or None if too few rows.
     """
-    from memory import _ST
+    from memory import _COGNITION
     from database import fetch_dicts
     try:
         rows = await fetch_dicts(
-            f"SELECT last_accessed, created_at FROM {_ST()} "
-            f"WHERE topic = 'prospective-reminder' "
+            f"SELECT last_accessed, created_at FROM {_COGNITION()} "
+            f"WHERE origin = 'prospective' "
             f"ORDER BY created_at DESC LIMIT 50"
         )
     except Exception as e:
@@ -371,9 +371,9 @@ def _apply_interval_override(loop_name: str, verdict: str, cfg: dict) -> None:
         raw = {}
 
     _interval_key = {
-        LOOP_REFLECTION:    "reflection_interval_h",
+        LOOP_REFLECTION:    "reflection_interval_m",
         LOOP_PROSPECTIVE:   "prospective_interval_m",
-        LOOP_CONTRADICTION: "contradiction_interval_h",
+        LOOP_CONTRADICTION: "contradiction_interval_m",
     }
     _enabled_key = {
         LOOP_REFLECTION:    "reflection_enabled",
@@ -381,9 +381,9 @@ def _apply_interval_override(loop_name: str, verdict: str, cfg: dict) -> None:
         LOOP_CONTRADICTION: "contradiction_enabled",
     }
     _base_interval = {
-        LOOP_REFLECTION:    float(raw.get("reflection_interval_h", 6.0)),
+        LOOP_REFLECTION:    int(raw.get("reflection_interval_m", 60)),
         LOOP_PROSPECTIVE:   int(raw.get("prospective_interval_m", 5)),
-        LOOP_CONTRADICTION: float(raw.get("contradiction_interval_h", 24.0)),
+        LOOP_CONTRADICTION: int(raw.get("contradiction_interval_m", 60)),
     }
 
     ikey = _interval_key[loop_name]

@@ -1224,14 +1224,14 @@ async def _judge_configure_exec(
     return await _judge_cmd(client_id, arg, session)
 
 
-async def _memory_save_exec(topic: str, content: str, importance: int = 5, source: str = "assistant") -> str:
-    from memory import save_memory
+async def _memory_save_exec(topic: str, content: str, importance: int = 5, source: str = "session") -> str:
+    from memory import save_lt_memory
     from state import current_client_id, sessions
     session_id = current_client_id.get("") or ""
     _sess_mem = sessions.get(session_id, {}).get("memory_enabled", None)
     if _sess_mem is False:
         return "Memory logging is disabled for this session."
-    row_id = await save_memory(
+    row_id = await save_lt_memory(
         topic=topic, content=content,
         importance=importance, source=source,
         session_id=session_id,
