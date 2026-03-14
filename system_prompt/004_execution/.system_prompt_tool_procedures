@@ -1,4 +1,4 @@
-## tool-procedures: Procedural Memory Reference
+## tool_procedures: Procedural Memory Reference
 
 ### procedure_recall(query, task_type)
 Call at the START of any multi-step task to retrieve matching procedures.

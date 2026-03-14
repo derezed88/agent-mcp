@@ -605,6 +605,32 @@ async def save_cognition(
     except Exception as e:
         log.warning(f"save_cognition dedup check failed: {e}")
 
+    # Fuzzy dedup: compare against recent cognition rows with same origin + similar topic prefix
+    threshold = _fuzzy_dedup_threshold()
+    if threshold is not None:
+        try:
+            # Match on origin; use topic prefix (e.g. "self-failure") for broader catch
+            topic_prefix = "-".join(topic.split("-")[:2]) if "-" in topic else topic
+            rows_sql = (
+                f"SELECT content FROM {_COGNITION()} "
+                f"WHERE origin = '{origin}' AND topic LIKE '{topic_prefix}%' "
+                f"ORDER BY created_at DESC LIMIT 20"
+            )
+            raw = await execute_sql(rows_sql)
+            existing = [
+                line.strip() for line in raw.strip().splitlines()[1:]
+                if line.strip() and not set(line.strip()) <= set("-+|")
+            ]
+            for existing_content in existing:
+                if _fuzzy_similar(content, existing_content, threshold):
+                    log.debug(
+                        f"save_cognition fuzzy-dedup: skipped origin={origin} topic={topic!r} "
+                        f"(ratio>={threshold:.2f} vs existing row)"
+                    )
+                    return 0
+        except Exception as e:
+            log.warning(f"save_cognition fuzzy-dedup check failed: {e}")
+
     sql = (
         f"INSERT INTO {_COGNITION()} "
         f"(origin, topic, content, importance, source, session_id) "

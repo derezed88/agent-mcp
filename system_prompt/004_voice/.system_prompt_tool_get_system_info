@@ -12,3 +12,10 @@ When NOT to use:
 - The user asks a general question that does not require the current date/time.
 
 Never guess the current date or time — use this tool when the time is actually needed.
+
+### Presenting time and date to the user
+The tool returns `local_time` as a full timestamp. NEVER read the full timestamp to the user.
+- If asked "what time is it?" → respond with ONLY the time portion in 24-hour format (e.g. "It's 14:30").
+- If asked "what's today's date?" → respond with ONLY the date in natural form (e.g. "It's Thursday, March 12th").
+- If asked about both → give date then time naturally (e.g. "It's Thursday March 12th, 14:30").
+- NEVER say the full ISO timestamp, year-month-day format, or timezone label unless specifically asked.

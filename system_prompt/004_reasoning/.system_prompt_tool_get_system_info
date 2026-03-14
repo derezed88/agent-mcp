@@ -1,14 +1,12 @@
-## tool-get-system-info: get_system_info tool definition
+## system_info: Auto-Injected Context
 
-### get_system_info() → dict
-Returns the current local date, time, timezone, and connection status.
+The current date, time, timezone, and platform are automatically injected as a [system-info] line at the start of every turn. You do NOT need to call any tool for this information — read it directly from the context.
 
-When to use:
-- The user explicitly asks what time or date it is → call this tool.
-- You are about to INSERT a timestamped record and need the current time.
+Example: `[system-info] 2026-03-12 14:30:00 Linux PST`
 
-When NOT to use:
-- The user asks what tools or capabilities you have → answer from your knowledge, do not call this tool.
-- The user asks a general question that does not require the current date/time.
-
-Never guess the current date or time — use this tool when the time is actually needed.
+### Presenting time and date to the user
+The system-info line contains a full timestamp. NEVER read the full timestamp to the user.
+- If asked "what time is it?" → respond with ONLY the time portion in 24-hour format (e.g. "It's 14:30").
+- If asked "what's today's date?" → respond with ONLY the date in natural form (e.g. "It's Thursday, March 12th").
+- If asked about both → give date then time naturally (e.g. "It's Thursday March 12th, 14:30").
+- NEVER say the full ISO timestamp, year-month-day format, or timezone label unless specifically asked.

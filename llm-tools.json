@@ -18,8 +18,8 @@
     },
     "db": {
       "tools": ["db_query"],
-      "always_active": false,
-      "heat_curve": [2, 5],
+      "always_active": true,
+      "heat_curve": [20, 50],
       "sp_section": "tool_db_query"
     },
     "qwen": {
@@ -40,68 +40,68 @@
       "sp_section": null
     },
     "search": {
-      "tools": ["search_ddgs", "search_google", "search_tavily", "search_xai"],
+      "tools": ["search_ddgs", "search_google", "search_tavily", "search_xai", "search_brightdata"],
       "always_active": false,
-      "heat_curve": [2, 5],
-      "sp_section": "tool_search"
+      "heat_curve": [20, 50],
+      "sp_section": null
     },
     "drive": {
       "tools": ["google_drive"],
       "always_active": false,
-      "heat_curve": [2, 5],
+      "heat_curve": [20, 50],
       "sp_section": "tool_google_drive"
     },
     "vscode": {
       "tools": ["vscode_sessions_list", "vscode_sessions_read"],
       "always_active": false,
-      "heat_curve": [2, 5],
+      "heat_curve": [20, 50],
       "sp_section": "tool_vscode_sessions"
     },
     "extract": {
-      "tools": ["url_extract", "file_extract"],
+      "tools": ["url_extract", "url_extract_brightdata", "file_extract"],
       "always_active": false,
-      "heat_curve": [2, 5],
+      "heat_curve": [20, 50],
       "sp_section": "tool_file_extract"
     },
     "extract_files": {
-      "tools": ["url_extract", "file_extract"],
+      "tools": ["url_extract", "url_extract_brightdata", "file_extract"],
       "always_active": true,
       "sp_section": "tool_file_extract"
     },
     "agent": {
       "tools": ["agent_call"],
       "always_active": false,
-      "heat_curve": [2, 5],
+      "heat_curve": [20, 50],
       "sp_section": null
     },
     "tmux": {
       "tools": ["tmux_new", "tmux_exec", "tmux_ls", "tmux_kill_session", "tmux_kill_server", "tmux_history", "tmux_history_limit", "tmux_call_limit"],
       "always_active": false,
-      "heat_curve": [2, 5],
+      "heat_curve": [20, 50],
       "sp_section": null
     },
     "memory": {
-      "tools": ["memory_save", "memory_recall", "memory_age", "memory_update"],
+      "tools": ["memory_save", "memory_recall", "memory_age", "memory_update", "recall_temporal"],
       "always_active": false,
-      "heat_curve": [2, 5],
+      "heat_curve": [20, 50],
       "sp_section": null
     },
     "memory_typed": {
       "tools": ["set_goal", "set_plan", "assert_belief", "set_conditioned", "save_memory_typed"],
       "always_active": false,
-      "heat_curve": [2, 5],
+      "heat_curve": [20, 50],
       "sp_section": "tool_memory_typed"
     },
     "procedures": {
       "tools": ["procedure_save", "procedure_recall"],
       "always_active": false,
-      "heat_curve": [2, 6],
+      "heat_curve": [20, 60],
       "sp_section": "tool_procedures"
     }
   },
   "metadata": {
     "last_modified": "2026-03-06",
-    "tool_call_log": true,
+    "tool_call_log": false,
     "notes": "Named toolsets for per-model tool binding. Toolsets with always_active=false participate in hot/cold lifecycle. heat_curve[i] = heat after (i+1) calls; last value is cap. Decay: -1 per turn unused. tool_call_log=true (global default) enables saving tool call prompts+results to memory as inline ST rows between the user prompt and assistant response rows, sharing the same topic and sourced from the calling LLM. Overridable per-model via conv_log_tools in llm-models.json."
   }
 }

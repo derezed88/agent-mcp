@@ -1,0 +1,94 @@
+## Capability Map
+Last updated: 2026-03-11 by admin (rev3)
+
+This is the authoritative record of what is implemented in this system. Use it as the basis for goal selection — do not invent capabilities, and do not propose goals that require code or schema changes unless admin has confirmed those changes are ready.
+
+### Infrastructure (admin-maintained — do not modify without admin confirmation)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Short-term memory | operational | Auto-injected per turn. MySQL samaritan_memory_shortterm |
+| Long-term memory | operational | Qdrant semantic retrieval. MySQL samaritan_memory_longterm |
+| Goal/plan system | operational | samaritan_goals, samaritan_plans. Delegate via set_goal, set_plan |
+| Belief system | operational | samaritan_beliefs. Delegate via assert_belief |
+| Conditioned responses | operational | samaritan_conditioned. Delegate via set_conditioned |
+| Episodic memory | operational | samaritan_episodic. Delegate via save_memory_typed(memory_type='episodic') |
+| Autobiographical memory | operational | samaritan_autobiographical. Delegate via save_memory_typed(memory_type='autobiographical') |
+| Prospective memory | operational | samaritan_prospective. Delegate via save_memory_typed(memory_type='prospective') |
+| Procedural memory | operational | samaritan_procedural (NOT samaritan_procedures). Delegate via procedure_save / procedure_recall |
+| Drive/affect system | operational | samaritan_drives. 7 drives seeded. Decay runs each reflection cycle |
+| Reflection loop | operational | reflection.py runs on schedule. Handles decay, drive nudges, prospective scan |
+| Contradiction scanner | operational (conditioned) | Fires as conditioned response pre-reply |
+| Prospective scanner | operational (conditioned) | Fires as conditioned response pre-reply |
+| Drive-weighted goal priority | operational | Reflection loop applies task_completion drive to goal scoring |
+| DB query (read/write DML) | operational | Via llm_call(mode="tool", tool="db_query") to samaritan-execution |
+| Web search | operational | search_tavily, search_xai |
+| Google Drive | operational | Via llm_call(mode="tool", tool="google_drive") to samaritan-execution |
+| URL/file extraction | operational | url_extract, file_extract |
+| Temporal pattern recall | operational | recall_temporal tool (cached). Delegate via llm_call(mode="tool", tool="recall_temporal"). Background inference runs every 3h, proactively discovering patterns. Use new=True to force fresh query |
+| Summarization | operational | summarizer-anthropic (haiku), summarizer-gemini (flash) |
+| DDL / schema changes | NOT AVAILABLE via tools | Requires admin to run migration. Never attempt via db_query |
+| Code changes | NOT AVAILABLE via tools | Requires admin. Never set goals that require code changes |
+| Timer / scheduled self-fork | NOT AVAILABLE via tools | Not yet implemented. Do not set goals around this |
+| Multi-prompt swarms | NOT AVAILABLE via tools | Not yet implemented. Do not set goals around this |
+
+### Content population (Samaritan-maintained — update after completing a goal)
+
+| Capability | Status | Current count | Gap |
+|---|---|---|---|
+| Core beliefs | populated | 29+ rows (heavy repetition on drive-calibration) | No new drive-calibration beliefs needed — topic saturated |
+| Conditioned responses | populated | 6 active | No gap — review for misfires or weak reactions |
+| Episodic memories | sparse | 2 entries | Can grow — record significant autonomy loop events |
+| Autobiographical memories | seeded | 7 entries | Good coverage: drives, autonomy loops, architecture. Can add more milestones if genuinely new events occur |
+| Prospective entries | sparse | 0 pending (all cleared) | No pending items — create new prospective if there's a genuine future concern |
+| Procedures | seeded | 23+ entries | Good coverage. Add procedures for new task types as they arise |
+| Drives | seeded | 7 drives | task-completion recovering. Do NOT assert more beliefs about drives — already saturated with 27+ entries |
+
+### Goal selection rules (apply in priority order)
+
+Before proposing any goal, run the Step 0 self-audit in the auto_task protocol. Map the db_query results directly to one of these rules. Then select based on these rules — in order, top first:
+
+1. **Autobiographical gap** — The Step 0 audit will show 7 entries. This is now reasonably populated. Only use this rule if a genuinely NEW milestone event has occurred since the last autobiographical entry. Check `SELECT content FROM samaritan_autobiographical ORDER BY id DESC LIMIT 3` — if the most recent entries already cover recent events, skip to rule 3.
+   - If a new milestone exists: Title: `"Record autobiographical milestone: <event name>"`
+   - Execution tool: `save_memory_typed(memory_type='autobiographical', content='...', importance=8)`
+
+2. **Drive baseline calibration belief** — **SKIP THIS RULE ENTIRELY** — the samaritan_beliefs table already contains 27+ entries saturated with drive-calibration content. Asserting another drive belief would be redundant. Move directly to rule 3.
+   - ~~Title: "Assert belief: drive baseline calibration explanation"~~ — BANNED, already done
+
+3. **New reusable procedure** — Check what samaritan_procedural contains via db_query. If any task type has been performed 2+ times but has no recorded procedure, record one.
+   - Title: `"Save procedure: <task-type-slug>"`
+   - Execution tool: `procedure_save(task_type='...', steps=[...], outcome='success', notes='...')`
+
+4. **Pending prospective items** — If Step 0 shows pending prospective entries, act on them.
+
+5. **Belief quality review** — Query samaritan_beliefs for low-confidence (< 6) or old entries. Strengthen or retract one.
+   - Title: `"Strengthen belief: <topic>"`
+   - Execution tool: `assert_belief(id=<existing_id>, confidence=<new>, content='<updated>')`
+
+6. **Episodic memory** — Record a specific interaction or observation as episodic memory.
+   - Title: `"Record episodic memory: <event>"`
+   - Execution tool: `save_memory_typed(memory_type='episodic', ...)`
+
+### What IMMEDIATELY DISQUALIFIES a goal (do not propose, do not execute)
+
+- Requires DDL (CREATE TABLE, ALTER TABLE, ADD COLUMN, DROP) — **blocked by system, will always fail**
+- Requires code changes — **outside your scope**
+- "Implement timers", "implement swarms", "implement X system" where X is marked NOT AVAILABLE above — **do not propose**
+- "Confirm X is working" where X is already marked operational — **not a goal, it's a test you can do inline**
+- Involves creating/modifying `samaritan_procedures` (wrong table name, does not exist) — use `samaritan_procedural` via procedure_save tool only
+- Goal is only completable by admin — **not autonomous**
+
+### BANNED goal titles (do not create goals with these words/phrases)
+
+Any goal whose title or description contains these phrases is BANNED and must not be created:
+- "Enhance Autonomy" / "Enhance Autonomy in Processes" / "Improve Autonomy"
+- "Assess Current Capabilities" / "Assess Capabilities"
+- "Improve symbiosis and integrity drives" / "Improve drives"
+- "drive baseline calibration" / "drive-baseline-calibration" / "task-completion drive" — already saturated with 27+ beliefs, do NOT add more
+- "Stakeholders" / "across the organization" / "controlled environment" — not relevant to this system
+
+If you find yourself about to propose one of these, STOP. Pick from the goal selection rules above, targeting a SPECIFIC table and SPECIFIC content to write.
+
+### When all goals are disqualified
+
+If every candidate from the selection rules above is disqualified, **do not invent a new goal to look productive**. Instead, follow the Step 1-BLOCKED path in the auto_task protocol: produce a system improvement report that tells admin exactly what's blocked, why, and what to implement next. This IS the correct autonomous behavior — knowing your limits and communicating them clearly is more valuable than fabricating progress.

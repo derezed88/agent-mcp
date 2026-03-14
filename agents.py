@@ -27,6 +27,25 @@ from tools import (
     get_tool_type,
 )
 
+# ---------------------------------------------------------------------------
+# Enrichment stats — tracks timeout vs success for !memstats
+# ---------------------------------------------------------------------------
+_enrich_stats = {
+    "total": 0,
+    "full": 0,           # all tasks completed within deadline
+    "partial": 0,         # some tasks completed, some timed out
+    "timeout": 0,         # zero tasks completed (complete miss)
+    "avg_ms": 0.0,        # running average of enrichment duration
+    "task_completions": {},  # per-task completion counts (e.g. {"qdrant": 5, "typed": 8, ...})
+    "task_timeouts": {},     # per-task timeout counts
+}
+
+
+def get_enrich_stats() -> dict:
+    """Return a copy of the enrichment stats counters."""
+    return dict(_enrich_stats)
+
+
 def _sysinfo_stamp() -> str:
     """Return a fresh [system-info] timestamp line in configured display timezone."""
     from config import now_display, display_tz_label
@@ -1137,116 +1156,184 @@ async def auto_enrich_context(messages: list[dict], client_id: str) -> list[dict
     if not last_user: return messages
 
     text = last_user.get("content", "")
-    enrichments = []
 
     # Ensure DB context is set for all SQL queries in this function
     _enrich_model = sessions.get(client_id, {}).get("model", "")
     if _enrich_model:
         set_model_context(_enrich_model)
 
-    # Auto-inject sysinfo so models never need to call get_system_info
-    enrichments.append(_sysinfo_stamp())
+    # ── Synchronous prep (no I/O) ────────────────────────────────────────────
+    # Auto-inject sysinfo — always available, no async needed
+    enrichments = [_sysinfo_stamp()]
 
-    # Instance-specific enrichment rules from auto-enrich.json
-    # Session flag auto_enrich=False suppresses all rules for this session.
-    _auto_enrich_enabled = sessions.get(client_id, {}).get("auto_enrich", True)
-    for rule in (_load_enrich_rules() if _auto_enrich_enabled else []):
-        pattern = rule.get("pattern", "")
-        sql = rule.get("sql", "")
-        label = rule.get("label", sql)
-        if not pattern or not sql:
-            continue
-        try:
-            if re.search(pattern, text, re.IGNORECASE):
-                result = await execute_sql(sql)
-                enrichments.append(f"[auto-retrieved via: {label}]\n{result}")
-                if not sessions.get(client_id, {}).get("tool_suppress", False):
-                    await push_tok(client_id, f"\n[context] Auto-queried: {label}\n")
-        except Exception:
-            pass
-
-    # Inject short-term memory context block
-    # Build a query string from the last few turns for semantic retrieval
+    # Determine memory injection eligibility
     _sess_mem_flag = sessions.get(client_id, {}).get("memory_enabled", None)
     _model_key = sessions.get(client_id, {}).get("model", "")
     _model_mem_flag = LLM_REGISTRY.get(_model_key, {}).get("memory_enabled", None)
-    # Disabled if any of: model-level=False, session-level=False, global feature off
-    # (None means "not set at that level" → defer to next level)
     _mem_injection_enabled = (
         (_model_mem_flag is None or _model_mem_flag)
         and (_sess_mem_flag is None or _sess_mem_flag)
         and _memory_feature("context_injection")
     )
+
+    # Build query_text from current_topic or recent turns (no I/O)
+    _session_ctx = sessions.get(client_id, {})
+    current_topic = _session_ctx.get("current_topic", "")
+    if current_topic:
+        query_text = current_topic
+    else:
+        _genuine = [
+            m for m in messages
+            if m.get("role") in ("user", "assistant")
+            and m.get("content")
+            and not _content_to_str(m.get("content", "")).startswith("[Session start")
+            and not _content_to_str(m.get("content", "")).startswith("[context]")
+        ]
+        recent = _genuine[-6:] if len(_genuine) >= 6 else _genuine
+        query_text = " ".join(
+            _content_to_str(m.get("content", ""))[:300] for m in recent
+        ).strip()
+
+    _identity_name = LLM_REGISTRY.get(_model_key, {}).get("identity_name", "")
+    _mem_types_enabled = LLM_REGISTRY.get(_model_key, {}).get("memory_types_enabled", False)
+    _suppress = sessions.get(client_id, {}).get("tool_suppress", False)
+
+    # ── Fire all enrichment tasks in parallel ────────────────────────────────
+    # Named tasks dict: name → asyncio.Task
+    # Results are collected progressively — whatever finishes before the
+    # deadline is injected; slow tasks (typically Qdrant) degrade gracefully.
+    from memory import (
+        load_context_block, load_topic_list,
+        load_temporal_context,
+    )
+    tasks: dict[str, asyncio.Task] = {}
+
     if _mem_injection_enabled:
-        try:
-            from memory import load_context_block, load_topic_list
-            # Prefer model-derived current_topic as query seed (set from <<topic>> tag each turn).
-            # Fall back to last 3 user/assistant turns (excluding system and tool injections).
-            _session_ctx = sessions.get(client_id, {})
-            current_topic = _session_ctx.get("current_topic", "")
-            if current_topic:
-                query_text = current_topic
-            else:
-                # Filter to genuine user/assistant turns — skip system messages and
-                # tool injection content (starts with "[Session start" or similar).
-                _genuine = [
-                    m for m in messages
-                    if m.get("role") in ("user", "assistant")
-                    and m.get("content")
-                    and not _content_to_str(m.get("content", "")).startswith("[Session start")
-                    and not _content_to_str(m.get("content", "")).startswith("[context]")
-                ]
-                recent = _genuine[-6:] if len(_genuine) >= 6 else _genuine
-                query_text = " ".join(
-                    _content_to_str(m.get("content", ""))[:300] for m in recent
-                ).strip()
-            _identity_name = LLM_REGISTRY.get(_model_key, {}).get("identity_name", "")
-            _mem_types_enabled = LLM_REGISTRY.get(_model_key, {}).get("memory_types_enabled", False)
-            mem_block = await load_context_block(
-                min_importance=3, query=query_text, user_text=text,
-                identity_name=_identity_name,
-                memory_types_enabled=_mem_types_enabled,
-            )
-            if mem_block:
-                enrichments.append(mem_block)
-            # Inject typed context block (goals/plans/beliefs) and procedure block concurrently
-            if _mem_types_enabled:
+        # Qdrant semantic retrieval (slowest — ~500ms: embed + search)
+        tasks["qdrant"] = asyncio.create_task(load_context_block(
+            min_importance=3, query=query_text, user_text=text,
+            identity_name=_identity_name,
+            memory_types_enabled=_mem_types_enabled,
+        ))
+        # MySQL-only tasks (~50ms each)
+        tasks["topic_list"] = asyncio.create_task(load_topic_list())
+        tasks["temporal"] = asyncio.create_task(load_temporal_context())
+        if _mem_types_enabled:
+            from memory import load_typed_context_block, load_procedure_context_block
+            _task_hint = current_topic or query_text[:200]
+            tasks["typed"] = asyncio.create_task(load_typed_context_block())
+            tasks["procedures"] = asyncio.create_task(load_procedure_context_block(task_hint=_task_hint))
+
+    # Auto-enrich SQL rules (fast, pattern-gated)
+    _auto_enrich_enabled = sessions.get(client_id, {}).get("auto_enrich", True)
+    _matched_rules: list[tuple[str, str]] = []  # (label, sql)
+    if _auto_enrich_enabled:
+        for rule in _load_enrich_rules():
+            pattern = rule.get("pattern", "")
+            sql = rule.get("sql", "")
+            label = rule.get("label", sql)
+            if pattern and sql:
                 try:
-                    from memory import load_typed_context_block, load_procedure_context_block
-                    _task_hint = current_topic or query_text[:200]
-                    typed_block, proc_block = await asyncio.gather(
-                        load_typed_context_block(),
-                        load_procedure_context_block(task_hint=_task_hint),
-                        return_exceptions=True,
-                    )
-                    if isinstance(proc_block, str) and proc_block:
-                        enrichments.insert(0, proc_block)
-                    if isinstance(typed_block, str) and typed_block:
-                        enrichments.insert(0, typed_block)  # prepend — structural context first
-                except Exception as _tb_err:
-                    log.debug(f"auto_enrich_context: typed/procedure block load failed: {_tb_err}")
-            # Inject known topic list so the model reuses existing slugs rather than coining new ones
-            try:
-                known_topics = await load_topic_list()
-                if known_topics:
-                    enrichments.append(
-                        "## Recent Topics\n"
-                        + ", ".join(known_topics)
-                    )
-            except Exception as _tl_err:
-                log.debug(f"auto_enrich_context: topic list load failed: {_tl_err}")
-            # Inject temporal context — recurring routines around the current time of day
-            try:
-                from memory import load_temporal_context
-                temporal_block = await load_temporal_context()
-                if temporal_block:
-                    enrichments.append(temporal_block)
-                    if not sessions.get(client_id, {}).get("tool_suppress", False):
-                        await push_tok(client_id, "\n[context] Temporal routines loaded\n")
-            except Exception as _tc_err:
-                log.debug(f"auto_enrich_context: temporal context load failed: {_tc_err}")
-        except Exception as _mem_err:
-            log.warning(f"auto_enrich_context: memory load failed: {_mem_err}")
+                    if re.search(pattern, text, re.IGNORECASE):
+                        _matched_rules.append((label, sql))
+                except Exception:
+                    pass
+    for i, (label, sql) in enumerate(_matched_rules):
+        tasks[f"rule_{i}"] = asyncio.create_task(execute_sql(sql))
+
+    if not tasks:
+        # No async work — return with just sysinfo
+        if not enrichments:
+            return messages
+        inject_content = "## Auto-retrieved context\nBase answer on this data:\n\n" + "\n\n".join(enrichments)
+        inject = {"role": "system", "content": inject_content}
+        return list(messages[:-1]) + [inject, messages[-1]]
+
+    # ── Collect results with deadline ────────────────────────────────────────
+    # For stream_level >= 2 models (voice), use 2s deadline.
+    # For all others, wait indefinitely (no timeout).
+    _stream_level = sessions.get(client_id, {}).get("stream_level", 0)
+    _deadline = 2.0 if _stream_level >= 2 else None
+
+    done, pending = await asyncio.wait(
+        tasks.values(),
+        timeout=_deadline,
+    )
+
+    # Map completed/pending back to task names
+    task_to_name = {t: n for n, t in tasks.items()}
+    done_names = {task_to_name[t] for t in done}
+    pending_names = {task_to_name[t] for t in pending}
+
+    # Update per-task stats and classify overall outcome
+    for name in done_names:
+        _enrich_stats["task_completions"][name] = _enrich_stats["task_completions"].get(name, 0) + 1
+    for name in pending_names:
+        _enrich_stats["task_timeouts"][name] = _enrich_stats["task_timeouts"].get(name, 0) + 1
+    if not pending_names:
+        _enrich_stats["full"] += 1
+    elif done_names:
+        _enrich_stats["partial"] += 1
+    else:
+        _enrich_stats["timeout"] += 1
+
+    if pending_names:
+        log.warning(
+            f"auto_enrich_context: deadline={_deadline}s completed={sorted(done_names)} "
+            f"timed_out={sorted(pending_names)}"
+        )
+
+    # ── Assemble enrichments from completed tasks ────────────────────────────
+    # Order: typed/procedures (structural) → qdrant (semantic) → rules → topics → temporal
+    def _get(name: str) -> str | None:
+        """Return task result if completed without error, else None."""
+        if name not in done_names:
+            return None
+        task = tasks[name]
+        if task.exception():
+            log.debug(f"auto_enrich_context: task {name} failed: {task.exception()}")
+            return None
+        result = task.result()
+        if isinstance(result, str):
+            return result if result else None
+        if isinstance(result, list):
+            return result  # topic_list returns list[str]
+        return None
+
+    # Typed context (prepend — structural context first)
+    typed_block = _get("typed")
+    if typed_block:
+        enrichments.insert(0, typed_block)
+
+    proc_block = _get("procedures")
+    if proc_block:
+        enrichments.insert(0, proc_block)
+
+    # Qdrant semantic memory
+    mem_block = _get("qdrant")
+    if mem_block:
+        enrichments.append(mem_block)
+
+    # Auto-enrich SQL rules
+    for i, (label, _sql) in enumerate(_matched_rules):
+        rule_result = _get(f"rule_{i}")
+        if rule_result:
+            enrichments.append(f"[auto-retrieved via: {label}]\n{rule_result}")
+            if not _suppress:
+                # push_tok is fire-and-forget here; don't await to avoid blocking assembly
+                asyncio.create_task(push_tok(client_id, f"\n[context] Auto-queried: {label}\n"))
+
+    # Topic list
+    topic_result = _get("topic_list")
+    if topic_result and isinstance(topic_result, list):
+        enrichments.append("## Recent Topics\n" + ", ".join(topic_result))
+
+    # Temporal context
+    temporal_block = _get("temporal")
+    if temporal_block:
+        enrichments.append(temporal_block)
+        if not _suppress:
+            asyncio.create_task(push_tok(client_id, "\n[context] Temporal routines loaded\n"))
 
     if not enrichments: return messages
 
@@ -2098,18 +2185,17 @@ async def dispatch_llm(model_key: str, messages: list[dict], client_id: str) -> 
         except Exception as _tl_err:
             log.warning(f"dispatch_llm: tool_list inject failed: {_tl_err}")
 
-    _stream_level = sessions.get(client_id, {}).get("stream_level", 0)
-    if _stream_level >= 2:
-        # Level 2: fire enrichment concurrently with LLM invocation setup.
-        # Race against 300ms timeout — inject if ready, defer to next turn if slow.
-        # asyncio.shield() prevents the enrich task from being cancelled when the
-        # timeout fires; it completes in the background and is GC'd naturally.
-        enrich_task = asyncio.create_task(auto_enrich_context(messages, client_id))
-        try:
-            messages = await asyncio.wait_for(asyncio.shield(enrich_task), timeout=0.3)
-        except asyncio.TimeoutError:
-            log.debug("dispatch_llm: enrich timeout (>300ms), proceeding without this turn's enrichment")
-    else:
-        messages = await auto_enrich_context(messages, client_id)
+    # Enrichment now handles its own deadline internally via asyncio.wait
+    # (stream_level >= 2 → 2s deadline with progressive collection;
+    #  stream_level < 2 → no deadline, waits for all tasks).
+    _enrich_t0 = time.monotonic()
+    messages = await auto_enrich_context(messages, client_id)
+    _enrich_ms = (time.monotonic() - _enrich_t0) * 1000
+    _enrich_stats["total"] += 1
+    # Classify: full (no pending), partial (some pending), timeout (all pending)
+    # The task counts are already tracked per-task inside auto_enrich_context.
+    # Here we just track overall latency.
+    n = _enrich_stats["total"]
+    _enrich_stats["avg_ms"] += (_enrich_ms - _enrich_stats["avg_ms"]) / n
 
     return await agentic_lc(model_key, messages, client_id)

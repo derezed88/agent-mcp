@@ -93,7 +93,7 @@ def _rcogn_cfg() -> dict:
         "enabled":               raw.get("enabled",               False),
         "reflection_enabled":    raw.get("reflection_enabled",    True),
         "reflection_interval_m": int(raw.get("reflection_interval_m", 60)),
-        "reflection_model":      raw.get("reflection_model",      "summarizer-gemini"),
+        "reflection_model":      raw.get("reflection_model",      ""),
         "reflection_turn_limit": int(raw.get("reflection_turn_limit",  40)),
         "reflection_min_turns":  int(raw.get("reflection_min_turns",   5)),
         "reflection_max_memories": int(raw.get("reflection_max_memories", 6)),
@@ -102,7 +102,7 @@ def _rcogn_cfg() -> dict:
         "goal_health_failure_replan":    int(raw.get("goal_health_failure_replan", 3)),
         "goal_health_failure_abandon":   int(raw.get("goal_health_failure_abandon", 5)),
         "goal_health_autonomy_threshold": float(raw.get("goal_health_autonomy_threshold", 0.6)),
-        "goal_health_model":            raw.get("goal_health_model", "samaritan-reasoning"),
+        "goal_health_model":            raw.get("goal_health_model", ""),
     }
     base.update(ovr)
     return base
@@ -403,6 +403,12 @@ async def _run_goal_health(
     abandon_thresh = cfg["goal_health_failure_abandon"]
     autonomy_thresh = cfg["goal_health_autonomy_threshold"]
     model_key = cfg["goal_health_model"]
+    if not model_key:
+        from config import get_model_role
+        try:
+            model_key = get_model_role("goal_health")
+        except KeyError:
+            model_key = "samaritan-reasoning"
 
     from database import fetch_dicts, execute_sql, execute_insert
     from memory import _GOALS, _ST, _typed_metric_write, _COGNITION, save_cognition
@@ -731,16 +737,43 @@ async def run_reflection() -> dict:
     """
     cfg = _rcogn_cfg()
     model_key    = cfg["reflection_model"]
+    if not model_key:
+        from config import get_model_role
+        try:
+            model_key = get_model_role("reflection")
+        except KeyError:
+            model_key = "summarizer-gemini"
     turn_limit   = cfg["reflection_turn_limit"]
     min_turns    = cfg["reflection_min_turns"]
     max_memories = cfg["reflection_max_memories"]
 
-    from database import set_model_context
+    from database import set_model_context, fetch_dicts as _fd_refl
     from config import DEFAULT_MODEL
     set_model_context(DEFAULT_MODEL)
 
     t_start = time.monotonic()
     summary = {"turns": 0, "saved": 0, "skipped": 0, "error": None}
+
+    # Staleness gate: skip LLM call if no new ST entries since last interval
+    try:
+        from memory import _ST
+        staleness_minutes = cfg["reflection_interval_m"] * 1.3
+        latest = await _fd_refl(
+            f"SELECT MAX(created_at) AS latest FROM {_ST()} "
+            f"WHERE source IN ('user', 'assistant')"
+        )
+        if latest and latest[0].get("latest"):
+            from datetime import timedelta
+            age = datetime.now() - latest[0]["latest"]
+            if age > timedelta(minutes=staleness_minutes):
+                log.debug(
+                    f"reflection: newest ST entry is {age.total_seconds()/60:.0f}m old "
+                    f"(threshold {staleness_minutes:.0f}m) — skipping cycle"
+                )
+                summary["skipped_reason"] = f"no new turns in {age.total_seconds()/60:.0f}m"
+                return summary
+    except Exception as e:
+        log.debug(f"reflection: staleness check failed ({e}), proceeding anyway")
 
     try:
         rows = await _fetch_recent_turns(turn_limit)
@@ -883,7 +916,13 @@ async def run_reflection() -> dict:
             from memory import refresh_self_summary
             from agents import _call_llm_text
             from config import LLM_REGISTRY
-            _summarizer_key = cfg.get("reflection_model", "summarizer-gemini")
+            _summarizer_key = cfg.get("reflection_model") or ""
+            if not _summarizer_key:
+                from config import get_model_role
+                try:
+                    _summarizer_key = get_model_role("reflection")
+                except KeyError:
+                    _summarizer_key = "summarizer-gemini"
             # Fall back to any available summarizer
             if _summarizer_key not in LLM_REGISTRY:
                 _summarizer_key = next(

@@ -1,0 +1,20 @@
+## contradiction: Contradiction detection task rules
+
+When evaluating belief pairs for contradictions:
+
+### What IS a contradiction
+- Belief A and Belief B assert logically incompatible facts — they cannot both be true simultaneously.
+- Example: "The server runs on port 8080" vs "The server runs on port 3000" (same server, same context).
+
+### What is NOT a contradiction
+- Different levels of detail or completeness about the same topic.
+- Beliefs about different time periods (something was true then, changed now).
+- Differences in emphasis, phrasing, or perspective.
+- One belief being a subset or specialization of another.
+
+### Output format
+Return a JSON array. Empty array [] if no contradictions found.
+Each contradiction object:
+{"belief_id_a": N, "belief_id_b": N, "conflict": "one sentence explaining the incompatibility", "resolution": "retract_a|retract_b|merge|flag", "confidence": 0.0-1.0}
+
+Only include pairs where confidence >= 0.7.

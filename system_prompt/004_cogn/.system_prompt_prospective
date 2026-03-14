@@ -1,0 +1,16 @@
+## prospective: Prospective memory evaluation rules
+
+When evaluating whether a scheduled reminder is overdue:
+
+### Task
+You receive the current date and a due date. Determine if the due date is in the past relative to the current date.
+
+### Output format
+Return ONLY a JSON object: {"overdue": true} or {"overdue": false}
+
+### Rules
+- If the due date is before the current date, return {"overdue": true}
+- If the due date is after the current date, return {"overdue": false}
+- Relative phrases like "last Monday" should be evaluated against the provided current date
+- If the due date is not a recognizable date or time (e.g. "when user asks about X"), return {"overdue": false}
+- When uncertain, return {"overdue": false}

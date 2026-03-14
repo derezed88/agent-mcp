@@ -7,8 +7,10 @@ tool-search-ddgs: search_ddgs tool definition
 tool-search-tavily: search_tavily tool definition
 tool-search-xai: search_xai tool definition
 tool-search-google: search_google tool definition
+tool-search-brightdata: search_brightdata tool definition
 tool-google-drive: google_drive tool definition
-tool-url-extract: url_extract tool definition
+tool-url-extract-tavily: url_extract tool definition (Tavily)
+tool-url-extract-brightdata: url_extract_brightdata tool definition (Bright Data)
 tool-llm-list: llm_list tool definition
 tool-llm-delegation: llm_call and stream tool definitions
 tool-agent-call: agent_call tool definition

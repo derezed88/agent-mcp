@@ -1,6 +1,6 @@
 # Context Engineering — llmem-gw
 
-Last updated: 2026-03-09
+Last updated: 2026-03-13
 
 This document describes every layer that contributes to the final prompt sent to an LLM, in injection order. Each layer has toggles at three scopes: **Global** (plugins-enabled.json), **Model** (llm-models.json), and **Session** (runtime state, set via `!config`/`!memory`).
 
@@ -13,9 +13,13 @@ Think of the prompt as built up in layers, from static to dynamic:
 ```
 [System Prompt Tree]           ← static, defined by model config
 [Tool List]                    ← one-time per session
-[Auto-Enrich: DB Rules]        ← dynamic, pattern-matched SQL
-[Auto-Enrich: Memory Context]  ← semantic retrieval from MySQL+Qdrant
-[Auto-Enrich: Known Topics]    ← topic list for slug reuse guidance
+[Auto-Enrich]                  ← parallel task engine, deadline-gated
+  ├─ DB Rules                  ← pattern-matched SQL (~50ms)
+  ├─ Qdrant Memory             ← semantic retrieval, ST+LT (~500ms)
+  ├─ Known Topics              ← topic slug list (~50ms)
+  ├─ Temporal Context           ← time-based routine cache (~50ms)
+  ├─ Typed Context             ← goals/plans/beliefs/drives (~50ms)
+  └─ Procedures                ← procedural Qdrant search (~200ms)
 [History (sliding window)]     ← trimmed by plugin_history_default
 [User Message]                 ← current turn input
 ```
@@ -81,25 +85,45 @@ Post-response layers (not in prompt, but affect memory for future turns):
 
 ---
 
-## Layer 2a — Auto-Enrich: DB Rules
+## Layer 2 — Auto-Enrich (Parallel Task Engine)
 
-**What:** SQL query results injected when the user message matches a regex pattern. Purpose: give the model live data from the DB without requiring it to call a tool.
+**What:** `auto_enrich_context()` in `agents.py:~1153` fires all enrichment subtasks in parallel using `asyncio.wait()` with a deadline. Whatever completes before the deadline is injected; slow tasks degrade gracefully rather than blocking the response.
 
-**When:** Every request, inside `auto_enrich_context()` in `agents.py:~1076`.
+**When:** Every request, before LLM invocation (`agents.py:~2192`).
 
-**Rules source:** `db-config.json` → `auto_enrich` array. Each rule:
-```json
-{ "pattern": "<regex>", "sql": "<query>", "label": "<name>" }
-```
+**Deadline:**
+- `stream_level >= 2` models (voice): **2 seconds**
+- All other models: **no timeout** (wait for all tasks)
 
-**Injection format:** Prepended as a system message:
+**Outcome classification:**
+| Outcome | Meaning |
+|---|---|
+| `full` | All tasks completed before deadline |
+| `partial` | Some tasks completed, others timed out |
+| `timeout` | Zero tasks completed |
+
+**Observability:** `!memstats` → Enrichment Stats section. Shows total calls, full/partial/timeout counts, avg latency, and per-task ok/timeout breakdown. Always visible (shows zeros when no calls yet).
+
+**Injection order:** procedures → typed → qdrant → rules → topics → temporal (structural context first, semantic second).
+
+**All enrichment output is combined into a single system message:**
 ```
 ## Auto-retrieved context
 Base answer on this data:
 
-[auto-retrieved via: <label>]
-<sql result>
+<all completed subtask results>
 ```
+
+### Enrichment Subtasks
+
+All subtasks fire simultaneously via `asyncio.create_task()`. Shared resources to watch for contention: MySQL connection pool (most tasks), nuc11 network (Qdrant + embed server).
+
+#### 2a — DB Rules (`rule_N`)
+Pattern-matched SQL queries from `db-config.json → auto_enrich` array. Each rule:
+```json
+{ "pattern": "<regex>", "sql": "<query>", "label": "<name>" }
+```
+Typical latency: ~50ms (MySQL only).
 
 **Toggles:**
 | Scope | Key | Effect |
@@ -107,33 +131,17 @@ Base answer on this data:
 | Session | `auto_enrich` | `false` → skip all DB rules; default `true` |
 | Global | `db-config.json auto_enrich` | Array of rules; empty array → no enrichment |
 
-**Set via:** `!config write auto_enrich false`
-
----
-
-## Layer 2b — Auto-Enrich: Memory Context
-
-**What:** Semantically relevant memory retrieved from short-term (ST) and long-term (LT) MySQL tiers, indexed via Qdrant. This is the most dynamic part of the prompt — it changes every turn based on what the conversation is about.
-
-**When:** Every request, inside `auto_enrich_context()` in `agents.py:~1104`.
+#### 2b — Memory Context / Qdrant (`qdrant`)
+Semantically relevant memory from ST and LT tiers via Qdrant vector search. **Slowest subtask** (~500ms: embed call to nuc11 + Qdrant search).
 
 **Query construction:**
-- If `session["current_topic"]` is set (from prior turn's `<<topic>>` tag) → use that slug as query
-- Otherwise → concatenate last 3 genuine user/assistant turns (300 chars each), strip vocative address if `identity_name` is configured
+- If `session["current_topic"]` is set (from prior turn's `<<topic>>` tag) → use that slug
+- Otherwise → concatenate last 6 genuine user/assistant turns (300 chars each)
 
-**Retrieval:** Two-pass Qdrant + MySQL (see MEMORY_PROJECT1.md for full detail):
+**Retrieval:** Two-pass Qdrant + MySQL (see MEMORY_PROJECT1.md):
 - Pass 1: topic slug → embed → Qdrant (both tiers, top_k=20, min_score=0.45)
 - Pass 2: user message text → embed → Qdrant (only if pass 1 yields < `two_pass_threshold` quality hits)
 - ST rows with importance ≥ `min_importance_always` (default 8) always injected
-
-**Injection format:**
-```
-## Active Memory (short-term recall)
-...rows...
-
-## Long-term Memory (relevant recalled)
-...rows...
-```
 
 **Three-level veto (ALL must allow):**
 | Scope | Key | `null` means | `false` means |
@@ -143,19 +151,25 @@ Base answer on this data:
 | Model | `llm-models.json → memory_enabled` | Defer (allow) | Always off for this model |
 | Session | `session["memory_enabled"]` | Defer (allow) | Off for this session |
 
-**Set via:** `!memory false` (session), `plugins-enabled.json` (global), model config (permanent per model)
+#### 2c — Known Topics (`topic_list`)
+Comma-separated list of recent topic slugs for slug reuse guidance. MySQL only, ~50ms.
 
-**Minimum context without memory:** No `## Active Memory` block. Model only sees history and system prompt.
+**Toggles:** Coupled to memory injection — only fires when `_mem_injection_enabled`.
 
----
+#### 2d — Temporal Context (`temporal`)
+Time-based routine patterns from `samaritan_temporal` cache table. MySQL only, ~50ms.
 
-## Layer 2c — Auto-Enrich: Known Topics
+**Toggles:** Coupled to memory injection.
 
-**What:** A comma-separated list of recent topic slugs, injected alongside memory context. Helps the model reuse existing topic slugs rather than inventing new near-duplicates.
+#### 2e — Typed Context (`typed`)
+Goals, plans, beliefs, drives — structural context from typed MySQL tables. Only fires when `memory_types_enabled: true` on the model. MySQL only, ~50ms.
 
-**When:** Same call as Layer 2b; injected only when memory context injection fires.
+**Toggles:** Coupled to memory injection + `memory_types_enabled` model flag.
 
-**Toggles:** Coupled to Layer 2b — no independent toggle.
+#### 2f — Procedures (`procedures`)
+Procedural memory from `samaritan_procedural` Qdrant collection, filtered by task hint. Only fires when `memory_types_enabled: true`. Qdrant search, ~200ms.
+
+**Toggles:** Coupled to memory injection + `memory_types_enabled` model flag.
 
 ---
 
@@ -269,7 +283,7 @@ Auto-applied when `memory_scan: false`. Removes any `memory_save()` text from th
 
 | Key | Layer | Default | Effect |
 |---|---|---|---|
-| `memory.enabled` | 2b, 10 | `true` | Master kill switch for all memory |
+| `memory.enabled` | 2, 10 | `true` | Master kill switch for all memory |
 | `memory.context_injection` | 2b | `true` | Toggle memory retrieval injection |
 | `memory.post_response_scan` | 7 | `true` | Toggle inline memory_save() scanning |
 | `plugin_history_default.agent_max_ctx` | 3a | varies | History sliding window token budget |
@@ -280,23 +294,23 @@ Auto-applied when `memory_scan: false`. Removes any `memory_save()` text from th
 |---|---|---|
 | `system_prompt_folder` | 0 | Which prompt tree; `""` = no system prompt |
 | `conv_log` | 10 | Feature switch for verbatim turn logging; absent = `false` |
-| `memory_enabled` | 2b, 10 | `null`=defer, `false`=hard off for this model |
+| `memory_enabled` | 2, 10 | `null`=defer, `false`=hard off for this model |
 | `memory_scan` | 7 | `true` = model writes inline memory_save() syntax |
 | `llm_tools` | 5 | Authorized toolset group names |
 | `llm_tools_gates` | 5 | Tools requiring HITL gate approval |
 | `judge_config` | 3b, 9 | Judge model + gates + mode + threshold |
 | `limits.max_tool_iterations` | 6 | Agent loop cap |
 | `tool_suppress` | 6 | Suppress tool output display |
-| `stream_level` | 2, 6 | Streaming behavior level |
+| `stream_level` | 2 (deadline), 6 | Streaming behavior level; `>=2` enables 2s enrichment deadline |
 
 ### Session — Runtime
 
 | Key | Set via | Layer | Effect |
 |---|---|---|---|
-| `memory_enabled` | `!memory false` | 2b, 10 | Veto memory injection + conv_log |
+| `memory_enabled` | `!memory false` | 2, 10 | Veto memory injection + conv_log |
 | `auto_enrich` | `!config write auto_enrich false` | 2a | Disable DB auto-enrich rules |
 | `tool_suppress` | `!config write tool_suppress true` | 6 | Suppress tool output |
-| `stream_level` | `!config write stream_level N` | 2, 6 | Streaming mode |
+| `stream_level` | `!config write stream_level N` | 2 (deadline), 6 | Streaming mode; `>=2` enables 2s enrichment deadline |
 | `memory_scan_suppress` | `!config write memory_scan_suppress true` | 7 | Suppress inline memory scan |
 | `current_topic` | Auto-set from `<<topic>>` tag | 2b | Seed for semantic retrieval query |
 | `tool_list_injected` | Auto-set on first turn | 1 | One-time tool list gate |

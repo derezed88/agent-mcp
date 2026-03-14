@@ -26,6 +26,45 @@ logging.basicConfig(
 log = logging.getLogger("AISvc")
 
 
+# ---------------------------------------------------------------------------
+# Display timezone — configurable via plugins-enabled.json "display_timezone"
+# Defaults to America/Los_Angeles (PST/PDT). Used for all user-facing timestamps.
+# Storage always stays UTC; this only affects display and prompt injection.
+# ---------------------------------------------------------------------------
+
+_display_tz_cache: dict = {}  # single-key cache to avoid re-reading json every call
+
+
+def display_tz():
+    """Return the configured display ZoneInfo. Cached after first call."""
+    from zoneinfo import ZoneInfo
+    if "tz" not in _display_tz_cache:
+        tz_name = "America/Los_Angeles"  # default
+        try:
+            with open(PLUGINS_ENABLED_FILE, 'r') as f:
+                data = json.load(f)
+            tz_name = data.get("display_timezone", tz_name)
+        except Exception:
+            pass
+        _display_tz_cache["tz"] = ZoneInfo(tz_name)
+        _display_tz_cache["label"] = tz_name
+    return _display_tz_cache["tz"]
+
+
+def display_tz_label() -> str:
+    """Return short label for display timezone (e.g. 'PST' or 'PDT')."""
+    from datetime import datetime, timezone
+    display_tz()  # ensure cache populated
+    dt = datetime.now(timezone.utc).astimezone(_display_tz_cache["tz"])
+    return dt.strftime("%Z")  # e.g. "PST" or "PDT"
+
+
+def now_display():
+    """Return current datetime in the configured display timezone."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).astimezone(display_tz())
+
+
 def load_default_model():
     """Load default model from llm-models.json."""
     try:
@@ -105,6 +144,7 @@ def load_llm_registry():
                 "judge_config": config.get('judge_config', None),
                 "memory_types_enabled": config.get('memory_types_enabled', False),
                 "self_model_enabled": config.get('self_model_enabled', True),
+                "allow_text_mode": config.get('allow_text_mode', True),
             }
 
         return registry

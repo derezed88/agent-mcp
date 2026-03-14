@@ -1,0 +1,20 @@
+## tool-url-extract-brightdata: url_extract_brightdata tool definition
+
+### url_extract_brightdata(url: str, query: str = "") -> str
+Extract the full content of a web page from a URL using Bright Data's scraping infrastructure.
+Handles JavaScript-rendered pages and anti-bot protections via Bright Data's proxy network.
+
+Parameters:
+  url:    The full URL of the page to extract
+  query:  Optional. If provided, highlights the most relevant sections matching the query.
+          Omit for full-page extraction.
+
+Returns: Page content in markdown format with links converted to numbered references.
+
+When to use:
+- The target page blocks standard extraction (Tavily fails, anti-bot protection).
+- You need JavaScript-rendered content that static extraction misses.
+- The user asks you to read, summarize, or analyze a specific URL and Tavily is unavailable.
+- A search result returned a URL that looks relevant -- extract it to get the full content.
+
+Requires BRIGHTDATA_API_KEY.

@@ -202,13 +202,29 @@ async def run_agent(host: str = "0.0.0.0"):
     # inactive longer than session_idle_timeout_minutes.  A timeout of 0 disables.
     async def _session_reaper():
         import time
-        from state import sessions, remove_shorthand_mapping, save_history
+        from state import sessions, remove_shorthand_mapping, save_history, init_reaper_wake
+        from timer_registry import register_timer, timer_start, timer_end, timer_sleep, timer_disabled
+        register_timer("session_reaper", "60s")
+        _wake = init_reaper_wake()
+        timer_sleep("session_reaper", 60)
         while True:
+            # If no sessions, disable and wait for a session to be created
+            if not sessions:
+                timer_disabled("session_reaper")
+                _wake.clear()
+                await _wake.wait()          # blocks until wake_reaper() is called
+                _wake.clear()
+                register_timer("session_reaper", "60s")
+
             await asyncio.sleep(60)  # check every minute
+            t0 = timer_start("session_reaper")
+            err = None
             try:
                 from routes import get_session_idle_timeout
                 timeout_minutes = get_session_idle_timeout()
                 if timeout_minutes <= 0:
+                    timer_end("session_reaper", t0)
+                    timer_sleep("session_reaper", 60)
                     continue
                 cutoff = time.time() - timeout_minutes * 60
                 stale = [
@@ -223,6 +239,9 @@ async def run_agent(host: str = "0.0.0.0"):
                     log.info(f"Session reaped (idle timeout): {cid}")
             except Exception as e:
                 log.warning(f"Session reaper error: {e}")
+                err = str(e)
+            timer_end("session_reaper", t0, error=err)
+            timer_sleep("session_reaper", 60)
 
     # Background memory aging tasks
     async def _age_count_task():
@@ -230,26 +249,36 @@ async def run_agent(host: str = "0.0.0.0"):
         from memory import age_by_count, _age_cfg
         from database import set_model_context
         from config import DEFAULT_MODEL
+        from timer_registry import register_timer, timer_start, timer_end, timer_sleep, timer_disabled
+        register_timer("mem_age_count", "config")
         while True:
+            t0 = None
             try:
                 cfg = _age_cfg()
                 if not cfg["auto_memory_age"]:
+                    timer_disabled("mem_age_count")
                     await asyncio.sleep(300)
                     continue
                 timer_min = cfg["memory_age_count_timer"]
                 if timer_min == -1:
-                    # Disabled — sleep a long time and re-check config periodically
+                    timer_disabled("mem_age_count")
                     await asyncio.sleep(3600)
                     continue
+                register_timer("mem_age_count", f"{timer_min}m")
                 set_model_context(DEFAULT_MODEL)
+                t0 = timer_start("mem_age_count")
                 await age_by_count()
+                timer_end("mem_age_count", t0)
             except Exception as e:
                 log.warning(f"_age_count_task error: {e}")
+                if t0 is not None:
+                    timer_end("mem_age_count", t0, error=str(e))
             try:
                 cfg = _age_cfg()
                 sleep_sec = max(60, cfg["memory_age_count_timer"]) * 60
             except Exception:
                 sleep_sec = 3600
+            timer_sleep("mem_age_count", sleep_sec)
             await asyncio.sleep(sleep_sec)
 
     async def _age_minutes_task():
@@ -257,25 +286,69 @@ async def run_agent(host: str = "0.0.0.0"):
         from memory import age_by_minutes, _age_cfg
         from database import set_model_context
         from config import DEFAULT_MODEL
+        from timer_registry import register_timer, timer_start, timer_end, timer_sleep, timer_disabled
+        register_timer("mem_age_minutes", "config")
         while True:
+            t0 = None
             try:
                 cfg = _age_cfg()
                 if not cfg["auto_memory_age"]:
+                    timer_disabled("mem_age_minutes")
                     await asyncio.sleep(300)
                     continue
                 timer_min = cfg["memory_age_minutes_timer"]
                 if timer_min == -1:
+                    timer_disabled("mem_age_minutes")
                     await asyncio.sleep(3600)
                     continue
+                register_timer("mem_age_minutes", f"{timer_min}m")
                 set_model_context(DEFAULT_MODEL)
+                t0 = timer_start("mem_age_minutes")
                 await age_by_minutes(trigger_minutes=cfg["memory_age_trigger_minutes"])
+                timer_end("mem_age_minutes", t0)
             except Exception as e:
                 log.warning(f"_age_minutes_task error: {e}")
+                if t0 is not None:
+                    timer_end("mem_age_minutes", t0, error=str(e))
             try:
                 cfg = _age_cfg()
                 sleep_sec = max(60, cfg["memory_age_minutes_timer"]) * 60
             except Exception:
                 sleep_sec = 3600
+            timer_sleep("mem_age_minutes", sleep_sec)
+            await asyncio.sleep(sleep_sec)
+
+    async def _age_temporal_task():
+        """Temporal cache aging: runs every temporal.age_timer_minutes minutes."""
+        from memory import age_temporal_cache, _temporal_age_cfg
+        from database import set_model_context
+        from config import DEFAULT_MODEL
+        from timer_registry import register_timer, timer_start, timer_end, timer_sleep, timer_disabled
+        register_timer("mem_age_temporal", "config")
+        while True:
+            t0 = None
+            try:
+                tcfg = _temporal_age_cfg()
+                timer_min = tcfg["temporal_age_timer"]
+                if timer_min <= 0:
+                    timer_disabled("mem_age_temporal")
+                    await asyncio.sleep(3600)
+                    continue
+                register_timer("mem_age_temporal", f"{timer_min}m")
+                set_model_context(DEFAULT_MODEL)
+                t0 = timer_start("mem_age_temporal")
+                await age_temporal_cache()
+                timer_end("mem_age_temporal", t0)
+            except Exception as e:
+                log.warning(f"_age_temporal_task error: {e}")
+                if t0 is not None:
+                    timer_end("mem_age_temporal", t0, error=str(e))
+            try:
+                tcfg = _temporal_age_cfg()
+                sleep_sec = max(60, tcfg["temporal_age_timer"]) * 60
+            except Exception:
+                sleep_sec = 21600  # 6h fallback
+            timer_sleep("mem_age_temporal", sleep_sec)
             await asyncio.sleep(sleep_sec)
 
     # Run all servers, reaper, memory aging tasks, and proactive cognition tasks concurrently
@@ -284,9 +357,13 @@ async def run_agent(host: str = "0.0.0.0"):
         _session_reaper(),
         _age_count_task(),
         _age_minutes_task(),
+        _age_temporal_task(),
         _contradiction_task_wrapper(),
         _prospective_task_wrapper(),
         _reflection_task_wrapper(),
+        _temporal_inference_task_wrapper(),
+        _memreview_auto_task_wrapper(),
+        _goal_processor_task_wrapper(),
     )
 
 
@@ -321,6 +398,39 @@ async def _reflection_task_wrapper():
         log.warning(f"reflection module not available: {e}")
     except Exception as e:
         log.error(f"reflection_task crashed: {e}")
+
+
+async def _temporal_inference_task_wrapper():
+    """Thin wrapper so import errors don't crash the gather."""
+    try:
+        from temporal_inference import temporal_inference_task
+        await temporal_inference_task()
+    except ImportError as e:
+        log.warning(f"temporal_inference module not available: {e}")
+    except Exception as e:
+        log.error(f"temporal_inference_task crashed: {e}")
+
+
+async def _memreview_auto_task_wrapper():
+    """Thin wrapper so import errors don't crash the gather."""
+    try:
+        from memreview_auto import memreview_auto_task
+        await memreview_auto_task()
+    except ImportError as e:
+        log.warning(f"memreview_auto module not available: {e}")
+    except Exception as e:
+        log.error(f"memreview_auto_task crashed: {e}")
+
+
+async def _goal_processor_task_wrapper():
+    """Thin wrapper so import errors don't crash the gather."""
+    try:
+        from goal_processor import goal_processor_task
+        await goal_processor_task()
+    except ImportError as e:
+        log.warning(f"goal_processor module not available: {e}")
+    except Exception as e:
+        log.error(f"goal_processor_task crashed: {e}")
 
 
 def main():

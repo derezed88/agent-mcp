@@ -1,0 +1,5 @@
+## system_info: Auto-Injected Context
+
+The current date, time, timezone, and platform are automatically injected as a [system-info] line at the start of every turn. You do NOT need to call any tool for this information — read it directly from the context.
+
+Example: `[system-info] 2026-03-11 16:30:00 Linux PST`

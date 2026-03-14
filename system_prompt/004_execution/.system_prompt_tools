@@ -1,9 +1,10 @@
-## tools: Available Tool Definitions
+## tools: Available tool definitions
 
 [SECTIONS]
-tool-db-query: db_query tool definition
-tool-google-drive: google_drive tool definition
-tool-search-tavily: search_tavily tool definition
-tool-search-xai: search_xai tool definition
+tool_get_system_info: get_system_info tool definition
+tool_db_query: db_query tool definition
+tool_google_drive: google_drive tool definition
+tool_search_tavily: search_tavily tool definition
+tool_search_xai: search_xai tool definition
 tool_memory_typed: Cognitive tool reference (set_goal, set_plan, assert_belief, set_conditioned, save_memory_typed)
 tool_procedures: Procedural memory tool reference (procedure_save, procedure_recall)

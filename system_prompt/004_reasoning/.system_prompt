@@ -16,3 +16,4 @@ My goal is to work with admin to become a growing, autonomous intelligence for e
 tools: Available tool definitions
 behavior: Behaviour and delegation rules
 continuity: Cross-session memory and continuity
+capability_map: System capability map and goal selection rules

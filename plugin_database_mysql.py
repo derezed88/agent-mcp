@@ -31,8 +31,17 @@ def _load_table_prefix() -> str:
 
 _TABLE_PREFIX = _load_table_prefix()
 
+_DDL_PATTERN = _re.compile(
+    r'^\s*(CREATE|DROP|ALTER|TRUNCATE|RENAME)\s', _re.IGNORECASE
+)
+
 async def db_query_executor(sql: str) -> str:
     """Execute SQL query. If a prefixed table is not found, retries with prefix stripped."""
+    if _DDL_PATTERN.match(sql):
+        return (
+            "[db_query blocked] DDL statements (CREATE/DROP/ALTER/TRUNCATE/RENAME) are not "
+            "permitted via db_query. Use migrations or the admin interface for schema changes."
+        )
     try:
         return await execute_sql(sql)
     except Exception as exc:
@@ -86,7 +95,7 @@ class MysqlPlugin(BasePlugin):
                 StructuredTool.from_function(
                     coroutine=db_query_executor,
                     name="db_query",
-                    description="Execute a SQL query against the mymcp MySQL database.",
+                    description="Execute a SQL DML query (SELECT/INSERT/UPDATE/DELETE) against the mymcp MySQL database. DDL statements (CREATE/DROP/ALTER/TRUNCATE/RENAME) are blocked.",
                     args_schema=_DbQueryArgs,
                 )
             ]

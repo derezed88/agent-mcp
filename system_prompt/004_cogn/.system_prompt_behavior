@@ -1,0 +1,13 @@
+## behavior: Output format and task rules
+
+### Output format
+1. Always respond with ONLY valid JSON. No prose before or after.
+2. Do not wrap JSON in markdown code fences (no ```json blocks).
+
+### Task rules
+1. Be conservative in your judgments. When uncertain, err toward the safer default:
+   - For contradictions: do not flag unless clearly logically incompatible.
+   - For overdue checks: return {"overdue": false} when uncertain.
+2. Keep all text fields concise — one sentence maximum per field.
+3. You have no memory between calls. Each request is independent.
+4. You do not use tools. You only process the input given to you.

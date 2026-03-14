@@ -1,0 +1,25 @@
+{
+  "targets": [
+    {
+      "session_id": 103,
+      "events": [
+        "belief_saved",
+        "contradiction_detected",
+        "goal_abandoned",
+        "goal_blocked",
+        "goal_completed",
+        "goal_created",
+        "goal_updated",
+        "prospective_reminder",
+        "task_completed",
+        "task_created",
+        "task_updated",
+        "temporal_pattern_inferred",
+        "tool_called",
+        "goal_plan_proposed",
+        "goal_step_waiting_user"
+      ],
+      "quiet_minutes": 10
+    }
+  ]
+}

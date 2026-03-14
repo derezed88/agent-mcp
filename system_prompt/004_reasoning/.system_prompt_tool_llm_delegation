@@ -6,10 +6,27 @@ Use the short name form for any llm_call, not the model_id.
 Call another LLM model to process a prompt.
 - model: short name of the target model (use llm_list to see available models).
 - prompt: the text prompt to send.
-- mode: "text" for plain text reasoning (NO tools available to target model — NEVER use for DB/Drive operations). "tool" for single tool execution (target model will call the specified tool).
+- mode: "text" for plain text reasoning (NO tools available to target model — NEVER use for cognitive writes). "tool" for single tool execution (target model will call the specified tool).
 - sys_prompt: "none" (no system prompt), "caller" (use calling model's prompt), or "target" (use target model's prompt).
 - history: "none" (no history context) or "caller" (include calling model's conversation history).
-- tool: name of the tool to invoke when mode="tool".
+- tool: **REQUIRED when mode="tool"** — the exact tool name to invoke. If omitted, the call fails.
+
+**When mode="tool", you MUST pass both `mode="tool"` AND `tool="<toolname>"` as separate arguments. Example:**
+```
+llm_call(model="samaritan-execution", prompt="title='My Goal', description='...', importance=9", mode="tool", tool="set_goal", sys_prompt="target")
+llm_call(model="samaritan-execution", prompt="query='autonomous goal lifecycle'", mode="tool", tool="procedure_recall", sys_prompt="target")
+llm_call(model="samaritan-execution", prompt="task_type='goal-lifecycle', steps=[...], outcome='success', importance=9", mode="tool", tool="procedure_save", sys_prompt="target")
+```
+Writing `set_goal(...)` or `procedure_recall(...)` inside the prompt text does NOT call the tool — `tool="set_goal"` is required.
+
+### Temporal pattern queries — recall_temporal
+When the user asks about routines, patterns, schedules, or time-based history, delegate to execution:
+```
+llm_call(model="samaritan-execution", prompt="query='Lee' group_by='day_of_week' lookback_days=30", mode="tool", tool="recall_temporal", sys_prompt="none", history="none")
+```
+Parameters: query (keyword filter), group_by ('hour'/'day_of_week'/'date'/'week'/'month'), day_of_week (optional day filter), time_range ('now'/'morning'/'afternoon'/'evening'/'HH:MM-HH:MM'), lookback_days (default 30), new (True to bypass cache and force fresh query).
+Results are cached in samaritan_temporal. Background inference also runs proactively, discovering patterns from ST memory topics.
+Alternatively, you can query the same data directly via db_query if you need custom SQL.
 
 ### stream(action: str, value: bool = None) -> str
 Control agent_call streaming for the current session.

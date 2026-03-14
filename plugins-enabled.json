@@ -90,7 +90,6 @@
       "fuzzy_dedup": true,
       "vector_search_qdrant": true,
       "fuzzy_dedup_threshold": 0.78,
-      "summarizer_model": "summarizer-gemini",
       "auto_memory_age": true,
       "short_hwm": 100,
       "short_lwm": 50,
@@ -101,7 +100,9 @@
       "memory_age_minutes_timer": 360,
       "memory_age_entrycount": 50,
       "memory_age_trigger_minutes": 2880,
-      "reviewer_model": "reviewer-gemini",
+      "auto_review_enabled": true,
+      "auto_review_interval_h": 6,
+      "auto_review_modes": ["topics", "types", "classify"],
       "temporal": {
         "hwm": 500,
         "lwm": 300,
@@ -109,7 +110,6 @@
         "context_injection": true,
         "inference_enabled": true,
         "inference_interval_h": 3,
-        "inference_model": "summarizer-gemini",
         "inference_max_queries": 5,
         "inference_min_st_rows": 10,
         "inference_cache_ttl_hours": 24
@@ -118,18 +118,15 @@
     "proactive_cognition": {
       "enabled": true,
       "contradiction_enabled": true,
-      "contradiction_interval_m": 2,
-      "contradiction_model": "qwen25-cogn",
+      "contradiction_interval_m": 10,
       "contradiction_min_beliefs": 2,
       "contradiction_max_pairs": 10,
       "contradiction_auto_retract": true,
       "prospective_enabled": true,
-      "prospective_interval_m": 1,
-      "prospective_model": "qwen25-cogn",
+      "prospective_interval_m": 5,
       "prospective_reminder_imp": 9,
       "reflection_enabled": true,
-      "reflection_interval_m": 60,
-      "reflection_model": "summarizer-gemini",
+      "reflection_interval_m": 1440,
       "reflection_turn_limit": 40,
       "reflection_min_turns": 5,
       "reflection_max_memories": 6,
@@ -141,8 +138,7 @@
       "goal_health_enabled": true,
       "goal_health_failure_replan": 3,
       "goal_health_failure_abandon": 5,
-      "goal_health_autonomy_threshold": 0.6,
-      "goal_health_model": "samaritan-reasoning"
+      "goal_health_autonomy_threshold": 0.6
     },
     "drives": {
       "defaults": [
@@ -186,6 +182,13 @@
     "notifier": {
       "enabled": true,
       "quiet_minutes_default": 10
+    },
+    "goal_processor": {
+      "enabled": true,
+      "interval_m": 30,
+      "max_goals_per_cycle": 3,
+      "max_exec_steps_per_cycle": 10,
+      "defer_cooldown_hours": 24
     },
     "plugin_tmux": {
       "enabled": true,

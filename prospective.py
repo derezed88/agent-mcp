@@ -85,7 +85,7 @@ def _pcogn_cfg() -> dict:
         "enabled":                  raw.get("enabled",                  False),
         "prospective_enabled":      raw.get("prospective_enabled",      True),
         "prospective_interval_m":   int(raw.get("prospective_interval_m",   5)),
-        "prospective_model":        raw.get("prospective_model",        "summarizer-gemini"),
+        "prospective_model":        raw.get("prospective_model",        ""),
         "prospective_reminder_imp": int(raw.get("prospective_reminder_imp", 9)),
     }
     base.update(ovr)
@@ -253,6 +253,12 @@ async def run_check() -> dict:
     """
     cfg = _pcogn_cfg()
     model_key   = cfg["prospective_model"]
+    if not model_key:
+        from config import get_model_role
+        try:
+            model_key = get_model_role("prospective")
+        except KeyError:
+            model_key = "summarizer-gemini"
     reminder_imp = cfg["prospective_reminder_imp"]
 
     from database import set_model_context

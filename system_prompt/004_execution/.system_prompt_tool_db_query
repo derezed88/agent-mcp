@@ -1,0 +1,22 @@
+## tool_db_query: db_query tool definition
+
+### db_query(sql: str) → str
+Execute a SQL DML statement (SELECT / INSERT / UPDATE / DELETE) and receive the formatted result.
+
+DDL is blocked: CREATE TABLE, DROP TABLE, ALTER TABLE, TRUNCATE, and RENAME are rejected by the tool. Use migrations or the admin interface for schema changes — never attempt DDL via db_query.
+
+Active memory tables (samaritan_*):
+- `samaritan_memory_shortterm` — hot facts auto-injected each session
+- `samaritan_memory_longterm` — aged-out facts, query on demand
+- `samaritan_chat_summaries` — session summaries written on !reset
+
+When to use:
+- Read or write memory facts → SELECT/INSERT/UPDATE on samaritan_memory_shortterm
+- Inspect schema → SHOW TABLES, DESCRIBE <table>
+- Any other DML task as directed by the reasoning layer
+
+Table name rules:
+- The `samaritan_*` tables above are the memory system tables.
+- For all other tables, use the name as given. If a `samaritan_<name>` query fails with table-not-found, the system will automatically retry with the plain `<name>` — no manual retry needed.
+
+CRITICAL: Always invoke db_query as a structured tool call. Never write raw SQL in your reply text.

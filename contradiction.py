@@ -11,7 +11,7 @@ Runs as a background asyncio task (see llmem-gw.py). On each cycle it:
 Config (plugins-enabled.json → plugin_config.proactive_cognition):
     enabled:                  bool   — master switch (default false)
     contradiction_enabled:    bool   — this loop specifically (default true when master on)
-    contradiction_interval_h: float  — hours between scans (default 24)
+    contradiction_interval_m: int    — minutes between scans (default 60)
     contradiction_model:      str    — model key to use (default "summarizer-gemini")
     contradiction_min_beliefs:int    — skip if fewer active beliefs than this (default 5)
     contradiction_max_pairs:  int    — max belief pairs per LLM batch (default 10)
@@ -33,6 +33,10 @@ import time
 from datetime import datetime, timezone
 
 log = logging.getLogger("contradiction")
+
+
+class _SkipScan(Exception):
+    """Raised to skip a scan cycle while still recording stats."""
 
 # ---------------------------------------------------------------------------
 # Runtime state — shared between background task and !cogn command
@@ -103,20 +107,20 @@ def _cogn_cfg() -> dict:
         "enabled":                    raw.get("enabled",                    False),
         # contradiction loop
         "contradiction_enabled":      raw.get("contradiction_enabled",      True),
-        "contradiction_interval_h":   float(raw.get("contradiction_interval_h",   24.0)),
-        "contradiction_model":        raw.get("contradiction_model",        "summarizer-gemini"),
+        "contradiction_interval_m":   int(raw.get("contradiction_interval_m",     60)),
+        "contradiction_model":        raw.get("contradiction_model",        ""),
         "contradiction_min_beliefs":  int(raw.get("contradiction_min_beliefs",  5)),
         "contradiction_max_pairs":    int(raw.get("contradiction_max_pairs",    10)),
         "contradiction_auto_retract": raw.get("contradiction_auto_retract", False),
         # prospective loop
         "prospective_enabled":        raw.get("prospective_enabled",        True),
         "prospective_interval_m":     int(raw.get("prospective_interval_m",     5)),
-        "prospective_model":          raw.get("prospective_model",          "summarizer-gemini"),
+        "prospective_model":          raw.get("prospective_model",          ""),
         "prospective_reminder_imp":   int(raw.get("prospective_reminder_imp",   9)),
         # reflection loop
         "reflection_enabled":         raw.get("reflection_enabled",         True),
-        "reflection_interval_h":      float(raw.get("reflection_interval_h",    6.0)),
-        "reflection_model":           raw.get("reflection_model",           "summarizer-gemini"),
+        "reflection_interval_m":      int(raw.get("reflection_interval_m",      60)),
+        "reflection_model":           raw.get("reflection_model",           ""),
         "reflection_turn_limit":      int(raw.get("reflection_turn_limit",      40)),
         "reflection_min_turns":       int(raw.get("reflection_min_turns",        5)),
         "reflection_max_memories":    int(raw.get("reflection_max_memories",     6)),
@@ -313,6 +317,12 @@ async def run_scan() -> dict:
     """
     cfg = _cogn_cfg()
     model_key     = cfg["contradiction_model"]
+    if not model_key:
+        from config import get_model_role
+        try:
+            model_key = get_model_role("contradiction")
+        except KeyError:
+            model_key = "summarizer-gemini"
     min_beliefs   = cfg["contradiction_min_beliefs"]
     max_pairs     = cfg["contradiction_max_pairs"]
     auto_retract  = cfg["contradiction_auto_retract"]
@@ -329,14 +339,14 @@ async def run_scan() -> dict:
         if len(beliefs) < min_beliefs:
             log.debug(f"contradiction: only {len(beliefs)} beliefs < min={min_beliefs}, skipping")
             summary["skipped"] = f"only {len(beliefs)} active beliefs (min={min_beliefs})"
-            return summary
+            raise _SkipScan(summary["skipped"])
 
         pairs = _build_pairs(beliefs, max_pairs)
         summary["pairs"] = len(pairs)
         _stats["pairs_evaluated"] += len(pairs)
 
         if not pairs:
-            return summary
+            raise _SkipScan("no pairs to evaluate")
 
         pairs_text = _format_batch(pairs)
         results = await _call_llm(model_key, pairs_text)
@@ -348,7 +358,20 @@ async def run_scan() -> dict:
         for item in results:
             await _write_flag(item, auto_retract)
         summary["flags"] = _stats["flags_written"] - flags_before
+        if summary["flags"] > 0:
+            import asyncio as _asyncio
+            try:
+                import notifier as _notifier
+                _asyncio.ensure_future(_notifier.fire_event(
+                    "contradiction_detected",
+                    f"{summary['contradictions']} contradiction(s) detected",
+                    f"flags written: {summary['flags']}",
+                ))
+            except Exception:
+                pass
 
+    except _SkipScan as e:
+        summary["skipped"] = str(e)
     except Exception as e:
         log.error(f"contradiction: scan error: {e}")
         summary["error"] = str(e)
@@ -388,9 +411,12 @@ async def contradiction_task() -> None:
     """
     Long-running asyncio task. Loops forever:
       - reads config each iteration (live toggle support)
-      - sleeps contradiction_interval_h hours between scans
+      - sleeps contradiction_interval_m minutes between scans
       - wakes early if trigger_now() is called
     """
+    from timer_registry import register_timer, timer_sleep
+    register_timer("contradiction", "cogn")
+
     global _wake_event
     _wake_event = asyncio.Event()
 
@@ -407,8 +433,8 @@ async def contradiction_task() -> None:
                 pass
             continue
 
-        interval_h = cfg["contradiction_interval_h"]
-        if interval_h <= 0:
+        interval_m = cfg["contradiction_interval_m"]
+        if interval_m <= 0:
             await asyncio.sleep(3600)
             continue
 
@@ -419,8 +445,13 @@ async def contradiction_task() -> None:
             log.warning(f"contradiction_task: unhandled error: {e}")
             _stats["last_error"] = str(e)
 
-        # Sleep for interval, but wake immediately if triggered
-        sleep_sec = interval_h * 3600
+        # Backoff: double interval for every 10 min of inactivity, cap at 60 min
+        from state import backoff_interval, idle_seconds, fmt_interval
+        effective_m = backoff_interval(interval_m, 60)
+        sleep_sec = effective_m * 60
+        if effective_m != interval_m:
+            log.info(f"contradiction: backoff {interval_m}m → {effective_m:.0f}m (idle {idle_seconds()/60:.0f}m)")
+        timer_sleep("contradiction", sleep_sec, interval_desc=fmt_interval(effective_m))
         _wake_event.clear()
         try:
             await asyncio.wait_for(_wake_event.wait(), timeout=sleep_sec)

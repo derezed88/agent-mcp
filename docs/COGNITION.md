@@ -1,6 +1,6 @@
 # Cognitive Architecture — llmem-gw
 
-Last updated: 2026-03-11
+Last updated: 2026-03-14
 
 This document describes the cognitive architecture built on top of the tiered memory system. It was designed around the question: *what pieces does a reactive LLM agent need to become autonomous?* The answer shaped everything here.
 
@@ -34,7 +34,7 @@ Memory rows carry a `type` field, validated against `_MEMORY_TYPES`:
 | `conditioned` | Learned stimulus-response pair | Strength-tracked |
 | `self_model` | Synthesized self-summary | Protected (importance = 10) |
 
-**Dedicated tables** (migrations `001`–`004`): `samaritan_goals`, `samaritan_plans`, `samaritan_beliefs`, `samaritan_episodic`, `samaritan_semantic`, `samaritan_procedural`, `samaritan_autobiographical`, `samaritan_prospective`, `samaritan_conditioned`, plus a drives table.
+**Dedicated tables** (migrations `001`–`010`): `samaritan_goals`, `samaritan_plans`, `samaritan_beliefs`, `samaritan_episodic`, `samaritan_semantic`, `samaritan_procedural`, `samaritan_autobiographical`, `samaritan_prospective`, `samaritan_conditioned`, `samaritan_drives`, `samaritan_temporal`, `samaritan_cognition`, `samaritan_tool_stats`.
 
 Context injection uses `load_typed_context_block()` which groups retrieved rows by type into labeled sections in the prompt.
 
@@ -42,15 +42,95 @@ Context injection uses `load_typed_context_block()` which groups retrieved rows 
 
 ## Goal & Plan Management
 
-**`memory.py` lines 1414–1482 | `tools.py` lines 814–914**
+**`memory.py` | `tools.py` | `plan_engine.py` | `goal_processor.py`**
 
-Goals are stored in `samaritan_goals` with status: `active`, `done`, `blocked`, `abandoned`. Plans are ordered steps FK-linked to a goal.
+### Goals
 
-LLM-callable tools: `set_goal`, `set_plan` (via `_set_goal_exec`, `_set_plan_exec` in tools.py).
+Goals are stored in `samaritan_goals` with status: `active`, `done`, `blocked`, `abandoned`. LLM-callable tools: `set_goal`, `set_plan` (via `_set_goal_exec`, `_set_plan_exec` in tools.py). Keyword blocker in `_set_goal_exec()` blocks goals with timer/swarm/DDL/cron keywords.
 
 Goal state feeds the drives system: completion rates nudge `task-completion` drive up; blocked goals nudge `discomfort` drive up and `task-completion` drive down.
 
 Active goals are injected into every context block via `load_typed_context_block()` as a `## Active Goals` section, sorted by drive-weighted priority (see Drives below). The reflection loop also detects goal completions from conversation evidence and marks them `done` automatically.
+
+### Plan Engine — Two-Tier Decomposition
+
+**`plan_engine.py` | migration `006_plan_decomposition.sql`**
+
+Plans use a two-tier decomposition model:
+
+1. **Concept steps** — Human-intent-level descriptions (e.g., "research unemployment benefits")
+2. **Task steps** — Executable atoms with `tool_call` specs, FK-linked to a parent concept step via `parent_id`
+
+Each step has:
+- `step_type`: `concept` or `task`
+- `target`: `model` (auto-execute), `human` (pause and notify), `investigate` (unresolved)
+- `approval`: `proposed`, `approved`, `rejected`
+- `tool_call`: JSON blob with `{tool, args}` for task steps
+- `executor`: which model ran the step
+- `result`: execution output
+
+**Completion cascade**: task done → `_check_parent_completion()` → concept done → `_check_goal_completion()` → goal done.
+
+**Execution chain** (3 tiers):
+1. **Direct executor** — parse `tool_call` JSON, look up the Python executor function via `get_tool_executor()`, map arguments, and call directly. Zero LLM cost. This is the happy path for most steps.
+2. **Primary executor** — LLM-based execution via `model_roles["plan_executor"]`. Only invoked if Tier 1 throws an exception. The LLM receives the tool name, args, step description, and the direct-execution error, then calls the tool via `llm_call(mode="tool")` with the ability to adapt arguments or recover.
+3. **Fallback executor** — LLM-based execution via `model_roles["plan_executor_fallback"]`. Only invoked if Tier 2 also fails. Same pattern, different model. Last resort before the step is marked failed.
+
+**When Tier 1 fails and escalates to Tier 2** — examples:
+
+| Scenario | What happens | How Tier 2 recovers |
+|---|---|---|
+| Argument mismatch | Decomposer generates args that don't match the executor function signature (e.g., missing `mode` on `llm_call`) — direct call throws `TypeError` | LLM infers the missing parameter from context |
+| Stale session reference | `tmux_exec` targets a session that doesn't exist (prior step failed or was skipped) — runtime error | LLM can create the session first or adapt the command |
+| Template placeholders | Decomposer writes `{{qdrant_output}}` placeholder that isn't substituted — direct call sends the literal string | LLM interprets intent and fills in from prior step context |
+| Dynamic argument construction | Step needs output from a previous step but `tool_call` args are static JSON | LLM pulls step history and constructs a meaningful prompt |
+| Permission/state errors | `db_query` requires `set_model_context()` call first — direct call fails with DB context error | LLM sets up state before calling |
+
+Tier 1 is a dumb function call — if the JSON spec is perfectly formed and the runtime state is exactly right, it works. Tier 2 adds reasoning to recover from gaps between the plan and reality.
+
+**Decomposition model**: `model_roles["plan_decomposer"]` (currently Sonnet 4.6, upgraded from Haiku 4.5 to eliminate model-name hallucinations in `tool_call` specs).
+
+Manual commands: `!plan`, `!plan decompose`, `!plan approve/reject`, `!plan execute`, `!plan run`.
+
+### Goal Processor — Autonomous Goal Flow
+
+**`goal_processor.py` | migration `010_goal_auto_process.sql`**
+
+Background task that autonomously scans for goals, proposes plans, and executes approved steps. Modeled after the Claude Code approve-then-execute flow.
+
+**`auto_process_status` state machine** (column on `samaritan_goals`):
+
+```
+NULL → proposed → approved → executing → completed
+                ↘ deferred (with defer_until datetime)
+                ↘ rejected
+                         → paused_user (human step or failure)
+```
+
+**Lifecycle** (all phases run in a single 30-minute cycle):
+1. **Scanner** — pure SQL query: finds active goals with `auto_process_status IS NULL` and no plan steps. If none found, the cycle ends here. **Zero LLM tokens on quiet cycles.**
+2. **Decomposer** — only called if the scanner found unplanned goals. Creates concept + task steps via `plan_decomposer` model role (Sonnet 4.6). This is the only phase that costs decomposer tokens.
+3. **Proposal** sent to user via notifier (`goal_plan_proposed` event)
+4. **User responds**: approve / defer / reject / modify steps
+5. **Deferred check** — SQL query: finds goals with `auto_process_status = 'deferred'` where `defer_until <= NOW()`, re-queues them (`auto_process_status` → NULL) so the next cycle's scanner picks them up.
+6. **Executor** — runs model-owned steps for `approved`/`executing` goals serially; pauses on human steps (`goal_step_waiting_user` event). Uses the 3-tier execution chain (direct → plan_executor → fallback), so most steps also cost zero LLM tokens.
+7. **Completion** cascades via existing plan_engine logic
+
+**Failure handling**: If a step result contains ERROR/failed, the step is reverted to `pending`, the goal is set to `paused_user`, and a notification is fired.
+
+**Deferred goals**: When `defer_until` expires, the goal is re-queued (`auto_process_status` → NULL) for the next scan cycle.
+
+**Config** (`plugins-enabled.json → plugin_config.goal_processor`):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | false | Master switch |
+| `interval_m` | 30 | Minutes between scans |
+| `max_goals_per_cycle` | 3 | Max goals to propose per cycle |
+| `max_exec_steps_per_cycle` | 10 | Max steps to execute per cycle |
+| `defer_cooldown_hours` | 24 | Hours before re-proposing deferred goals |
+
+Manual commands: `!plan auto status`, `!plan auto approve/reject/defer/done/trigger/stats`.
 
 ---
 
@@ -60,7 +140,7 @@ Active goals are injected into every context block via `load_typed_context_block
 
 Beliefs are stored in `samaritan_beliefs` with a `confidence` score (1–10) and status `active`/`retracted`.
 
-`contradiction.py` runs as a background async task every 24 hours:
+`contradiction.py` runs as a background async task (default every 10 minutes, configurable):
 1. Fetches all active beliefs, groups by topic
 2. Sends pairs to the judge/LLM for conflict scoring
 3. Writes `contradiction-flag` rows (topic=`contradiction-flag`, confidence=9) when conflicts are detected
@@ -130,31 +210,80 @@ Drives modulate goal prioritization: `load_typed_context_block()` fetches curren
 
 ## Proactive Cognition Loops
 
-Three independent background async tasks, all using the same timer/init pattern as the existing aging loops:
+Five independent background async tasks, all using the same timer/init pattern as the existing aging loops:
 
 ### Reflection — `reflection.py`
 
-**Interval**: 6 hours (configurable)
+**Interval**: 24 hours (configurable via `reflection_interval_m`)
+**Model role**: `reflection`
 
-1. Pulls recent ST turns (oldest 40 rows, source=`user`/`assistant`)
-2. LLM extracts insights, patterns, self-model rows
-3. Saves up to 6 new ST rows per cycle (importance 5–10, typed)
-4. Writes `self-capability-*`, `self-failure-*`, `self-preference-*` rows
-5. Every 5 cycles: calls `refresh_self_summary()`
-6. After each cycle: calls `update_drives_from_goals()`
-7. Measures access ratio of rows saved → feeds cognitive feedback loop
+**Staleness gate**: Before any LLM call, runs `SELECT MAX(created_at)` on ST. If the newest user/assistant entry is older than `reflection_interval_m × 1.3` (default ~78 minutes), the entire cycle is skipped — zero LLM tokens spent. This prevents redundant reflection when no new conversation has occurred since the last cycle.
+
+**Actions per cycle** (in order within `run_reflection()`):
+
+1. **Memory extraction** — Pulls last `reflection_turn_limit` (default 40) ST rows (source=`user`/`assistant`), sends to `reflection` model role (default `summarizer-gemini`). LLM returns JSON `{"memories": [...], "goals_done": [...]}`. Each memory item has `{topic, content, importance, type}`. Saves up to `reflection_max_memories` (default 6) rows to `samaritan_cognition` (origin=`reflection`) via `save_cognition()`. Self-model rows use topic prefixes `self-capability-*`, `self-failure-*`, `self-preference-*` with type=`self_model`. Both exact and fuzzy dedup gates prevent redundant saves.
+
+2. **Goal completion detection** (two passes):
+   - **Pass 1**: The reflection LLM call (step 1) also checks active goals against conversation evidence, returning completed goal IDs in `goals_done`.
+   - **Pass 2**: Dedicated `_scan_goal_completions()` using the reasoning model for higher accuracy.
+   - Union of both passes → `UPDATE goals SET status='done'` for confirmed completions.
+
+3. **Goal health evaluation** (`_run_goal_health()`):
+   - **Failure counting**: Matches `self-failure-*` / `tool_failure` cognition rows to active goals by keyword overlap (≥2 keyword matches).
+   - **Escalation ladder**:
+     - `failure_count >= goal_health_failure_replan` (default 3) → LLM proposes new plan steps (replan action).
+     - `failure_count >= goal_health_failure_abandon` (default 5) → auto-abandons the goal with a reason.
+   - **Goal proposals**: Reasoning model proposes up to 2 new goals from observed patterns (failure remediation, curiosity threads). Gated by autonomy drive:
+     - `autonomy >= goal_health_autonomy_threshold` (default 0.6) → auto-created as `status='active'`, `source='assistant'`.
+     - `autonomy < threshold` → saved as `status='proposed'` for user review via `!cogn goals`.
+   - **Abandon guard**: Proposals resembling previously abandoned goals are blocked.
+
+4. **Drive decay & goal nudge** — Calls `update_drives_from_goals()`:
+   - Goal completed → boost `task-completion`
+   - Goal blocked → boost `discomfort`, reduce `task-completion`
+   - Zero completions + >3 active goals → reduce `task-completion`
+
+5. **Cognitive feedback evaluation** — Calls `cogn_feedback.evaluate(LOOP_REFLECTION, summary)` to assess whether this cycle produced useful output. Updates conditioned strength; may throttle or extinguish the loop if consistently unproductive.
+
+6. **Self-summary refresh** (every 5th cycle) — Pulls all `self-*` cognition/memory rows, distills via LLM into 3–5 bullet points, saves as `self-summary` row (type=`self_model`, importance=10). Injected into context as `## Self-Model`.
+
+### Goal Health Pass — `reflection.py`
+
+Runs as part of each reflection cycle. Evaluates active goals for stall/failure patterns.
+
+**Model role**: `goal_health`
+
+- `goal_health_failure_replan` (default 3): consecutive failures before replanning
+- `goal_health_failure_abandon` (default 5): consecutive failures before abandoning
+- `goal_health_autonomy_threshold` (default 0.6): autonomy drive level required for auto-creation
 
 ### Contradiction Scan — `contradiction.py`
 
-**Interval**: 24 hours (configurable)
+**Interval**: 10 minutes (configurable via `contradiction_interval_m`)
+**Model role**: `contradiction`
 
 See Belief System above. Feeds back into cognitive feedback loop via resolution ratio.
 
-### Prospective Reminders
+### Prospective Reminders — `prospective.py`
 
-**Interval**: 5 minutes (configurable)
+**Interval**: 5 minutes (configurable via `prospective_interval_m`)
+**Model role**: `prospective`
 
 Queries `samaritan_prospective` for rows with `due_at <= now()`. Fires due reminders into the next session context. Measures usage ratio (reminders acted on vs. fired) → feeds cognitive feedback loop.
+
+### Goal Processor — `goal_processor.py`
+
+**Interval**: 30 minutes (configurable via `goal_processor.interval_m`)
+**Model role**: `plan_decomposer` (for decomposition)
+
+Autonomous goal scanning, planning, and execution. See Goal Processor section above for full lifecycle.
+
+### Temporal Inference — `temporal_inference.py`
+
+**Interval**: 3 hours (configurable via `memory.temporal.inference_interval_h`)
+**Model role**: `temporal_inference`
+
+Analyzes recent ST topics and proposes temporal pattern queries. Stores results in `samaritan_temporal` with `source="inferred"`. Fills the gap that semantic retrieval (Qdrant) has no time dimension — "what do I usually do at 10 AM?" has zero semantic overlap with actual activities.
 
 ---
 
@@ -229,7 +358,8 @@ External prompt
   ├─ load_context_block()   ← ST + LT semantic retrieval  │
   ├─ load_typed_context_block()  ← goals, beliefs, self   │
   ├─ load_drives()          ← affect state                │
-  └─ prospective due items                                │
+  ├─ prospective due items                                │
+  └─ temporal patterns      ← recall_temporal cache       │
       │                                                   │
       ▼                                                   │
    LLM call                                               │
@@ -248,12 +378,62 @@ External prompt
       │                    MySQL INSERT + Qdrant upsert   │
       │                                                   │
 Background loops (async, independent):                    │
-  reflection.py  (6h)   → save_memory() + refresh_self   │
-  contradiction.py (24h) → write flags, retract beliefs  │
-  prospective    (5m)   → fire due reminders              │
-  cogn_feedback.py      → update conditioned strengths   │
-  aging loops    (60s/360s) → ST→LT summarization        │
+  reflection.py    (24h)   → save_memory() + refresh_self │
+                             + goal_health pass            │
+  contradiction.py (10m)   → write flags, retract beliefs  │
+  prospective.py   (5m)    → fire due reminders            │
+  goal_processor   (30m)   → scan → propose → execute     │
+  temporal_inference (3h)  → infer temporal patterns       │
+  cogn_feedback.py         → update conditioned strengths  │
+  aging loops      (60s/6h) → ST→LT summarization         │
 ```
+
+---
+
+## Cognition Table
+
+**`samaritan_cognition` | migration `009_cognition.sql`**
+
+Cognitive loop outputs (contradiction flags, reflection insights, goal health decisions) are written to a dedicated table rather than polluting ST/LT. Each row has an `origin` enum identifying the source loop.
+
+This separates cognitive meta-observations from conversational memory, preventing loops from retrieving their own prior outputs during semantic search and creating feedback spirals.
+
+---
+
+## Temporal Pattern Recall
+
+**`tools.py` — `recall_temporal` | `temporal_inference.py` | migration `007_temporal.sql`**
+
+Semantic retrieval (Qdrant) has no time dimension. The `recall_temporal` tool queries `created_at` timestamps across ST and LT to surface recurring time-based patterns.
+
+Parameters: `query`, `group_by` (hour/day_of_week/date/week/month), `day_of_week`, `time_range` (morning/afternoon/evening/now/HH:MM-HH:MM), `lookback_days`, `limit`, `new` (bypass cache).
+
+Results cached in `samaritan_temporal`. Aging: HWM 500 / LWM 300, timer every 6h, deletes lowest-hit oldest first.
+
+---
+
+## Model Roles
+
+**`llm-models.json` → `model_roles`**
+
+All cognitive model assignments are centralized in the `model_roles` section of `llm-models.json`. This separates model assignment (which model does what) from operational configuration (intervals, thresholds, limits) which stays in `plugins-enabled.json`.
+
+| Role | Model key | Used by |
+|---|---|---|
+| `summarizer` | `summarizer-anthropic` | Memory aging, `!reset` summarization |
+| `reviewer` | `reviewer-gemini` | Memory review (`!memreview`) |
+| `extractor` | `extractor-gemini` | Content extraction |
+| `judge` | `judge-gemini` | LLM-as-judge gates |
+| `plan_decomposer` | `plan-decomposer` | Goal → concept → task decomposition |
+| `plan_executor` | `samaritan-execution` | Plan step execution (primary) |
+| `plan_executor_fallback` | `friendli-qwen3-executor` | Plan step execution (fallback) |
+| `contradiction` | `qwen25-cogn` | Contradiction scanning |
+| `prospective` | `qwen25-cogn` | Prospective reminder evaluation |
+| `reflection` | `summarizer-gemini` | Reflection loop |
+| `goal_health` | `samaritan-reasoning` | Goal health pass |
+| `temporal_inference` | `summarizer-gemini` | Temporal pattern inference |
+
+**Resolution order**: config override (plugins-enabled.json, if present) → `get_model_role()` (llm-models.json) → hardcoded fallback. Runtime overrides via `!cogn model <loop> <key>` are also supported.
 
 ---
 
@@ -275,17 +455,26 @@ The notable design divergence: **surprise scoring** was replaced by the cognitiv
 
 ---
 
-## Completed Items (2026-03-11)
+## Completed Items
 
-All four previously open items have been implemented:
+### 2026-03-11
 
-1. **Goal injection into context** ✓ — `load_typed_context_block()` fetches active goals from `samaritan_goals` and injects them as a `## Active Goals` section. Verified via `!typed` that goals appear in context.
+1. **Goal injection into context** ✓ — `load_typed_context_block()` fetches active goals and injects as `## Active Goals`, sorted by drive-weighted priority.
+2. **Drive-weighted goal prioritization** ✓ — `importance × drive_weight` per goal, annotated with `pri=X.X`.
+3. **Prospective loop full implementation** ✓ — Fire/feedback cycle complete with usage ratio measurement.
+4. **Goal completion detection** ✓ — Reflection LLM returns `goals_done` IDs, validated before marking done.
 
-2. **Drive-weighted goal prioritization** ✓ — `load_typed_context_block()` fetches current drive values, computes `importance × drive_weight` per goal (user goals use `task-completion`; assistant goals use `max(task-completion, autonomy)`), sorts descending, and annotates each goal with `pri=X.X` before injection.
+### 2026-03-12
 
-3. **Prospective loop full implementation** ✓ — Fire/feedback cycle verified complete: `_inject_reminder()` writes `importance=9` rows (always-injected threshold), `last_accessed` updated at context load, feedback evaluator runs every 12 cycles, `cogn_feedback.evaluate(LOOP_PROSPECTIVE, summary)` measures usage ratio. Token cost for NL due_at LLM call: ~65–75 tokens fixed + ≤115 tokens for a max-length `due_at` phrase.
+5. **Plan engine two-tier decomposition** ✓ — Concept → task steps with approval, ownership, and tool_call specs. Three-tier execution chain (direct → primary → fallback).
+6. **Cognition table** ✓ — `samaritan_cognition` separates cognitive outputs from ST/LT. Migration `009`.
+7. **Temporal pattern recall** ✓ — `recall_temporal` tool + `temporal_inference.py` background inference + aging.
 
-4. **Goal completion detection** ✓ — `reflection.py` now requests `{"memories": [...], "goals_done": [id, ...]}` JSON from the reflection LLM. Detected goal IDs are validated against the current active goal list before `UPDATE ... SET status='done'` is executed. Also fixed: `self_model` type (not in ST enum) is remapped to `semantic` before DB insert.
+### 2026-03-13
+
+8. **Goal processor** ✓ — Autonomous goal scanning, proposing, and serial execution. State machine: NULL → proposed → approved → executing → completed/paused_user/deferred/rejected. Notifier integration for proposals and human steps.
+9. **Model roles centralization** ✓ — All cognitive model assignments moved from `plugins-enabled.json` to `model_roles` in `llm-models.json`. Resolution order: config override → `get_model_role()` → hardcoded fallback.
+10. **Plan decomposer upgrade** ✓ — Upgraded from Haiku 4.5 to Sonnet 4.6 to eliminate model-name hallucinations in `tool_call` specs.
 
 ## Open Items
 

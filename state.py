@@ -63,7 +63,7 @@ def delete_history(session_id: str) -> bool:
 
 # Keys from the session dict that are user-configurable via !config and should
 # survive a reap/reconnect cycle.
-SESSION_CONFIG_KEYS = ("agent_call_stream", "tool_preview_length", "tool_suppress", "memory_scan_suppress", "stream_level", "memory_enabled", "auto_enrich", "model")
+SESSION_CONFIG_KEYS = ("agent_call_stream", "tool_preview_length", "tool_suppress", "memory_scan_suppress", "stream_level", "memory_enabled", "auto_enrich", "model", "database")
 
 
 def save_session_config(session_id: str, session: dict) -> None:
@@ -206,6 +206,68 @@ queue_lock = asyncio.Lock()
 # Session store
 sessions: dict[str, dict] = {}
 
+# Global chat activity tracker — used by background tasks to backoff when idle
+import time as _time
+_last_chat_ts: float = _time.time()  # seed with startup time
+
+def update_chat_activity() -> None:
+    """Call on every incoming user message to reset backoff clocks.
+    Also wakes backed-off cognitive tasks so they snap back to base interval.
+    """
+    global _last_chat_ts
+    was_idle = (_time.time() - _last_chat_ts) > 600  # was idle > 10 min
+    _last_chat_ts = _time.time()
+    if was_idle:
+        # Wake backed-off tasks so they resume at base interval
+        for _mod, _fn in [("contradiction", "trigger_now"),
+                          ("prospective", "trigger_now"),
+                          ("reflection", "trigger_now"),
+                          ("temporal_inference", "trigger_now"),
+                          ("memreview_auto", "trigger_now")]:
+            try:
+                import importlib
+                m = importlib.import_module(_mod)
+                getattr(m, _fn)()
+            except Exception:
+                pass
+
+def idle_seconds() -> float:
+    """Seconds since last chat activity across any session."""
+    return _time.time() - _last_chat_ts
+
+def backoff_interval(base_m: float, cap_m: float) -> float:
+    """Compute backoff interval in minutes given idle time.
+    Doubles base every 10 min of inactivity, capped at cap_m.
+    Returns base_m when chat is active (idle < 10 min).
+    """
+    idle = idle_seconds()
+    if idle < 600:
+        return base_m
+    doublings = int(idle // 600)
+    return min(base_m * (2 ** doublings), cap_m)
+
+def fmt_interval(minutes: float) -> str:
+    """Format interval in minutes to human-readable string (e.g. '2m', '1h', '24h')."""
+    if minutes >= 60:
+        h = minutes / 60
+        return f"{h:.0f}h" if h == int(h) else f"{h:.1f}h"
+    return f"{minutes:.0f}m" if minutes == int(minutes) else f"{minutes:.1f}m"
+
+# Session reaper wake event — set when a session is created so the reaper
+# can resume from disabled/long-sleep immediately.
+_reaper_wake: asyncio.Event | None = None
+
+def init_reaper_wake() -> asyncio.Event:
+    """Create the reaper wake event (called once from the reaper task)."""
+    global _reaper_wake
+    _reaper_wake = asyncio.Event()
+    return _reaper_wake
+
+def wake_reaper() -> None:
+    """Signal the session reaper that a session now exists."""
+    if _reaper_wake is not None:
+        _reaper_wake.set()
+
 # Session ID management - shorthand IDs for user convenience
 _session_id_counter = 100  # Start at 100 for readability
 session_id_to_shorthand: dict[str, int] = {}  # full_session_id -> shorthand_id
@@ -274,6 +336,10 @@ async def push_err(client_id: str, msg: str):
 
 async def push_model(client_id: str, model_key: str):
     (await get_queue(client_id)).put_nowait({"t": "model", "d": model_key})
+
+async def push_notif(client_id: str, text: str):
+    """Push an async notification event to a session's SSE queue."""
+    (await get_queue(client_id)).put_nowait({"t": "notif", "d": text.replace("\n", "\\n")})
 
 # ---------------------------------------------------------------------------
 # Gate infrastructure

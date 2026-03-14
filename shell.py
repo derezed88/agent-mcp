@@ -48,8 +48,14 @@ import sys
 import uuid
 from datetime import datetime
 
+import logging
+
 import httpx
 from dotenv import load_dotenv
+
+# Silence httpx request logging — otherwise INFO lines leak into the curses TUI
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 load_dotenv()
 
@@ -280,8 +286,10 @@ async def list_sessions():
             size_str = f" (~{char_k:,} chars, ~{tok_est:,} tok est)"
             _mem_flag = s.get("memory_enabled", None)
             mem_str = f", mem={'ON' if _mem_flag else 'OFF'}(session)" if _mem_flag is not None else ", mem=ON(global)"
+            _db = s.get("database")
+            db_str = f", db={_db}" if _db else ""
             await state.append_output(
-                f"  ID [{shorthand}] {cid}: model={model}, history={history} msgs{size_str}{ip_str}{mem_str}{current}"
+                f"  ID [{shorthand}] {cid}: model={model}, history={history} msgs{size_str}{ip_str}{mem_str}{db_str}{current}"
             )
             in_total = s.get("tokens_in_total", 0)
             out_total = s.get("tokens_out_total", 0)
@@ -452,6 +460,16 @@ async def sse_listener():
                             gate_buf.append(raw.replace("\\n", "\n"))
                             continue
 
+                        # ---- async notification ----------------------------
+                        if current_event == "notif":
+                            notif_text = raw.replace("\\n", "\n")
+                            await state.append_output(f"\n{'━'*52}")
+                            await state.append_output(notif_text)
+                            await state.append_output(f"{'━'*52}\n")
+                            current_event = "message"
+                            state.redraw_event.set()
+                            continue
+
                         # ---- error ----------------------------------------
                         if current_event == "error":
                             try:
@@ -552,7 +570,8 @@ async def user_input_handler(text: str) -> bool:
             return True
 
         if cmd == "session":
-            ts = datetime.now().strftime("%H:%M:%S")
+            from config import now_display
+            ts = now_display().strftime("%H:%M:%S")
             await state.append_output(f"\n[{ts}] You: {stripped}")
             await state.append_output("")
             if not arg:
@@ -579,13 +598,15 @@ async def user_input_handler(text: str) -> bool:
 
         if cmd == "model" and arg:
             # Forward to server — the server will push a "model" SSE event back
-            ts = datetime.now().strftime("%H:%M:%S")
+            from config import now_display
+            ts = now_display().strftime("%H:%M:%S")
             await state.append_output(f"\n[{ts}] You: {stripped}")
             await state.append_output("")
             await submit_to_server(stripped)
             return True
 
-    ts = datetime.now().strftime("%H:%M:%S")
+    from config import now_display
+    ts = now_display().strftime("%H:%M:%S")
     await state.append_output(f"\n[{ts}] You: {stripped}")
     await state.append_output("")   # blank line so LLM response starts fresh
     await submit_to_server(stripped)

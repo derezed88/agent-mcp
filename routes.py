@@ -8,8 +8,8 @@ from starlette.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from config import log, LLM_REGISTRY, DEFAULT_MODEL, LLM_MODELS_FILE
-from state import sessions, get_queue, push_tok, push_done, push_model, active_tasks, cancel_active_task
-from database import execute_sql, set_model_context
+from state import sessions, get_queue, push_tok, push_done, push_model, push_notif, active_tasks, cancel_active_task
+from database import execute_sql, set_model_context, set_db_override
 from agents import dispatch_llm
 from tools import get_tool_executor, get_plugin_command, get_plugin_help_sections
 
@@ -140,17 +140,38 @@ async def cmd_help(client_id: str):
         "  !memtrim [N]                              - hard-delete N oldest ST rows (escape valve; default: trim to LWM)\n"
         "\n"
         "Proactive Cognition:\n"
+        "  !timers                                   - dashboard of all background timers (status, last run, next run)\n"
+        "  !timers <name>                            - detail view for one timer\n"
         "  !cogn                                     - status dashboard for all cognition timers + stats\n"
         "  !cogn on|off                              - master enable/disable (runtime, no restart)\n"
-        "  !cogn contradiction|prospective|reflection on|off|run\n"
+        "  !cogn contradiction|prospective|reflection|temporal on|off|run\n"
         "                                            - per-loop toggle or immediate trigger\n"
         "  !cogn interval contradiction|prospective|reflection <value>\n"
         "                                            - set loop interval (h or m) at runtime\n"
         "  !cogn model contradiction|prospective|reflection <key>\n"
         "                                            - set loop model at runtime\n"
+        "  !cogn goals [approve|reject <id>]         - goal health dashboard / approve-reject proposals\n"
         "  !cogn flags [clear]                       - view/retract open contradiction-flag beliefs\n"
         "  !cogn feedback reset <loop>               - reset feedback streak/conditioning for a loop\n"
         "  !cogn reset                               - revert all runtime overrides to json config\n"
+        "\n"
+        "Plan Engine:\n"
+        "  !plan                                     - show active plans (concept + task hierarchy)\n"
+        "  !plan all                                 - show all plans including completed\n"
+        "  !plan <goal_id>                           - show plans for a specific goal\n"
+        "  !plan decompose [goal_id]                 - decompose concept steps into task steps\n"
+        "  !plan approve <concept_id>                - approve proposed task steps\n"
+        "  !plan reject <concept_id>                 - reject proposed task steps\n"
+        "  !plan execute [goal_id]                   - execute approved task steps\n"
+        "  !plan run [goal_id]                       - full pipeline: decompose → execute\n"
+        "  !plan add <goal_id> <description>         - add concept step to a goal\n"
+        "  !plan adhoc <description>                 - add concept step without a goal\n"
+        "\n"
+        "Tool Stats:\n"
+        "  !toolstats                                - aggregate tool execution stats by model and tool\n"
+        "  !toolstats model <name>                   - filter stats to a specific model\n"
+        "  !toolstats tool <name>                    - filter stats to a specific tool\n"
+        "  !toolstats reset                          - clear all stats\n"
         "\n"
         "Drive / Affect:\n"
         "  !drives                                   - show current drive values\n"
@@ -176,6 +197,13 @@ async def cmd_help(client_id: str):
         "\n"
         + "".join(get_plugin_help_sections())
         + "\n"
+        "Database Instances:\n"
+        "  !db                                       - list available databases\n"
+        "  !db current                               - show current session's database\n"
+        "  !db switch <name>                         - switch to database (creates if needed)\n"
+        "  !db delete <name>                         - delete a database (with confirmation)\n"
+        "  !db delete <name> confirm                 - delete without confirmation prompt\n"
+        "\n"
         "Session & History:\n"
         "  !session                                  - list all active sessions\n"
         "  !session <ID> delete                      - delete a session from server\n"
@@ -533,17 +561,21 @@ async def cmd_memstats(client_id: str, model_key: str = ""):
     lines.append(f"  Summaries newest     : {_scalar(sum_newest_raw)}\n")
 
     # ── Summarizer runs ───────────────────────────────────────────────────────
+    lines.append("**Summarizer runs by model**")
     if sum_count > 0:
         sum_model_raw = await q(
             f"SELECT model_used, COUNT(*) as n FROM {_SUM()} GROUP BY model_used ORDER BY n DESC"
         )
         sum_model_rows = _rows_from(sum_model_raw)
         if sum_model_rows:
-            lines.append("**Summarizer runs by model**")
             for row in sum_model_rows:
                 if len(row) >= 2:
                     lines.append(f"  {row[0]:<30} {row[1]:>3} runs")
-            lines.append("")
+        else:
+            lines.append("  (none)")
+    else:
+        lines.append("  (none)")
+    lines.append("")
 
     # ── Vector index stats ────────────────────────────────────────────────────
     try:
@@ -602,23 +634,50 @@ async def cmd_memstats(client_id: str, model_key: str = ""):
 
     # ── Retrieval stats (two-pass) ───────────────────────────────────────────
     rstats = get_retrieval_stats()
-    if rstats["total"] > 0:
-        single = rstats["single_pass_sufficient"]
-        two = rstats["two_pass_needed"]
-        fallback = rstats["fallback_no_vec"]
-        total = rstats["total"]
-        single_pct = int(single / total * 100) if total else 0
-        two_pct = int(two / total * 100) if total else 0
-        lines.append("**Retrieval Stats (since restart)**")
-        lines.append(f"  total retrievals     : {total}")
-        lines.append(f"  single-pass sufficient: {single} ({single_pct}%)")
-        lines.append(f"  two-pass needed      : {two} ({two_pct}%)")
-        lines.append(f"  fallback (no vector) : {fallback}")
-        qfloor = float(_mem_plugin_cfg().get("two_pass_quality_floor", 0.75))
-        lines.append(f"  pass-1 avg quality hits: {rstats['pass1_avg_hits']:.1f} (score ≥ {qfloor})")
-        if two > 0:
-            lines.append(f"  pass-2 avg extra hits: {rstats['pass2_avg_extra']:.1f}")
-        lines.append("")
+    total = rstats["total"]
+    single = rstats["single_pass_sufficient"]
+    two = rstats["two_pass_needed"]
+    fallback = rstats["fallback_no_vec"]
+    single_pct = int(single / total * 100) if total else 0
+    two_pct = int(two / total * 100) if total else 0
+    qfloor = float(_mem_plugin_cfg().get("two_pass_quality_floor", 0.75))
+    lines.append("**Retrieval Stats (since restart)**")
+    lines.append(f"  total retrievals     : {total}")
+    lines.append(f"  single-pass sufficient: {single} ({single_pct}%)")
+    lines.append(f"  two-pass needed      : {two} ({two_pct}%)")
+    lines.append(f"  fallback (no vector) : {fallback}")
+    lines.append(f"  pass-1 avg quality hits: {rstats['pass1_avg_hits']:.1f} (score >= {qfloor})")
+    lines.append(f"  pass-2 avg extra hits: {rstats['pass2_avg_extra']:.1f}")
+    lines.append("")
+
+    # ── Enrichment stats (timeout tracking) ──────────────────────────────────
+    from agents import get_enrich_stats
+    estats = get_enrich_stats()
+    e_total = estats["total"]
+    e_full = estats["full"]
+    e_partial = estats["partial"]
+    e_to = estats["timeout"]
+    lines.append("**Enrichment Stats (since restart)**")
+    lines.append(f"  total calls          : {e_total}")
+    lines.append(f"  full (all tasks ok)  : {e_full}")
+    lines.append(f"  partial (some ok)    : {e_partial}")
+    lines.append(f"  timeout (zero ok)    : {e_to}")
+    lines.append(f"  avg latency          : {estats['avg_ms']:.0f}ms")
+    # Per-task breakdown
+    tc = estats.get("task_completions", {})
+    tt = estats.get("task_timeouts", {})
+    all_task_names = sorted(set(tc) | set(tt))
+    if all_task_names:
+        lines.append("  per-task:")
+        for tn in all_task_names:
+            ok = tc.get(tn, 0)
+            to = tt.get(tn, 0)
+            total_t = ok + to
+            to_pct = int(to / total_t * 100) if total_t else 0
+            lines.append(f"    {tn:<20} ok={ok}  timeout={to} ({to_pct}%)")
+    else:
+        lines.append("  per-task:            (no calls yet)")
+    lines.append("")
 
     # ── Typed tables (goals/plans/beliefs) ───────────────────────────────────
     try:
@@ -652,7 +711,14 @@ async def cmd_memstats(client_id: str, model_key: str = ""):
         val = mem_cfg.get(f, True)
         lines.append(f"  {f:<28}: {'on' if val else 'OFF'}{' (inactive—master off)' if not master_on else ''}")
     lines.append(f"  {'fuzzy_dedup_threshold':<28}: {mem_cfg.get('fuzzy_dedup_threshold', 0.78):.2f}")
-    lines.append(f"  {'summarizer_model':<28}: {mem_cfg.get('summarizer_model', '(not set)')}")
+    _sum_model = mem_cfg.get('summarizer_model') or ""
+    if not _sum_model:
+        from config import get_model_role
+        try:
+            _sum_model = get_model_role("summarizer")
+        except KeyError:
+            _sum_model = "(not set)"
+    lines.append(f"  {'summarizer_model':<28}: {_sum_model}")
     hwm = age_cfg["short_hwm"]
     lwm = age_cfg["short_lwm"]
     lines.append(f"  {'auto_memory_age':<28}: {'on' if age_cfg['auto_memory_age'] else 'OFF'}")
@@ -905,7 +971,8 @@ _pending_type_reviews: dict[str, list[dict]] = {}     # client_id → typed-memo
 _pending_classify_reviews: dict[str, list[dict]] = {} # client_id → memory reclassification proposals
 
 
-async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
+async def cmd_memreview(client_id: str, arg: str = "", model_key: str = "",
+                        auto_accept: bool = False):
     """
     !memreview [types] [approve N,N,...] [reject N,N,...] [clear]
 
@@ -915,8 +982,9 @@ async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
     approve N,N,...: Execute approved proposals by number.
     reject N,N,...: Remove proposals from the pending list.
     clear: Discard all pending proposals.
+    auto_accept: When True, auto-approve all proposals without HITL (used by background timer).
     """
-    if await _guard_utility_model(client_id, model_key, "memreview"):
+    if not auto_accept and await _guard_utility_model(client_id, model_key, "memreview"):
         return
     set_model_context(model_key)
     from database import fetch_dicts, execute_sql
@@ -934,12 +1002,46 @@ async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
         await conditional_push_done(client_id)
         return
 
+    if subcmd == "timer":
+        from memreview_auto import set_auto_enabled, is_auto_enabled, trigger_now as _mr_trigger
+        toggle = parts[1].lower() if len(parts) > 1 else ""
+        if toggle == "on":
+            set_auto_enabled(True)
+            _mr_trigger()
+            await push_tok(client_id, "Auto-review timer **enabled** (runtime override).")
+        elif toggle == "off":
+            set_auto_enabled(False)
+            await push_tok(client_id, "Auto-review timer **disabled** (runtime override).")
+        elif toggle == "reset":
+            set_auto_enabled(None)
+            await push_tok(client_id, "Auto-review timer reverted to config setting.")
+        elif toggle == "run":
+            set_auto_enabled(True)
+            _mr_trigger()
+            await push_tok(client_id, "Auto-review timer enabled and triggered now.")
+        else:
+            status = "ON" if is_auto_enabled() else "OFF"
+            await push_tok(client_id,
+                f"Auto-review timer: **{status}**\n"
+                f"Usage: !memreview timer on|off|reset|run")
+        await conditional_push_done(client_id)
+        return
+
+    if subcmd == "auto":
+        # Run all review modes with auto-accept (same as background timer)
+        await push_tok(client_id, "Running auto-review (topics + types + classify) with auto-accept...\n")
+        for mode in ("", "types", "classify"):
+            await cmd_memreview(client_id, arg=mode, model_key=model_key, auto_accept=True)
+        await push_tok(client_id, "Auto-review complete.")
+        await conditional_push_done(client_id)
+        return
+
     if subcmd == "types":
-        await cmd_memreview_types(client_id, model_key)
+        await cmd_memreview_types(client_id, model_key, auto_accept=auto_accept)
         return
 
     if subcmd == "classify":
-        await cmd_memreview_classify(client_id, model_key)
+        await cmd_memreview_classify(client_id, model_key, auto_accept=auto_accept)
         return
 
     if subcmd in ("approve", "reject"):
@@ -1052,8 +1154,8 @@ async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
         await conditional_push_done(client_id)
         return
 
-    # ── show pending proposals if any exist ───────────────────────────────
-    if subcmd == "" and client_id in _pending_reviews and _pending_reviews[client_id]:
+    # ── show pending proposals if any exist (skip if auto_accept) ─────────
+    if not auto_accept and subcmd == "" and client_id in _pending_reviews and _pending_reviews[client_id]:
         proposals = _pending_reviews[client_id]
         lines = [f"**Pending Topic Review ({len(proposals)} proposals)**\n"]
         for i, p in enumerate(proposals, 1):
@@ -1183,8 +1285,56 @@ async def cmd_memreview(client_id: str, arg: str = "", model_key: str = ""):
         p["from_count"] = from_data.get("st_count", 0) + from_data.get("lt_count", 0)
         p["to_count"] = to_data.get("st_count", 0) + to_data.get("lt_count", 0)
 
-    # Store and display
+    # Store and display (or auto-accept)
     _pending_reviews[client_id] = proposals
+
+    if auto_accept:
+        # Auto-approve all proposals — execute inline instead of recursing
+        from database import fetch_dicts, execute_sql
+        applied = []
+        errors = []
+        for i, p in enumerate(proposals, 1):
+            old_topic = p.get("from", "")
+            new_topic = p.get("to", "")
+            action = p.get("action", "")
+            if not old_topic or not new_topic:
+                continue
+            try:
+                affected_ids = []
+                for table in (_ST(), _LT()):
+                    rows = await fetch_dicts(
+                        f"SELECT id FROM {table} WHERE topic = '{old_topic}'"
+                    )
+                    affected_ids.extend(int(r["id"]) for r in rows)
+                for table in (_ST(), _LT()):
+                    await execute_sql(
+                        f"UPDATE {table} SET topic = '{new_topic}' "
+                        f"WHERE topic = '{old_topic}'"
+                    )
+                if affected_ids:
+                    try:
+                        from plugin_memory_vector_qdrant import get_vector_api
+                        vec = get_vector_api()
+                        if vec:
+                            vec._qc.set_payload(
+                                collection_name=_COLLECTION(),
+                                payload={"topic": new_topic},
+                                points=affected_ids,
+                            )
+                    except Exception:
+                        pass
+                applied.append(f"{action} '{old_topic}' → '{new_topic}' ({len(affected_ids)} rows)")
+            except Exception as e:
+                errors.append(f"#{i}: {e}")
+        _pending_reviews.pop(client_id, None)
+        if applied:
+            await push_tok(client_id, f"Auto-applied {len(applied)} topic proposals:\n" +
+                           "\n".join(f"  {a}" for a in applied))
+        if errors:
+            await push_tok(client_id, "Errors:\n" + "\n".join(f"  {e}" for e in errors))
+        if not applied and not errors:
+            await push_tok(client_id, f"Topic review: {len(proposals)} proposals generated, 0 applicable.")
+        return
 
     lines = [f"**Topic Review ({len(proposals)} proposals)**\n"]
     for i, p in enumerate(proposals, 1):
@@ -1227,7 +1377,7 @@ _TYPE_ACTIONS = {
 }
 
 
-async def cmd_memreview_types(client_id: str, model_key: str = ""):
+async def cmd_memreview_types(client_id: str, model_key: str = "", auto_accept: bool = False):
     """Generate typed-memory review proposals via reviewer model."""
     from database import fetch_dicts, get_tables_for_model
     from memory import _mem_plugin_cfg
@@ -1235,14 +1385,15 @@ async def cmd_memreview_types(client_id: str, model_key: str = ""):
 
     set_model_context(model_key)
 
-    # Check memory_types_enabled on the model
-    mcfg = LLM_REGISTRY.get(model_key, {}) if model_key else {}
-    if not mcfg.get("memory_types_enabled", False):
-        await push_tok(client_id,
-            "memory_types_enabled is not set for this model. "
-            "!memreview types is only available when memory_types_enabled: true.")
-        await conditional_push_done(client_id)
-        return
+    # Check memory_types_enabled on the model (skip for auto_accept background task)
+    if not auto_accept:
+        mcfg = LLM_REGISTRY.get(model_key, {}) if model_key else {}
+        if not mcfg.get("memory_types_enabled", False):
+            await push_tok(client_id,
+                "memory_types_enabled is not set for this model. "
+                "!memreview types is only available when memory_types_enabled: true.")
+            await conditional_push_done(client_id)
+            return
 
     tables = get_tables_for_model(model_key)
     _review_model = _mem_plugin_cfg().get("reviewer_model") or get_model_role("reviewer")
@@ -1340,6 +1491,11 @@ async def cmd_memreview_types(client_id: str, model_key: str = ""):
         return
 
     _pending_type_reviews[client_id] = proposals
+
+    if auto_accept:
+        all_nums = ",".join(str(n) for n in range(1, len(proposals) + 1))
+        await _apply_type_proposals(client_id, "approve", ["approve", all_nums])
+        return
 
     lines = [f"**Typed Memory Review ({len(proposals)} proposals)**\n"]
     for i, p in enumerate(proposals, 1):
@@ -1496,7 +1652,7 @@ _CLASSIFY_TYPES = [
 _CLASSIFY_BATCH = 50  # rows per LLM call
 
 
-async def cmd_memreview_classify(client_id: str, model_key: str = ""):
+async def cmd_memreview_classify(client_id: str, model_key: str = "", auto_accept: bool = False):
     """
     Scan ST+LT memory rows with type='context' (default/unclassified) and
     propose type reclassifications via reviewer model with HITL approval.
@@ -1616,6 +1772,11 @@ async def cmd_memreview_classify(client_id: str, model_key: str = ""):
         return
 
     _pending_classify_reviews[client_id] = valid_proposals
+
+    if auto_accept:
+        all_nums = ",".join(str(n) for n in range(1, len(valid_proposals) + 1))
+        await _apply_classify_proposals(client_id, "approve", ["approve", all_nums])
+        return
 
     lines = [f"**Memory Classification Review ({len(valid_proposals)} proposals)**\n"]
     for i, p in enumerate(valid_proposals, 1):
@@ -2178,6 +2339,145 @@ async def cmd_memtrim(client_id: str, arg: str, model_key: str = ""):
 
 
 # ---------------------------------------------------------------------------
+# !toolstats — aggregate tool execution stats
+# ---------------------------------------------------------------------------
+
+async def cmd_toolstats(client_id: str, arg: str, model_key: str = ""):
+    """
+    !toolstats                      — show all tool stats sorted by call count
+    !toolstats model <name>         — filter to a specific model
+    !toolstats tool <name>          — filter to a specific tool
+    !toolstats reset                — clear all stats
+    """
+    set_model_context(model_key)
+    from database import execute_sql, get_tables_for_model
+
+    tbl = get_tables_for_model().get("tool_stats", "samaritan_tool_stats")
+
+    async def q(sql: str) -> str:
+        try:
+            return await execute_sql(sql)
+        except Exception as e:
+            return f"(error: {e})"
+
+    def _int_from(raw: str) -> int:
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if line.isdigit():
+                return int(line)
+            parts = line.split()
+            if parts and parts[-1].isdigit():
+                return int(parts[-1])
+        return 0
+
+    def _rows_from(raw: str) -> list[list[str]]:
+        result = []
+        first_data = True
+        for line in raw.strip().splitlines():
+            if not line.strip() or set(line.strip()) <= set("-+|"):
+                continue
+            if first_data:
+                first_data = False  # skip first line (header)
+                continue
+            cols = [c.strip() for c in line.split("|")]
+            result.append(cols)
+        return result
+
+    parts = arg.strip().split(maxsplit=1) if arg.strip() else []
+    subcmd = parts[0].lower() if parts else ""
+    subarg = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd == "reset":
+        await execute_sql(f"TRUNCATE TABLE {tbl}")
+        await push_tok(client_id, "Tool stats cleared.\n")
+        await conditional_push_done(client_id)
+        return
+
+    # Build WHERE clause
+    where = ""
+    if subcmd == "model" and subarg:
+        where = f" WHERE model LIKE '%{subarg}%'"
+    elif subcmd == "tool" and subarg:
+        where = f" WHERE tool_name LIKE '%{subarg}%'"
+
+    total = _int_from(await q(f"SELECT COUNT(*) FROM {tbl}{where}"))
+    if total == 0:
+        await push_tok(client_id, "No tool stats recorded yet.\n")
+        await conditional_push_done(client_id)
+        return
+
+    lines = ["## Tool Execution Stats\n"]
+
+    # Summary row
+    summary_raw = await q(
+        f"SELECT SUM(call_count), SUM(success_count), SUM(error_count), "
+        f"MIN(first_called), MAX(last_called) FROM {tbl}{where}"
+    )
+    sum_rows = _rows_from(summary_raw)
+    if sum_rows and len(sum_rows[0]) >= 5:
+        r = sum_rows[0]
+        lines.append(f"**Totals**: {r[0]} calls ({r[1]} ok, {r[2]} err)  |  tracking since {r[3]}  |  last call {r[4]}\n")
+
+    # By model
+    model_raw = await q(
+        f"SELECT model, SUM(call_count) as calls, SUM(success_count) as ok, "
+        f"SUM(error_count) as err, COUNT(DISTINCT tool_name) as tools, "
+        f"MAX(last_called) as last_call "
+        f"FROM {tbl}{where} GROUP BY model ORDER BY calls DESC"
+    )
+    model_rows = _rows_from(model_raw)
+    if model_rows:
+        lines.append("**By model**")
+        for r in model_rows:
+            if len(r) >= 6:
+                lines.append(f"  {r[0]:<30} {r[1]:>6} calls ({r[2]} ok, {r[3]} err)  {r[4]:>3} tools  last={r[5]}")
+        lines.append("")
+
+    # Detail: top 30 (model, tool) pairs by call_count
+    detail_raw = await q(
+        f"SELECT model, tool_name, call_count, success_count, error_count, "
+        f"first_called, last_called "
+        f"FROM {tbl}{where} ORDER BY call_count DESC LIMIT 30"
+    )
+    detail_rows = _rows_from(detail_raw)
+    if detail_rows:
+        lines.append("**Top tool calls** (model → tool)")
+        for r in detail_rows:
+            if len(r) >= 7:
+                err_flag = f"  **{r[4]} err**" if r[4].strip() != "0" else ""
+                lines.append(f"  {r[0]:<25} {r[1]:<25} {r[2]:>6}x ({r[3]} ok{err_flag})  last={r[6]}")
+        lines.append("")
+
+    await push_tok(client_id, "\n".join(lines))
+    await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# Shared UTC → display-timezone formatter for !cogn and !timers
+# ---------------------------------------------------------------------------
+
+def _fmt_utc_ts(ts: str | None) -> str:
+    """Convert a UTC ISO timestamp to the configured display timezone.
+    Handles both 'Z' suffix and '+00:00' offset formats from .isoformat().
+    Returns compact HH:MM:SS for today, MM-DD HH:MM otherwise, or 'never'."""
+    if not ts:
+        return "never"
+    try:
+        from datetime import datetime, timezone
+        from config import display_tz, now_display
+        # Normalize various UTC formats
+        cleaned = ts.replace("+00:00", "Z").rstrip("Z").split(".")[0]
+        dt = datetime.strptime(cleaned, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        dt_local = dt.astimezone(display_tz())
+        now_local = now_display()
+        if dt_local.date() == now_local.date():
+            return dt_local.strftime("%H:%M:%S")
+        return dt_local.strftime("%m-%d %H:%M")
+    except Exception:
+        return ts
+
+
+# ---------------------------------------------------------------------------
 # !cogn — proactive cognition timer control + stats
 # ---------------------------------------------------------------------------
 
@@ -2191,10 +2491,14 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
       !cogn contradiction on|off|run scanner toggle / trigger now
       !cogn prospective on|off|run   prospective loop toggle / trigger now
       !cogn reflection on|off|run    reflection loop toggle / trigger now
+      !cogn temporal on|off|run      temporal inference toggle / trigger now
       !cogn interval contradiction <h>   set scan interval (hours, float)
       !cogn interval prospective <m>     set check interval (minutes, int)
       !cogn interval reflection <h>      set reflection interval (hours, float)
       !cogn model <loop> <key>       set model for a loop (contradiction|prospective|reflection)
+      !cogn goals                    show proposed/auto-created/abandoned goals
+      !cogn goals approve <id>      approve a reflection-proposed goal
+      !cogn goals reject <id>       reject (abandon) a proposed goal
       !cogn flags [clear]            view/retract open contradiction-flag beliefs
       !cogn feedback reset <loop>    reset feedback streak/strength for a loop
       !cogn reset                    clear all runtime overrides (revert to json)
@@ -2248,6 +2552,97 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
                     await push_tok(client_id, "\n".join(flines) + "\n")
             except Exception as e:
                 await push_tok(client_id, f"Error fetching flags: {e}\n")
+        await conditional_push_done(client_id)
+        return
+
+    # ── !cogn goals [approve <id>|reject <id>] ──────────────────────────
+    if parts and parts[0] == "goals":
+        from database import fetch_dicts as _fd
+        from memory import _GOALS, load_drives, update_drive
+
+        async def _nudge_autonomy(delta: float, source: str):
+            """Read current autonomy drive and nudge by delta, clamped 0-1."""
+            drives = await load_drives()
+            cur = next((float(d.get("value", 0.5)) for d in drives if d["name"] == "autonomy"), 0.5)
+            new_val = max(0.0, min(1.0, cur + delta))
+            await update_drive("autonomy", round(new_val, 3), source=source)
+            return cur, new_val
+
+        if len(parts) > 2 and parts[1] == "approve":
+            try:
+                gid = int(parts[2])
+                await execute_sql(
+                    f"UPDATE {_GOALS()} SET session_id='reflection-approved' "
+                    f"WHERE id={gid} AND session_id='reflection-proposed'"
+                )
+                old, new = await _nudge_autonomy(+0.03, "user")
+                await push_tok(client_id,
+                    f"Goal id={gid} approved (promoted to active).\n"
+                    f"  autonomy: {old:.2f} → {new:.2f} (+0.03)\n"
+                )
+            except Exception as e:
+                await push_tok(client_id, f"Error: {e}\n")
+        elif len(parts) > 2 and parts[1] == "reject":
+            try:
+                gid = int(parts[2])
+                await execute_sql(
+                    f"UPDATE {_GOALS()} SET status='abandoned', "
+                    f"abandon_reason='rejected by user via !cogn goals reject' "
+                    f"WHERE id={gid} AND session_id='reflection-proposed'"
+                )
+                old, new = await _nudge_autonomy(-0.05, "user")
+                await push_tok(client_id,
+                    f"Goal id={gid} rejected (abandoned).\n"
+                    f"  autonomy: {old:.2f} → {new:.2f} (-0.05)\n"
+                )
+            except Exception as e:
+                await push_tok(client_id, f"Error: {e}\n")
+        else:
+            # Show pending proposals + recent auto-created
+            try:
+                proposed = await _fd(
+                    f"SELECT id, title, description, importance, created_at "
+                    f"FROM {_GOALS()} WHERE session_id='reflection-proposed' "
+                    f"AND status='active' ORDER BY created_at DESC LIMIT 20"
+                ) or []
+                auto = await _fd(
+                    f"SELECT id, title, description, importance, created_at "
+                    f"FROM {_GOALS()} WHERE session_id='reflection' "
+                    f"AND status='active' ORDER BY created_at DESC LIMIT 10"
+                ) or []
+                abandoned_recent = await _fd(
+                    f"SELECT id, title, abandon_reason, failure_count, updated_at "
+                    f"FROM {_GOALS()} WHERE status='abandoned' "
+                    f"ORDER BY updated_at DESC LIMIT 10"
+                ) or []
+                lines = ["## Goal Health Dashboard\n"]
+                if proposed:
+                    lines.append(f"**Pending Proposals** ({len(proposed)}):")
+                    for p in proposed:
+                        lines.append(
+                            f"  [{p['id']}] {p.get('title','')} (imp={p.get('importance',5)}) "
+                            f"— {p.get('description','')[:80]}"
+                        )
+                    lines.append("  → `!cogn goals approve <id>` or `!cogn goals reject <id>`\n")
+                else:
+                    lines.append("**Pending Proposals**: none\n")
+                if auto:
+                    lines.append(f"**Auto-Created Goals** ({len(auto)}):")
+                    for a in auto:
+                        lines.append(f"  [{a['id']}] {a.get('title','')}")
+                    lines.append("")
+                if abandoned_recent:
+                    lines.append(f"**Recently Abandoned** ({len(abandoned_recent)}):")
+                    for ab in abandoned_recent:
+                        lines.append(
+                            f"  [{ab['id']}] {ab.get('title') or ''} "
+                            f"(failures={ab.get('failure_count') or 0}) "
+                            f"— {(ab.get('abandon_reason') or 'n/a')[:60]}"
+                        )
+                    lines.append("")
+                await push_tok(client_id, "\n".join(lines))
+            except Exception as e:
+                await push_tok(client_id, f"Error: {e}\n")
         await conditional_push_done(client_id)
         return
 
@@ -2309,6 +2704,12 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
             "trig_fn":  lambda: __import__("reflection").trigger_now,
             "label":    "Reflection loop",
         },
+        "temporal": {
+            "flag":     "inference_enabled",
+            "run_fn":   lambda: __import__("temporal_inference").run_temporal_inference,
+            "trig_fn":  lambda: __import__("temporal_inference").trigger_now,
+            "label":    "Temporal inference",
+        },
     }
     if parts and parts[0] in _loop_map:
         loop_name = parts[0]
@@ -2348,9 +2749,9 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
     # ── !cogn interval <loop> <value> ─────────────────────────────────────
     if parts and parts[0] == "interval":
         _interval_keys = {
-            "contradiction": ("contradiction_interval_h", "hours", float),
+            "contradiction": ("contradiction_interval_m", "minutes", int),
             "prospective":   ("prospective_interval_m",   "minutes", int),
-            "reflection":    ("reflection_interval_h",    "hours", float),
+            "reflection":    ("reflection_interval_m",    "minutes", int),
         }
         if len(parts) < 3 or parts[1] not in _interval_keys:
             await push_tok(client_id,
@@ -2406,6 +2807,30 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
     master = cfg["enabled"]
     lines = ["## Proactive Cognition Status\n"]
 
+    # Resolve effective model key (config override → model_roles → fallback)
+    from config import get_model_role
+    def _eff_model(cfg_key: str, role: str, fallback: str) -> str:
+        v = cfg.get(cfg_key, "")
+        if v:
+            return v
+        try:
+            return get_model_role(role)
+        except KeyError:
+            return fallback
+
+    # Pull effective intervals from timer registry (reflects backoff)
+    from timer_registry import get_timer as _get_timer
+    def _eff_interval(timer_name: str, config_m: int) -> str:
+        """Return effective interval from registry, with backoff annotation if different from config."""
+        t = _get_timer(timer_name)
+        if t and t.get("interval_desc"):
+            reg_desc = t["interval_desc"]
+            cfg_desc = _timer_m(config_m)
+            if reg_desc != cfg_desc:
+                return f"{reg_desc} (base {cfg_desc})"
+            return reg_desc
+        return _timer_m(config_m)
+
     lines.append("**Timers**")
     lines.append(f"  {'master':<30}: {_bool(master)}{_ovr('enabled')}")
 
@@ -2414,22 +2839,22 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
     cscan = cfg["contradiction_enabled"]
     lines.append(
         f"  {'contradiction':<30}: {_bool(master and cscan)}{_ovr('contradiction_enabled')}  "
-        f"every {_timer_h(cfg['contradiction_interval_h'])}{_ovr('contradiction_interval_h')}  "
-        f"model={cfg['contradiction_model']}{_ovr('contradiction_model')}{suffix}"
+        f"every {_eff_interval('contradiction', cfg['contradiction_interval_m'])}{_ovr('contradiction_interval_m')}  "
+        f"model={_eff_model('contradiction_model', 'contradiction', 'summarizer-gemini')}{_ovr('contradiction_model')}{suffix}"
     )
     # Prospective
     pscan = cfg.get("prospective_enabled", True)
     lines.append(
         f"  {'prospective':<30}: {_bool(master and pscan)}{_ovr('prospective_enabled')}  "
-        f"every {_timer_m(cfg.get('prospective_interval_m', 5))}{_ovr('prospective_interval_m')}  "
-        f"model={cfg.get('prospective_model','?')}{_ovr('prospective_model')}{suffix}"
+        f"every {_eff_interval('prospective', cfg.get('prospective_interval_m', 5))}{_ovr('prospective_interval_m')}  "
+        f"model={_eff_model('prospective_model', 'prospective', 'summarizer-gemini')}{_ovr('prospective_model')}{suffix}"
     )
     # Reflection
     rscan = cfg.get("reflection_enabled", True)
     lines.append(
         f"  {'reflection':<30}: {_bool(master and rscan)}{_ovr('reflection_enabled')}  "
-        f"every {_timer_h(cfg.get('reflection_interval_h', 6))}{_ovr('reflection_interval_h')}  "
-        f"model={cfg.get('reflection_model','?')}{_ovr('reflection_model')}{suffix}"
+        f"every {_eff_interval('reflection', cfg.get('reflection_interval_m', 60))}{_ovr('reflection_interval_m')}  "
+        f"model={_eff_model('reflection_model', 'reflection', 'summarizer-gemini')}{_ovr('reflection_model')}{suffix}"
     )
     lines.append("")
 
@@ -2461,7 +2886,7 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
             f"auto_retracted={cs['auto_retracted']}"
         )
         lines.append(
-            f"  last={cs['last_scan_at'] or 'never'}  "
+            f"  last={_fmt_utc_ts(cs['last_scan_at'])}  "
             f"dur={cs['last_scan_duration_s']}s  "
             f"last_pairs={cs['last_scan_pairs']}  last_flags={cs['last_scan_flags']}"
         )
@@ -2481,7 +2906,7 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
             f"  checks={ps['checks_run']}  evaluated={ps['rows_evaluated']}  "
             f"fired={ps['rows_fired']}  reminders={ps['reminders_written']}"
         )
-        lines.append(f"  last={ps['last_check_at'] or 'never'}")
+        lines.append(f"  last={_fmt_utc_ts(ps['last_check_at'])}")
         lines.append(_fb_line(ps.get("last_feedback")))
         if ps["last_error"]:
             lines.append(f"  last_error={ps['last_error']}")
@@ -2499,7 +2924,7 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
             f"memories_saved={rs['memories_saved']}  skipped={rs['memories_skipped']}"
         )
         lines.append(
-            f"  last={rs['last_run_at'] or 'never'}  "
+            f"  last={_fmt_utc_ts(rs['last_run_at'])}  "
             f"dur={rs['last_run_duration_s']}s  last_saved={rs['last_run_saved']}"
         )
         lines.append(_fb_line(rs.get("last_feedback")))
@@ -2566,11 +2991,633 @@ async def cmd_cogn(client_id: str, arg: str, model_key: str = ""):
         "  !cogn contradiction|prospective|reflection on|off|run\n"
         "  !cogn interval contradiction|prospective|reflection <value>\n"
         "  !cogn model contradiction|prospective|reflection <key>\n"
+        "  !cogn goals [approve <id>|reject <id>]\n"
         "  !cogn flags [clear]  |  !cogn reset"
     )
 
     await push_tok(client_id, "\n".join(lines))
     await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# !timers — background timer dashboard
+# ---------------------------------------------------------------------------
+
+async def cmd_timers(client_id: str, arg: str = ""):
+    """
+    !timers          — dashboard of all background timers with status + stats
+    !timers <name>   — detail view for one timer
+    """
+    from timer_registry import get_all_timers, get_timer
+
+    _STATUS_ICON = {
+        "sleeping": "💤",
+        "running":  "⚙",
+        "disabled": "⊘",
+        "starting": "…",
+        "error":    "✗",
+    }
+
+    _fmt_ts = _fmt_utc_ts  # use shared UTC→display-tz formatter
+
+    def _fmt_dur(s: float | None) -> str:
+        if s is None:
+            return "-"
+        if s < 1:
+            return f"{s:.2f}s"
+        if s < 60:
+            return f"{s:.1f}s"
+        return f"{s/60:.1f}m"
+
+    arg = (arg or "").strip()
+
+    # ── detail view for one timer ─────────────────────────────────────────
+    if arg:
+        t = get_timer(arg)
+        if not t:
+            await push_tok(client_id, f"Unknown timer: {arg}\n")
+            await conditional_push_done(client_id)
+            return
+        icon = _STATUS_ICON.get(t["status"], "?")
+        lines = [f"## Timer: {arg}  {icon} {t['status']}\n"]
+        lines.append(f"  interval  : {t['interval_desc']}")
+        lines.append(f"  last_run  : {_fmt_ts(t['last_run_at'])}")
+        lines.append(f"  next_run  : {_fmt_ts(t['next_run_at'])}")
+        lines.append(f"  run_count : {t['run_count']}")
+        lines.append(f"  last_dur  : {_fmt_dur(t['last_duration_s'])}")
+        lines.append(f"  last_error: {t['last_error'] or '-'}")
+
+        # Append module-level stats for timers that have them
+        if arg == "temporal_inference":
+            try:
+                from temporal_inference import get_temporal_inference_stats
+                ts = get_temporal_inference_stats()
+                lines.append("")
+                lines.append("**Temporal Inference Stats** (since restart)")
+                lines.append(f"  runs={ts['runs']}  proposed={ts['queries_proposed']}  "
+                             f"executed={ts['queries_executed']}  cached={ts['queries_cached']}  "
+                             f"errors={ts['errors']}")
+                lines.append(f"  last_proposed={ts['last_run_proposed']}  "
+                             f"last_executed={ts['last_run_executed']}")
+            except ImportError:
+                pass
+        elif arg == "memreview_auto":
+            try:
+                from memreview_auto import get_memreview_auto_stats
+                ms = get_memreview_auto_stats()
+                lines.append("")
+                lines.append("**Auto-Review Stats** (since restart)")
+                lines.append(f"  runs={ms['runs']}  topics={ms['topics_applied']}  "
+                             f"types={ms['types_applied']}  classify={ms['classify_applied']}")
+            except ImportError:
+                pass
+        elif arg == "goal_processor":
+            try:
+                from goal_processor import get_stats as get_gp_stats
+                gs = get_gp_stats()
+                lines.append("")
+                lines.append("**Goal Processor Stats** (since restart)")
+                lines.append(f"  runs={gs['runs']}  goals_scanned={gs['goals_scanned']}  "
+                             f"plans_proposed={gs['plans_proposed']}  "
+                             f"steps_executed={gs['steps_executed']}")
+            except ImportError:
+                pass
+        elif arg in ("contradiction", "prospective", "reflection"):
+            lines.append(f"\n  (use !cogn for full {arg} stats)")
+
+        await push_tok(client_id, "\n".join(lines))
+        await conditional_push_done(client_id)
+        return
+
+    # ── full dashboard ────────────────────────────────────────────────────
+    all_timers = get_all_timers()
+
+    # Ordered display groups
+    _GROUPS = [
+        ("Infrastructure", [
+            "session_reaper",
+            "mem_age_count",
+            "mem_age_minutes",
+            "mem_age_temporal",
+        ]),
+        ("Proactive Cognition", [
+            "contradiction",
+            "prospective",
+            "reflection",
+            "goal_processor",
+        ]),
+        ("Inference", [
+            "temporal_inference",
+        ]),
+        ("Maintenance", [
+            "memreview_auto",
+        ]),
+    ]
+
+    # Pull cogn timers from their own modules (they use _stats directly, not registry)
+    _cogn_supplemental: dict[str, dict] = {}
+    try:
+        from contradiction import get_contradiction_stats
+        cs = get_contradiction_stats()
+        _cogn_supplemental["contradiction"] = {
+            "interval_desc": "cogn",
+            "status": "sleeping",
+            "run_count": cs["scans_run"],
+            "last_run_at": cs["last_scan_at"],
+            "next_run_at": None,
+            "last_duration_s": cs.get("last_scan_duration_s"),
+            "last_error": cs.get("last_error"),
+        }
+    except ImportError:
+        pass
+    try:
+        from prospective import get_prospective_stats
+        ps = get_prospective_stats()
+        _cogn_supplemental["prospective"] = {
+            "interval_desc": "cogn",
+            "status": "sleeping",
+            "run_count": ps["checks_run"],
+            "last_run_at": ps["last_check_at"],
+            "next_run_at": None,
+            "last_duration_s": None,
+            "last_error": ps.get("last_error"),
+        }
+    except ImportError:
+        pass
+    try:
+        from reflection import get_reflection_stats
+        rs = get_reflection_stats()
+        _cogn_supplemental["reflection"] = {
+            "interval_desc": "cogn",
+            "status": "sleeping",
+            "run_count": rs["runs"],
+            "last_run_at": rs["last_run_at"],
+            "next_run_at": None,
+            "last_duration_s": rs.get("last_run_duration_s"),
+            "last_error": rs.get("last_error"),
+        }
+    except ImportError:
+        pass
+    try:
+        from goal_processor import get_stats as get_gp_stats
+        gs = get_gp_stats()
+        _cogn_supplemental["goal_processor"] = {
+            "interval_desc": "config",
+            "status": "sleeping",
+            "run_count": gs["runs"],
+            "last_run_at": gs["last_run_at"],
+            "next_run_at": None,
+            "last_duration_s": gs.get("last_run_duration_s"),
+            "last_error": gs.get("last_error"),
+        }
+    except ImportError:
+        pass
+
+    # Merge: registry wins for infra timers; cogn supplemental fills the rest
+    merged = dict(all_timers)
+    for name, data in _cogn_supplemental.items():
+        if name not in merged:
+            merged[name] = data
+        else:
+            # registry has interval_desc, status, next_run_at; supplement fills run_count etc
+            # Use supplement values when registry has None/0 defaults
+            if data.get("run_count"):
+                merged[name]["run_count"] = data["run_count"]
+            if data.get("last_run_at"):
+                merged[name]["last_run_at"] = data["last_run_at"]
+            if data.get("last_duration_s") is not None:
+                merged[name]["last_duration_s"] = data["last_duration_s"]
+            if not merged[name].get("last_error"):
+                merged[name]["last_error"] = data.get("last_error")
+
+    from config import display_tz_label
+    lines = [f"## Background Timer Dashboard  (times in {display_tz_label()})\n"]
+
+    col_w = (22, 9, 8, 11, 11, 5, 8)
+    header = (
+        f"{'Timer':<{col_w[0]}} {'Status':<{col_w[1]}} {'Interval':<{col_w[2]}} "
+        f"{'Last Run':<{col_w[3]}} {'Next Run':<{col_w[4]}} {'Runs':>{col_w[5]}} "
+        f"{'Dur':<{col_w[6]}}"
+    )
+    sep = "-" * (sum(col_w) + len(col_w) - 1)
+
+    for group_name, names in _GROUPS:
+        lines.append(f"**{group_name}**")
+        lines.append(f"```")
+        lines.append(header)
+        lines.append(sep)
+        for name in names:
+            t = merged.get(name)
+            if t is None:
+                lines.append(f"  {name:<{col_w[0]-2}} (not loaded)")
+                continue
+            icon = _STATUS_ICON.get(t["status"], "?")
+            status_str = f"{icon} {t['status']}"
+            err_suffix = "  ✗" if t.get("last_error") else ""
+            lines.append(
+                f"{name:<{col_w[0]}} {status_str:<{col_w[1]}} "
+                f"{t['interval_desc']:<{col_w[2]}} "
+                f"{_fmt_ts(t['last_run_at']):<{col_w[3]}} "
+                f"{_fmt_ts(t['next_run_at']):<{col_w[4]}} "
+                f"{t['run_count']:>{col_w[5]}} "
+                f"{_fmt_dur(t['last_duration_s']):<{col_w[6]}}"
+                f"{err_suffix}"
+            )
+        lines.append("```")
+        lines.append("")
+
+    # Error summary
+    errored = [(n, t) for n, t in merged.items() if t.get("last_error")]
+    if errored:
+        lines.append("**Recent Errors**")
+        for name, t in errored:
+            lines.append(f"  {name}: {t['last_error']}")
+        lines.append("")
+
+    lines.append("_Use `!timers <name>` for detail  |  `!cogn` for cognition loop control_")
+
+    await push_tok(client_id, "\n".join(lines))
+    await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# !plan — two-tier plan management
+# ---------------------------------------------------------------------------
+
+async def cmd_plan(client_id: str, arg: str, model_key: str = ""):
+    """
+    !plan                              — show active plans (concept + task hierarchy)
+    !plan all                          — show all plans including completed
+    !plan <goal_id>                    — show plans for a specific goal
+    !plan decompose [goal_id]          — decompose pending concept steps into task steps
+    !plan approve <concept_step_id>    — approve proposed task steps under a concept step
+    !plan reject <concept_step_id>     — reject proposed task steps
+    !plan execute [goal_id]            — execute approved task steps
+    !plan run [goal_id]                — full pipeline: decompose + execute (auto-approve)
+    !plan add <goal_id> <description>  — add a concept step to a goal
+    !plan adhoc <description>          — add a concept step without a goal (goal_id=0)
+    """
+    from state import push_tok, push_err
+    import plan_engine
+    set_model_context(model_key)
+
+    parts = arg.strip().split(maxsplit=1) if arg.strip() else []
+    sub = parts[0].lower() if parts else ""
+    sub_arg = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        if sub == "" or sub == "all":
+            include_done = sub == "all"
+            result = await plan_engine.view_plan(include_done=include_done)
+            await push_tok(client_id, f"**Active Plans**\n{result}\n")
+
+        elif sub.isdigit():
+            goal_id = int(sub)
+            result = await plan_engine.view_plan(goal_id=goal_id, include_done=True)
+            await push_tok(client_id, f"**Plans for goal {goal_id}**\n{result}\n")
+
+        elif sub == "decompose":
+            goal_id = int(sub_arg) if sub_arg.isdigit() else None
+            await push_tok(client_id, "Decomposing concept steps...\n")
+            results = await plan_engine.decompose_pending_concepts(
+                goal_id=goal_id, auto_approve=False
+            )
+            if not results:
+                await push_tok(client_id, "No pending concept steps to decompose.\n")
+            else:
+                for r in results:
+                    if "error" in r:
+                        await push_tok(
+                            client_id,
+                            f"  ✗ concept {r['concept_id']}: {r['error']}\n"
+                        )
+                    else:
+                        await push_tok(
+                            client_id,
+                            f"  ✓ concept {r['concept_id']} → {r['task_count']} task steps (proposed)\n"
+                        )
+                        for t in r.get("tasks", []):
+                            target_tag = f" →{t['target']}" if t.get("target") != "model" else ""
+                            await push_tok(
+                                client_id,
+                                f"      [{t['id']}] {t['description']}{target_tag}\n"
+                            )
+
+        elif sub == "approve":
+            if not sub_arg.isdigit():
+                await push_tok(client_id, "Usage: !plan approve <concept_step_id>\n")
+                return
+            result = await plan_engine.approve_plan(int(sub_arg), approve=True)
+            await push_tok(client_id, f"{result}\n")
+
+        elif sub == "reject":
+            if not sub_arg.isdigit():
+                await push_tok(client_id, "Usage: !plan reject <concept_step_id>\n")
+                return
+            result = await plan_engine.approve_plan(int(sub_arg), approve=False)
+            await push_tok(client_id, f"{result}\n")
+
+        elif sub == "execute":
+            goal_id = int(sub_arg) if sub_arg.isdigit() else None
+            await push_tok(client_id, "Executing approved task steps...\n")
+            results = await plan_engine.execute_pending_tasks(goal_id=goal_id)
+            if not results:
+                await push_tok(client_id, "No approved task steps ready to execute.\n")
+            else:
+                for r in results:
+                    icon = "✓" if r["status"] == "done" else "✗"
+                    await push_tok(
+                        client_id,
+                        f"  {icon} task {r['id']}: {r['result'][:120]}\n"
+                    )
+
+        elif sub == "run":
+            goal_id = int(sub_arg) if sub_arg.isdigit() else None
+            await push_tok(client_id, "Running full plan pipeline (decompose → auto-approve → execute)...\n")
+            result = await plan_engine.run_plan_pipeline(
+                goal_id=goal_id, auto_approve=True
+            )
+            decomposed = result.get("decomposed", [])
+            executed = result.get("executed", [])
+            await push_tok(
+                client_id,
+                f"Pipeline complete: {len(decomposed)} concepts decomposed, "
+                f"{len(executed)} tasks executed.\n"
+            )
+            # Show details
+            for d in decomposed:
+                if "error" in d:
+                    await push_tok(client_id, f"  decompose ✗ concept {d['concept_id']}: {d['error']}\n")
+                else:
+                    await push_tok(client_id, f"  decompose ✓ concept {d['concept_id']} → {d['task_count']} tasks\n")
+            for e in executed:
+                icon = "✓" if e["status"] == "done" else "✗"
+                await push_tok(client_id, f"  exec {icon} task {e['id']}: {e['result'][:100]}\n")
+
+        elif sub == "add":
+            add_parts = sub_arg.split(maxsplit=1) if sub_arg else []
+            if len(add_parts) < 2 or not add_parts[0].isdigit():
+                await push_tok(client_id, "Usage: !plan add <goal_id> <description>\n")
+                return
+            goal_id = int(add_parts[0])
+            desc = add_parts[1]
+            # Determine next step_order for this goal
+            from database import fetch_dicts
+            from memory import _PLANS
+            existing = await fetch_dicts(
+                f"SELECT MAX(step_order) as max_order FROM {_PLANS()} "
+                f"WHERE goal_id = {goal_id} AND step_type = 'concept'"
+            )
+            next_order = (existing[0]["max_order"] or 0) + 1 if existing and existing[0]["max_order"] else 1
+            row_id = await plan_engine.create_concept_step(
+                description=desc, goal_id=goal_id, step_order=next_order,
+                source="user", approval="proposed",
+            )
+            await push_tok(
+                client_id,
+                f"Concept step created (id={row_id}): goal={goal_id} step={next_order} {desc}\n"
+            )
+
+        elif sub == "adhoc":
+            if not sub_arg:
+                await push_tok(client_id, "Usage: !plan adhoc <description>\n")
+                return
+            row_id = await plan_engine.create_concept_step(
+                description=sub_arg, goal_id=0, step_order=1,
+                source="user", approval="proposed",
+            )
+            await push_tok(
+                client_id,
+                f"Ad-hoc concept step created (id={row_id}): {sub_arg}\n"
+            )
+
+        elif sub == "auto":
+            await _cmd_plan_auto(client_id, sub_arg)
+
+        else:
+            await push_tok(
+                client_id,
+                "Unknown !plan subcommand. Use: !plan, !plan decompose, "
+                "!plan approve, !plan reject, !plan execute, !plan run, "
+                "!plan add, !plan adhoc, !plan auto\n"
+            )
+
+    except Exception as e:
+        await push_err(client_id, f"!plan error: {e}")
+
+    from state import conditional_push_done
+    await conditional_push_done(client_id)
+
+
+# ---------------------------------------------------------------------------
+# !plan auto — autonomous goal processor commands
+# ---------------------------------------------------------------------------
+
+async def _cmd_plan_auto(client_id: str, arg: str):
+    """
+    !plan auto                             — show goals with auto-process status
+    !plan auto approve <goal_id>           — approve proposed plan for execution
+    !plan auto reject <goal_id>            — reject (never auto-process this goal)
+    !plan auto defer <goal_id> [datetime]  — defer until datetime (default: +24h)
+    !plan auto done <goal_id> <step_id>    — mark a user step as complete, resume execution
+    !plan auto trigger                     — wake goal_processor immediately
+    !plan auto stats                       — show goal_processor stats
+    """
+    from state import push_tok, push_err
+    from database import fetch_dicts, execute_sql
+
+    parts = arg.strip().split() if arg.strip() else []
+    sub = parts[0].lower() if parts else ""
+    sub_args = parts[1:] if len(parts) > 1 else []
+
+    try:
+        if sub == "" or sub == "status":
+            # Show all goals with auto_process_status set
+            rows = await fetch_dicts(
+                f"SELECT id, title, status, auto_process_status, importance, defer_until "
+                f"FROM {_goals_table()} "
+                f"WHERE auto_process_status IS NOT NULL "
+                f"ORDER BY auto_process_status, importance DESC"
+            )
+            # Also show unplanned active goals (NULL status, eligible for scanning)
+            unplanned = await fetch_dicts(
+                f"SELECT g.id, g.title, g.status, g.auto_process_status, g.importance "
+                f"FROM {_goals_table()} g "
+                f"WHERE g.status = 'active' AND g.auto_process_status IS NULL "
+                f"AND NOT EXISTS (SELECT 1 FROM {_plans_table()} p WHERE p.goal_id = g.id) "
+                f"ORDER BY g.importance DESC"
+            )
+
+            lines = ["**Goal Processor Status**\n"]
+            if rows:
+                for r in (rows or []):
+                    defer_str = f" (until {r['defer_until']})" if r.get("defer_until") else ""
+                    lines.append(
+                        f"  [{r['id']}] {r.get('auto_process_status', '?'):12s} "
+                        f"imp={r.get('importance', '?')} {r.get('title', '')}{defer_str}"
+                    )
+            else:
+                lines.append("  (no goals in auto-processing pipeline)")
+
+            if unplanned:
+                lines.append(f"\n**Eligible for scanning** ({len(unplanned)}):")
+                for r in (unplanned or []):
+                    lines.append(f"  [{r['id']}] imp={r.get('importance', '?')} {r.get('title', '')}")
+
+            await push_tok(client_id, "\n".join(lines) + "\n")
+
+        elif sub == "approve":
+            if not sub_args or not sub_args[0].isdigit():
+                await push_tok(client_id, "Usage: !plan auto approve <goal_id>\n")
+                return
+            goal_id = int(sub_args[0])
+            # Approve the goal and all its proposed task steps
+            await execute_sql(
+                f"UPDATE {_goals_table()} SET auto_process_status = 'approved' "
+                f"WHERE id = {goal_id} AND auto_process_status IN ('proposed', 'paused_user')"
+            )
+            # Also approve all proposed task steps for this goal
+            from memory import _PLANS
+            await execute_sql(
+                f"UPDATE {_PLANS()} SET approval = 'approved' "
+                f"WHERE goal_id = {goal_id} AND approval = 'proposed'"
+            )
+            await push_tok(client_id, f"Goal {goal_id} approved for auto-execution.\n")
+            # Wake the goal processor
+            try:
+                from goal_processor import trigger_now
+                trigger_now()
+            except ImportError:
+                pass
+
+        elif sub == "reject":
+            if not sub_args or not sub_args[0].isdigit():
+                await push_tok(client_id, "Usage: !plan auto reject <goal_id>\n")
+                return
+            goal_id = int(sub_args[0])
+            await execute_sql(
+                f"UPDATE {_goals_table()} SET auto_process_status = 'rejected' "
+                f"WHERE id = {goal_id}"
+            )
+            await push_tok(client_id, f"Goal {goal_id} rejected — will not be auto-processed.\n")
+
+        elif sub == "defer":
+            if not sub_args or not sub_args[0].isdigit():
+                await push_tok(client_id, "Usage: !plan auto defer <goal_id> [YYYY-MM-DD HH:MM]\n")
+                return
+            goal_id = int(sub_args[0])
+            # Parse optional defer_until datetime
+            defer_until_str = " ".join(sub_args[1:]) if len(sub_args) > 1 else ""
+            if defer_until_str:
+                try:
+                    # Support multiple formats
+                    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%m/%d %H:%M",
+                                "%Y-%m-%dT%H:%M", "%H:%M"):
+                        try:
+                            dt = datetime.strptime(defer_until_str, fmt)
+                            if dt.year == 1900:  # time-only format
+                                now = datetime.now()
+                                dt = dt.replace(year=now.year, month=now.month, day=now.day)
+                                if dt < now:
+                                    dt += timedelta(days=1)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        await push_tok(
+                            client_id,
+                            f"Could not parse datetime: {defer_until_str}\n"
+                            f"Formats: 'YYYY-MM-DD HH:MM', 'HH:MM' (tomorrow if past), 'MM/DD HH:MM'\n"
+                        )
+                        return
+                    defer_sql = f"'{dt.strftime('%Y-%m-%d %H:%M:%S')}'"
+                except Exception as e:
+                    await push_tok(client_id, f"Date parse error: {e}\n")
+                    return
+            else:
+                defer_sql = "NOW() + INTERVAL 24 HOUR"
+                dt = datetime.now() + timedelta(hours=24)
+
+            await execute_sql(
+                f"UPDATE {_goals_table()} SET auto_process_status = 'deferred', "
+                f"defer_until = {defer_sql} "
+                f"WHERE id = {goal_id}"
+            )
+            await push_tok(
+                client_id,
+                f"Goal {goal_id} deferred until {dt.strftime('%Y-%m-%d %H:%M')}.\n"
+            )
+
+        elif sub == "done":
+            if len(sub_args) < 2 or not sub_args[0].isdigit() or not sub_args[1].isdigit():
+                await push_tok(client_id, "Usage: !plan auto done <goal_id> <step_id>\n")
+                return
+            goal_id = int(sub_args[0])
+            step_id = int(sub_args[1])
+            # Mark the step as done
+            from memory import _PLANS
+            await execute_sql(
+                f"UPDATE {_PLANS()} SET status = 'done', "
+                f"result = 'Completed by user' "
+                f"WHERE id = {step_id} AND goal_id = {goal_id}"
+            )
+            # Resume auto-execution
+            await execute_sql(
+                f"UPDATE {_goals_table()} SET auto_process_status = 'executing' "
+                f"WHERE id = {goal_id} AND auto_process_status = 'paused_user'"
+            )
+            await push_tok(client_id, f"Step {step_id} marked done. Goal {goal_id} resumed.\n")
+            # Check parent completion
+            import plan_engine
+            step_rows = await fetch_dicts(
+                f"SELECT parent_id FROM {_PLANS()} WHERE id = {step_id}"
+            )
+            if step_rows and step_rows[0].get("parent_id"):
+                await plan_engine._check_parent_completion(step_rows[0]["parent_id"])
+            # Wake the goal processor
+            try:
+                from goal_processor import trigger_now
+                trigger_now()
+            except ImportError:
+                pass
+
+        elif sub == "trigger":
+            try:
+                from goal_processor import trigger_now
+                trigger_now()
+                await push_tok(client_id, "Goal processor triggered.\n")
+            except ImportError:
+                await push_err(client_id, "goal_processor module not available")
+
+        elif sub == "stats":
+            try:
+                from goal_processor import get_stats
+                stats = get_stats()
+                lines = ["**Goal Processor Stats**"]
+                for k, v in stats.items():
+                    lines.append(f"  {k}: {v}")
+                await push_tok(client_id, "\n".join(lines) + "\n")
+            except ImportError:
+                await push_err(client_id, "goal_processor module not available")
+
+        else:
+            await push_tok(
+                client_id,
+                "Usage: !plan auto [approve|reject|defer|done|trigger|stats]\n"
+            )
+
+    except Exception as e:
+        await push_err(client_id, f"!plan auto error: {e}")
+
+
+def _goals_table():
+    from memory import _GOALS
+    return _GOALS()
+
+
+def _plans_table():
+    from memory import _PLANS
+    return _PLANS()
 
 
 # ---------------------------------------------------------------------------
@@ -3146,6 +4193,137 @@ async def cmd_tools(client_id: str, arg: str, session: dict):
     await conditional_push_done(client_id)
 
 
+async def cmd_db(client_id: str, arg: str):
+    """
+    Manage database instances: list, switch, delete.
+    Usage:
+      !db                    - list available databases
+      !db current            - show current session's database
+      !db switch <name>      - switch to database (creates if needed)
+      !db delete <name>      - delete a database (with confirmation)
+      !db delete <name> confirm - delete without confirmation prompt
+    """
+    import re as _re
+    from state import sessions, save_session_config
+    from database import (
+        list_databases, get_protected_databases, get_database_for_model,
+        create_database, delete_database, database_exists,
+        set_db_override, _DB_TABLES, _generate_table_map,
+    )
+
+    session = sessions.get(client_id, {})
+    parts = arg.split() if arg else []
+
+    if not parts or (len(parts) == 1 and parts[0].lower() == "list"):
+        # List all databases
+        dbs = list_databases()
+        protected = get_protected_databases()
+        current_db = session.get("database") or get_database_for_model(session.get("model", ""))
+        lines = ["Available databases:"]
+        for db in dbs:
+            markers = []
+            if db == current_db:
+                markers.append("current")
+            if db in protected:
+                markers.append("protected")
+            marker_str = f" ({', '.join(markers)})" if markers else ""
+            # Count tables
+            tmap = _DB_TABLES.get(db, {})
+            table_count = sum(1 for k, v in tmap.items() if isinstance(v, str))
+            prefix = ""
+            st = tmap.get("memory_shortterm", "")
+            if st.endswith("memory_shortterm"):
+                prefix = st[:-len("memory_shortterm")]
+            lines.append(f"  {db}: prefix={prefix}, {table_count} tables{marker_str}")
+        await push_tok(client_id, "\n".join(lines))
+
+    elif parts[0].lower() == "current":
+        current_db = session.get("database") or get_database_for_model(session.get("model", ""))
+        source = "session override" if session.get("database") else "model default"
+        await push_tok(client_id, f"Current database: {current_db} ({source})")
+
+    elif parts[0].lower() == "switch" and len(parts) >= 2:
+        db_name = parts[1].lower()
+        # Validate name: alphanumeric + underscore only
+        if not _re.match(r'^[a-z][a-z0-9_]{0,62}$', db_name):
+            await push_tok(client_id, "ERROR: Database name must start with a letter, contain only lowercase letters/digits/underscores, max 63 chars.")
+            await conditional_push_done(client_id)
+            return
+
+        # Check if already in db-config
+        if db_name in _DB_TABLES:
+            # Database config exists — just switch
+            session["database"] = db_name
+            set_db_override(db_name)
+            save_session_config(client_id, session)
+            await push_tok(client_id, f"Switched to database: {db_name}")
+        else:
+            # Need to create — use db_name + underscore as prefix
+            prefix = f"{db_name}_"
+            await push_tok(client_id, f"Database '{db_name}' not found — creating with prefix '{prefix}'...")
+            result = await create_database(db_name, prefix)
+            await push_tok(client_id, f"\n{result}")
+            if not result.startswith("ERROR"):
+                session["database"] = db_name
+                set_db_override(db_name)
+                save_session_config(client_id, session)
+
+    elif parts[0].lower() == "delete":
+        if len(parts) < 2:
+            await push_tok(client_id, "Usage: !db delete <name> [confirm]")
+            await conditional_push_done(client_id)
+            return
+
+        db_name = parts[1].lower()
+        confirmed = len(parts) >= 3 and parts[2].lower() == "confirm"
+        protected = get_protected_databases()
+
+        if db_name in protected:
+            await push_tok(client_id, f"ERROR: Database '{db_name}' is protected and cannot be deleted.\nProtected databases: {', '.join(protected)}")
+            await conditional_push_done(client_id)
+            return
+
+        if db_name not in _DB_TABLES:
+            await push_tok(client_id, f"ERROR: Database '{db_name}' not found in config.")
+            await conditional_push_done(client_id)
+            return
+
+        # Check if any active sessions are using this database
+        using_sessions = []
+        for sid, sdata in sessions.items():
+            if sdata.get("database") == db_name:
+                from state import get_or_create_shorthand_id
+                using_sessions.append(f"[{get_or_create_shorthand_id(sid)}]")
+
+        if not confirmed:
+            warn_parts = [f"WARNING: This will permanently delete database '{db_name}' and ALL its data."]
+            if using_sessions:
+                warn_parts.append(f"  Active sessions using this database: {', '.join(using_sessions)}")
+                warn_parts.append("  Those sessions will be switched back to the default database.")
+            warn_parts.append(f"\nTo confirm: !db delete {db_name} confirm")
+            await push_tok(client_id, "\n".join(warn_parts))
+            await conditional_push_done(client_id)
+            return
+
+        # Switch any sessions using this database back to default
+        for sid, sdata in sessions.items():
+            if sdata.get("database") == db_name:
+                sdata.pop("database", None)
+                save_session_config(sid, sdata)
+
+        result = await delete_database(db_name)
+        await push_tok(client_id, result)
+
+        # Clear own override if it was the deleted db
+        if session.get("database") == db_name:
+            set_db_override("")
+
+    else:
+        await push_tok(client_id, "Usage: !db [list|current|switch <name>|delete <name> [confirm]]")
+
+    await conditional_push_done(client_id)
+
+
 async def cmd_session(client_id: str, arg: str):
     """
     Manage sessions: list, attach, or delete.
@@ -3183,9 +4361,17 @@ async def cmd_session(client_id: str, arg: str):
                     mem_str = f", mem={'ON' if _mem_flag else 'OFF'}(session)"
                 else:
                     mem_str = f", mem={'ON' if _mpcfg().get('enabled', True) else 'OFF'}(global)"
+                # Database info — use session override or model's configured database
+                _sess_db = data.get("database")
+                if _sess_db:
+                    db_str = f", db={_sess_db}"
+                else:
+                    from config import LLM_REGISTRY as _LR
+                    _model_db = _LR.get(model, {}).get("database", "")
+                    db_str = f", db={_model_db}(default)" if _model_db else ""
                 lines.append(
                     f"  ID [{shorthand_id}] {sid}: model={model}, "
-                    f"history={history_len} msgs{size_str}{ip_str}{mem_str}{marker}"
+                    f"history={history_len} msgs{size_str}{ip_str}{mem_str}{db_str}{marker}"
                 )
                 lines.append(token_line)
             await push_tok(client_id, "\n".join(lines))
@@ -3348,6 +4534,93 @@ async def cmd_vscode(client_id: str, arg: str):
     await conditional_push_done(client_id)
 
 
+async def cmd_notifier(client_id: str, arg: str):
+    """
+    !notifier                              — show targets and status
+    !notifier add <id> [ev1,ev2,...]       — register session for notifications
+    !notifier list                         — list targets
+    !notifier delete <id>                  — remove a target
+    !notifier clear                        — remove all targets
+    !notifier events <id> <ev1,ev2,...>    — update event subscriptions
+    !notifier events                       — show all available event names
+    !notifier quiet <id> <minutes>         — set quiet period (default 10)
+    """
+    import notifier as _notifier
+
+    parts = arg.strip().split() if arg.strip() else []
+    sub = parts[0].lower() if parts else "list"
+
+    if sub == "add":
+        if len(parts) < 2:
+            await push_tok(client_id, "Usage: !notifier add <session_id> [event1,event2,...]\n")
+            await conditional_push_done(client_id)
+            return
+        try:
+            sid = int(parts[1])
+        except ValueError:
+            await push_tok(client_id, f"Invalid session id: {parts[1]}\n")
+            await conditional_push_done(client_id)
+            return
+        events = [e.strip() for e in parts[2].split(",")] if len(parts) > 2 else None
+        result = _notifier.add_target(sid, events=events)
+
+    elif sub in ("delete", "remove"):
+        if len(parts) < 2:
+            await push_tok(client_id, "Usage: !notifier delete <session_id>\n")
+            await conditional_push_done(client_id)
+            return
+        try:
+            sid = int(parts[1])
+        except ValueError:
+            await push_tok(client_id, f"Invalid session id: {parts[1]}\n")
+            await conditional_push_done(client_id)
+            return
+        result = _notifier.remove_target(sid)
+
+    elif sub == "clear":
+        result = _notifier.clear_targets()
+
+    elif sub == "events":
+        if len(parts) < 2:
+            result = _notifier.show_events()
+        elif len(parts) < 3:
+            await push_tok(client_id,
+                "Usage: !notifier events <session_id> <event1,event2,...>\n"
+                "       !notifier events  (no args — show available events)\n")
+            await conditional_push_done(client_id)
+            return
+        else:
+            try:
+                sid = int(parts[1])
+            except ValueError:
+                await push_tok(client_id, f"Invalid session id: {parts[1]}\n")
+                await conditional_push_done(client_id)
+                return
+            events = [e.strip() for e in parts[2].split(",")]
+            result = _notifier.update_events(sid, events)
+
+    elif sub == "quiet":
+        if len(parts) < 3:
+            await push_tok(client_id, "Usage: !notifier quiet <session_id> <minutes>\n")
+            await conditional_push_done(client_id)
+            return
+        try:
+            sid = int(parts[1])
+            minutes = int(parts[2])
+        except ValueError:
+            await push_tok(client_id, "Usage: !notifier quiet <session_id> <minutes>\n")
+            await conditional_push_done(client_id)
+            return
+        result = _notifier.update_quiet(sid, minutes)
+
+    else:
+        # "list" or no arg
+        result = _notifier.list_targets()
+
+    await push_tok(client_id, result + "\n")
+    await conditional_push_done(client_id)
+
+
 async def cmd_judge(client_id: str, arg: str, session: dict):
     """!judge — LLM-as-judge configuration and control."""
     from judge import cmd_judge as _judge_cmd
@@ -3440,8 +4713,14 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             "tool_subscriptions": {},
             "tool_list_injected": False,
         }
+        # Restore persisted database override
+        if prior_cfg.get("database"):
+            sessions[client_id]["database"] = prior_cfg["database"]
         # Assign shorthand ID when session is created
         get_or_create_shorthand_id(client_id)
+        # Wake session reaper if it was disabled (no sessions)
+        from state import wake_reaper
+        wake_reaper()
         # Age stale short-term memories to long-term on every session start (new or rehydrated)
         import asyncio as _asyncio
         try:
@@ -3453,6 +4732,10 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
     if peer_ip:
         sessions[client_id]["peer_ip"] = peer_ip
     session = sessions[client_id]
+
+    # Apply session-level database override (persisted across reconnects)
+    from database import set_db_override
+    set_db_override(session.get("database", "") or "")
 
     # Reject requests from sessions flagged by AIRS async violation
     if session.get("airs_blocked"):
@@ -3517,6 +4800,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                         await cmd_list_models(client_id, session["model"])
                 elif cmd == "session":
                     await cmd_session(client_id, arg)
+                elif cmd == "db":
+                    await cmd_db(client_id, arg)
                 elif cmd == "stop":
                     await cmd_stop(client_id)
                 elif cmd == "sleep":
@@ -3546,13 +4831,19 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
                 elif cmd == "memclassify":
                     await cmd_memclassify(client_id, arg, session.get("model", ""))
                 elif cmd == "memage":
-                    await cmd_memage(client_id)
+                    await cmd_memage(client_id, session.get("model", ""))
                 elif cmd == "memtrim":
                     await cmd_memtrim(client_id, arg, session.get("model", ""))
                 elif cmd == "cogn":
                     await cmd_cogn(client_id, arg, session.get("model", ""))
+                elif cmd == "timers":
+                    await cmd_timers(client_id, arg)
+                elif cmd == "plan":
+                    await cmd_plan(client_id, arg, session.get("model", ""))
                 elif cmd == "drives":
                     await cmd_drives(client_id, arg, session.get("model", ""))
+                elif cmd == "toolstats":
+                    await cmd_toolstats(client_id, arg, session.get("model", ""))
                 elif cmd == "stream":
                     await cmd_stream(client_id, arg, session)
                 elif get_plugin_command(cmd) is not None:
@@ -3622,6 +4913,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "session":
             await cmd_session(client_id, arg)
             return
+        if cmd == "db":
+            await cmd_db(client_id, arg)
+            return
         if cmd == "sleep":
             await cmd_sleep(client_id, arg)
             return
@@ -3662,7 +4956,7 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             await cmd_memclassify(client_id, arg, session.get("model", ""))
             return
         if cmd == "memage":
-            await cmd_memage(client_id)
+            await cmd_memage(client_id, session.get("model", ""))
             return
         if cmd == "memtrim":
             await cmd_memtrim(client_id, arg, session.get("model", ""))
@@ -3670,8 +4964,17 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
         if cmd == "cogn":
             await cmd_cogn(client_id, arg, session.get("model", ""))
             return
+        if cmd == "timers":
+            await cmd_timers(client_id, arg)
+            return
+        if cmd == "plan":
+            await cmd_plan(client_id, arg, session.get("model", ""))
+            return
         if cmd == "drives":
             await cmd_drives(client_id, arg, session.get("model", ""))
+            return
+        if cmd == "toolstats":
+            await cmd_toolstats(client_id, arg, session.get("model", ""))
             return
         if cmd == "stream":
             await cmd_stream(client_id, arg, session)
@@ -3681,6 +4984,9 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
             return
         if cmd == "stop":
             await cmd_stop(client_id)
+            return
+        if cmd == "notifier":
+            await cmd_notifier(client_id, arg)
             return
 
         # Plugin-registered commands (e.g. !tmux, !tmux_call_limit from plugin_tmux)
@@ -3727,6 +5033,8 @@ async def process_request(client_id: str, text: str, raw_payload: dict, peer_ip:
 
     import time as _time
     session["last_active"] = _time.time()
+    from state import update_chat_activity
+    update_chat_activity()
     model_cfg = LLM_REGISTRY.get(session["model"], {})
     session["history"].append({"role": "user", "content": stripped})
     session["history"] = _run_history_chain(session["history"], session, model_cfg)
@@ -3834,6 +5142,9 @@ async def endpoint_stream(request: Request):
             "tool_list_injected": False,
         }
         get_or_create_shorthand_id(client_id)
+        # Wake session reaper if it was disabled (no sessions)
+        from state import wake_reaper
+        wake_reaper()
         # Age stale short-term memories to long-term on every session start (new or rehydrated)
         import asyncio as _asyncio
         try:
@@ -3853,6 +5164,19 @@ async def endpoint_stream(request: Request):
     # Push current model so client knows what model is active immediately
     q.put_nowait({"t": "model", "d": sessions[client_id]["model"]})
 
+    # Drain any pending notifications queued while this session was offline
+    try:
+        import notifier as _notifier
+        _sh_id = get_or_create_shorthand_id(client_id)
+        for _pn in _notifier.drain_pending(_sh_id):
+            _ts = _pn.get("ts", "??:??:??")
+            _lines = [f"[NOTIFY {_ts}] {_pn['event_type'].upper()}: {_pn['summary']}"]
+            if _pn.get("detail"):
+                _lines.append(f"  {_pn['detail']}")
+            q.put_nowait({"t": "notif", "d": "\\n".join(_lines)})
+    except Exception:
+        pass
+
     async def generator() -> AsyncGenerator[dict, None]:
         while True:
             if await request.is_disconnected(): break
@@ -3868,6 +5192,7 @@ async def endpoint_stream(request: Request):
             elif t == "err": yield {"event": "error", "data": json.dumps({"error": item["d"]})}
             elif t == "model": yield {"event": "model", "data": item["d"]}
             elif t == "gate": yield {"event": "gate", "data": item["d"]}
+            elif t == "notif": yield {"event": "notif", "data": item["d"]}
 
     return EventSourceResponse(generator())
 
@@ -3941,6 +5266,7 @@ async def endpoint_list_sessions(request: Request) -> JSONResponse:
             "tokens_out_last": data.get("tokens_out_last"),
             "peer_ip": data.get("peer_ip"),
             "memory_enabled": data.get("memory_enabled", None),
+            "database": data.get("database"),
         })
 
     return JSONResponse({"sessions": session_list})

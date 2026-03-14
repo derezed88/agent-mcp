@@ -9,5 +9,5 @@ tool_search_xai: search_xai tool definition
 tool_llm_list: llm_list tool definition
 tool_llm_delegation: llm_call and stream tool definitions
 tool_vscode_sessions: vscode tool definition
-tool_memory_typed: Cognitive tool reference (set_goal, set_plan, assert_belief, set_conditioned, save_memory_typed)
+tool_memory_typed: Cognitive write delegation reference (set_goal, set_plan, assert_belief, set_conditioned, save_memory_typed — delegate to samaritan-execution)
 tool_procedures: Procedural memory tool reference (procedure_save, procedure_recall)

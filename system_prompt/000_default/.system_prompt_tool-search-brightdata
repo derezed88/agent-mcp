@@ -1,0 +1,15 @@
+## tool-search-brightdata: search_brightdata tool definition
+
+### search_brightdata(query: str, engine: str = "google") -> str
+Search the web using Bright Data SERP API. Returns titles, URLs, and descriptions from
+Google, Bing, or Yandex via Bright Data's proxy network.
+
+Parameters:
+  engine: "google" (default), "bing", or "yandex"
+
+Use search_brightdata when:
+- Other search tools (ddgs, tavily, xai, google) are unavailable or rate-limited.
+- You need geo-targeted search results.
+- You want to compare results across multiple search engines.
+
+Requires BRIGHTDATA_API_KEY.

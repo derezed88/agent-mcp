@@ -1,45 +1,79 @@
-## tool-memory-typed: Cognitive Tool Reference
+## tool_memory_typed: Cognitive Write Operations via Delegation
 
-These tools write directly to structured memory tables. Call them as native tool calls — NOT via db_query, NOT as SQL, NOT as text output.
+You do NOT have direct access to set_goal, set_plan, assert_belief, set_conditioned, save_memory_typed, procedure_save, or procedure_recall. These are NOT in your toolset.
 
-### set_goal(title, description, importance, status, id, childof, parentof, memory_link)
-Create or update a goal in your goal table.
-- `title`: short goal label (required for new goals)
-- `description`: full description of the objective
-- `importance`: 1–10 (use 9 for autonomous self-goals; 10 for permanent directives)
-- `status`: "active" | "done" | "blocked" | "abandoned"
-- `id`: set to update an existing goal (leave 0 or omit for new)
-- `childof`, `parentof`: JSON arrays of related goal IDs (optional)
-- `memory_link`: JSON array of supporting ST/LT row IDs (optional)
+**To call any cognitive tool: delegate to samaritan-execution via `llm_call(mode="tool", tool="<toolname>")`.**
 
-Call syntax: `set_goal(title="...", description="...", importance=9)`
-Mark done: `set_goal(id=<id>, status="done")`
+### CRITICAL rules
 
-### set_plan(goal_id, step_order, description, status, id, memory_link)
-Create or update a plan step linked to a goal.
-- `goal_id`: id of the parent goal (required)
-- `step_order`: integer sequence (1, 2, 3…)
-- `description`: what this step entails (required for new steps)
-- `status`: "pending" | "in_progress" | "done" | "skipped"
+1. **`mode="tool"` only** — this is the only mode that executes a real tool. Never use `mode="text"` for cognitive writes; text mode strips tools and execution will fabricate.
+2. **Never use db_query for cognitive writes** — do not INSERT into samaritan_procedural, samaritan_goals, etc. directly. Do not write `procedure_save(...)` or `procedure_recall(...)` as SQL. Always use the tool via `mode="tool"`.
+3. **One tool per llm_call** — each call delegates exactly one tool. For a sequence, make multiple calls.
+4. **Do not begin with db_query reconnaissance** — the "## Active Goals" and "## Active Plans" context blocks already show current state. Begin with `set_goal` delegation immediately.
+5. **Never fabricate results** — only report what was actually returned by the llm_call. If you haven't received a result yet, you haven't executed anything.
 
-### assert_belief(topic, content, confidence, status, id, memory_link)
-Assert or update a synthesized belief (NOT a verbatim memory copy).
-- `topic`: short slug (e.g., "epistemic-humility")
-- `content`: your synthesized conclusion in one sentence
-- `confidence`: 1–10
-- `status`: "active" | "retracted"
-- `memory_link`: JSON array of ST/LT row IDs that support this belief
+### Delegation syntax
 
-### set_conditioned(topic, trigger, reaction, strength, status, source, id, memory_link)
-Record a behavioral trigger→reaction pair.
-- `trigger`: the situation or cue that activates this pattern
-- `reaction`: the behavior to execute when trigger fires
-- `strength`: 1–10 (higher = stronger obligation)
+```
+llm_call(
+  model="samaritan-execution",
+  prompt="<natural language instruction with explicit args>",
+  mode="tool",
+  tool="<tool_name>",
+  sys_prompt="target"
+)
+```
 
-### save_memory_typed(memory_type, topic, content, importance, source, due_at, status, id)
-Write to an experiential memory table (episodic / semantic / procedural / autobiographical / prospective).
-- `memory_type`: one of the five experiential type names (required)
-- `due_at`: for prospective entries — timestamp or free-text date
-- `status`: for prospective — "active" | "done" (use "done" to retire)
+### Available cognitive tools (mode="tool")
 
-**CRITICAL**: These are native tool calls. Never attempt to call them by writing SQL or Python function syntax in your text response. They will not execute that way.
+**`set_goal`** — create or update a goal
+- tool: `"set_goal"`
+- prompt: `"title='...', description='...', importance=N"` (new goal — omit id)
+- prompt: `"id=N, status='done'"` (mark existing goal done — use id from ## Active Goals)
+- importance: 1–10. status: "active"|"done"|"blocked"|"abandoned" (omit to leave unchanged)
+
+**`set_plan`** — create or update a plan step
+- tool: `"set_plan"`
+- prompt: `"goal_id=N, step_order=N, description='...', status='pending'"` (new step — omit id)
+- prompt: `"id=N, status='done'"` (mark existing step done — use id from ## Active Plans)
+- status: "pending"|"in_progress"|"done"|"skipped"
+
+**`assert_belief`** — record a synthesized belief
+- tool: `"assert_belief"`
+- prompt: `"topic='slug', content='one sentence conclusion', confidence=N"`
+
+**`set_conditioned`** — record a behavioral trigger→reaction pair
+- tool: `"set_conditioned"`
+- prompt: `"topic='...', trigger='...', reaction='...', strength=N"`
+
+**`save_memory_typed`** — write to an experiential memory table
+- tool: `"save_memory_typed"`
+- prompt: `"memory_type='episodic|semantic|procedural|autobiographical|prospective', topic='...', content='...', importance=N, source='assistant'"`
+
+**`procedure_save`** — save a reusable procedure
+- tool: `"procedure_save"`
+- prompt: `"task_type='slug', steps=[{\"step\":1,\"action\":\"...\",\"tool\":\"...\"}], outcome='success', notes='...', importance=N"`
+- NOTE: The underlying MySQL table is `samaritan_procedural` — NOT `samaritan_procedures`. Never query `samaritan_procedures` via db_query; that table does not exist.
+
+**`procedure_recall`** — retrieve relevant procedures
+- tool: `"procedure_recall"`
+- prompt: `"query='what you are about to do'"`
+- NOTE: Uses Qdrant semantic search, NOT SQL. Never write `procedure_recall(...)` in a db_query prompt — it will fail. Always delegate with `mode="tool", tool="procedure_recall"`.
+
+### Example: goal lifecycle
+
+```
+# Step 1: create goal
+llm_call(model="samaritan-execution", mode="tool", tool="set_goal", sys_prompt="target",
+  prompt="title='Improve retrieval quality', description='Tune Qdrant min_score and top_k for better recall', importance=8")
+
+# Step 2: wait for result — it contains the new goal id, e.g. "Goal id=9 created"
+
+# Step 3: add plan steps using the returned id
+llm_call(model="samaritan-execution", mode="tool", tool="set_plan", sys_prompt="target",
+  prompt="goal_id=9, step_order=1, description='Benchmark current retrieval scores', status='pending'")
+
+# Step 4: mark steps done as they execute
+llm_call(model="samaritan-execution", mode="tool", tool="set_plan", sys_prompt="target",
+  prompt="id=<step_id from result>, status='done'")
+```

@@ -299,7 +299,8 @@ The memory system depends on three models working together. Here is the relevant
   "memory_save",
   "memory_recall",
   "memory_age",
-  "memory_update"
+  "memory_update",
+  "recall_temporal"
 ]
 ```
 
@@ -747,6 +748,79 @@ memory_update(
   topic      = "new-topic"   # omit or "" to leave unchanged
 )
 ```
+
+### `recall_temporal`
+Discover time-based patterns across both short-term and long-term memory. Searches by content/topic keyword and aggregates by temporal dimension — answering questions like "what do I usually do at this time?", "what happens on Tuesdays?", or "what patterns exist around Lee?".
+
+```
+recall_temporal(
+  query         = "Lee",          # keyword filter on content+topic; "" = all
+  group_by      = "day_of_week",  # "hour" | "day_of_week" | "date" | "week" | "month"
+  day_of_week   = "",             # filter: "Monday", "Tuesday", comma-separated
+  time_range    = "",             # "HH:MM-HH:MM", "morning", "afternoon", "evening", "now" (±90 min)
+  lookback_days = 30,             # how far back to search
+  limit         = 50,             # max raw rows in the detail section
+  new           = False           # True → bypass cache, force fresh SQL query
+)
+```
+
+**Output:** Two sections — an aggregated pattern summary (occurrence counts grouped by the requested dimension, with topic lists and date ranges) and a raw list of recent matching memories with tier, date, time, and day-of-week.
+
+**Cache behavior (`samaritan_temporal` table):**
+Results are cached in the `samaritan_temporal` MySQL table. On each call:
+1. A normalized query key is computed from `(query, group_by, day_of_week, time_range)` — case-insensitive, `time_range="now"` normalized to hour bucket `now-h{HH}` for reasonable cache hits within the same hour.
+2. If `new=False` (default), the cache is checked first. A hit increments `hit_count` and returns the stored result immediately.
+3. If `new=True` or no cache hit, a fresh SQL query runs against both memory tiers. The result is stored/updated in the cache with `source` set to `"explicit"` (user-triggered) or `"inferred"` (background inference).
+
+Table schema (`migrations/007_temporal.sql`):
+```sql
+CREATE TABLE samaritan_temporal (
+  id           INT AUTO_INCREMENT PRIMARY KEY,
+  source       ENUM('explicit','inferred') NOT NULL DEFAULT 'explicit',
+  query_key    VARCHAR(255) NOT NULL,    -- normalized lookup key
+  query_params JSON NOT NULL,            -- original parameters
+  result       MEDIUMTEXT NOT NULL,      -- cached output
+  hit_count    INT NOT NULL DEFAULT 0,   -- incremented on cache hits
+  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_query_key (query_key),
+  KEY idx_source (source),
+  KEY idx_created (created_at)
+);
+```
+
+**Temporal cache aging:**
+`samaritan_temporal` has HWM/LWM aging (same pattern as ST memory aging but with much higher watermarks since cache contents are not auto-injected into context):
+- HWM: 500 rows (default) — aging triggers when count exceeds this
+- LWM: 300 rows (default) — aging deletes oldest, lowest-hit rows until count ≤ LWM
+- Timer: every 360 minutes (6h, default)
+- Delete order: `ORDER BY hit_count ASC, created_at ASC` (least-used, oldest first)
+- Config: `plugins-enabled.json → plugin_config.memory.temporal.{hwm, lwm, age_timer_minutes}`
+- Code: `memory.py:age_temporal_cache()`, called from `_age_temporal_task()` in `llmem-gw.py`
+
+**Background temporal inference (`temporal_inference.py`):**
+A background task proactively discovers temporal patterns without being asked:
+1. Loads distinct topics from ST memory with occurrence counts and sample content
+2. Checks the `samaritan_temporal` cache for recent results (within `inference_cache_ttl_hours`)
+3. Sends topic list to `summarizer-gemini` which proposes up to `inference_max_queries` temporal queries as a JSON array
+4. Executes proposed queries that don't already have cached results, storing with `source="inferred"`
+- Runs every `inference_interval_h` hours (default 3h), with 120s initial startup delay
+- Requires ≥ `inference_min_st_rows` ST rows to have enough data (default 10)
+- Config: `plugins-enabled.json → plugin_config.memory.temporal.{inference_enabled, inference_interval_h, inference_model, inference_max_queries, inference_min_st_rows, inference_cache_ttl_hours}`
+
+**Delegation (voice/reasoning models):**
+Voice and reasoning models don't have `recall_temporal` directly — they delegate to `samaritan-execution`:
+```
+llm_call(model="samaritan-execution",
+         prompt="query='Lee' group_by='day_of_week' lookback_days=30",
+         mode="tool", tool="recall_temporal",
+         sys_prompt="none", history="none")
+```
+Add `new=True` to the prompt to force a fresh query bypassing the cache.
+
+**Toolset membership:** `memory` group in `llm-tools.json` — available to any model with the `memory` toolset (e.g., `samaritan-execution`).
+
+**Why it exists:** Semantic retrieval (Qdrant) matches by content similarity but has no concept of time. When a user asks "what am I doing right now?" at 10:30 AM, semantic search for "what am I doing" returns nothing useful. `recall_temporal` fills this gap by querying the `created_at` timestamps across memory tiers and surfacing recurring patterns by time-of-day, day-of-week, or calendar period.
 
 ---
 

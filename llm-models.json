@@ -157,7 +157,7 @@
         "db_query"
       ],
       "memory_scan": true,
-      "conv_log": true,
+      "conv_log": false,
       "judge_config": {
         "model": "judge-gemini",
         "gates": [
@@ -206,8 +206,7 @@
       "description": "Google gemini-2.0-flash (extractor role)",
       "llm_call_timeout": 120,
       "llm_tools": [
-        "get_system_info",
-        "extract_files"
+                "extract_files"
       ],
       "system_prompt_folder": "system_prompt/005_fileops",
       "temperature": 0.0,
@@ -217,29 +216,14 @@
       "llm_tools_gates": [],
       "memory_enabled": false
     },
-    "qwen35": {
-      "database": "qwen",
-      "model_id": "Qwen3.5-9B-IQ4_X_S.gguf",
+    "qwen25-mymcp": {
+      "database": "mymcp",
+      "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       "type": "OPENAI",
       "host": "http://192.168.10.109:11434/v1",
       "max_context": 1000,
       "enabled": true,
-      "description": "Qwen test model",
-      "llm_call_timeout": 180,
-      "llm_tools": [
-        "qwen"
-      ],
-      "system_prompt_folder": "system_prompt/006_local",
-      "token_selection_setting": "default"
-    },
-    "qwen35-mymcp": {
-      "database": "mymcp",
-      "model_id": "Qwen3.5-9B-IQ4_X_S.gguf",
-      "type": "OPENAI",
-      "host": "http://192.168.10.109:11434/v1",
-      "max_context": 10,
-      "enabled": true,
-      "description": "Qwen3.5-9B local (mymcp DB) — prospective loop NL judge (single-turn, no history)",
+      "description": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       "llm_call_timeout": 180,
       "llm_tools": [],
       "system_prompt_folder": "",
@@ -247,14 +231,29 @@
       "token_selection_setting": "custom",
       "memory_enabled": false
     },
-    "judge-qwen35": {
-      "database": "qwen",
-      "model_id": "Qwen3.5-9B-IQ4_X_S.gguf",
+    "qwen25-cogn": {
+      "database": "mymcp",
+      "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       "type": "OPENAI",
       "host": "http://192.168.10.109:11434/v1",
       "max_context": 8000,
       "enabled": true,
-      "description": "Qwen3.5 judge role \u2014 evaluates prompts, responses, tool calls, and memory entries",
+      "description": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "llm_call_timeout": 120,
+      "temperature": 0.1,
+      "llm_tools": [],
+      "system_prompt_folder": "system_prompt/004_cogn",
+      "token_selection_setting": "custom",
+      "memory_enabled": false
+    },
+    "judge-qwen25": {
+      "database": "qwen",
+      "model_id": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "type": "OPENAI",
+      "host": "http://192.168.10.109:11434/v1",
+      "max_context": 8000,
+      "enabled": true,
+      "description": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       "llm_call_timeout": 60,
       "temperature": 0.1,
       "llm_tools": [],
@@ -292,8 +291,7 @@
       "description": "Google gemini-2.5-flash (summarizer role)",
       "llm_call_timeout": 120,
       "llm_tools": [
-        "get_system_info",
-        "drive",
+                "drive",
         "extract_files",
         "vscode"
       ],
@@ -316,8 +314,7 @@
       "description": "Anthropic claude-haiku-4-5 (summarizer role)",
       "llm_call_timeout": 120,
       "llm_tools": [
-        "get_system_info",
-        "drive",
+                "drive",
         "vscode"
       ],
       "system_prompt_folder": "system_prompt/003_claudeVSCode",
@@ -325,6 +322,26 @@
       "token_selection_setting": "custom",
       "llm_tools_gates": [],
       "memory_enabled": false
+    },
+    "plan-decomposer": {
+      "database": "mymcp",
+      "model_id": "claude-sonnet-4-6",
+      "type": "OPENAI",
+      "host": "https://api.anthropic.com/v1",
+      "env_key": "ANTHROPIC_API_KEY",
+      "max_context": 200000,
+      "enabled": true,
+      "description": "Plan decomposer: concept steps → executable task steps (Sonnet 4.6)",
+      "llm_call_timeout": 90,
+      "llm_tools": [],
+      "system_prompt_folder": "none",
+      "temperature": 0.2,
+      "token_selection_setting": "custom",
+      "llm_tools_gates": [],
+      "memory_enabled": false,
+      "conv_log": false,
+      "allow_text_mode": true,
+      "memory_scan": false
     },
     "samaritan-voice": {
       "database": "mymcp",
@@ -337,11 +354,11 @@
       "description": "Samaritan conversation",
       "llm_call_timeout": 90,
       "llm_tools": [
-        "get_system_info",
-        "llm_call",
+                "llm_call",
         "llm_list",
         "search_tavily",
         "search_xai",
+        "search_brightdata",
         "extract",
         "memory_typed"
       ],
@@ -370,11 +387,11 @@
       "description": "Samaritan low-latency voice (non-reasoning, persistent xAI TTS)",
       "llm_call_timeout": 60,
       "llm_tools": [
-        "get_system_info",
         "llm_call",
         "llm_list",
         "search_tavily",
         "search_xai",
+        "search_brightdata",
         "extract",
         "memory_typed"
       ],
@@ -398,30 +415,30 @@
       "type": "OPENAI",
       "host": "https://api.x.ai/v1",
       "env_key": "XAI_API_KEY",
-      "max_context": 5000,
+      "max_context": 20000,
       "enabled": true,
-      "description": "Samaritan reasoning brain",
-      "llm_call_timeout": 90,
+      "description": "Samaritan reasoning brain (grok-4-1-fast-reasoning)",
+      "llm_call_timeout": 120,
       "llm_tools": [
-        "get_system_info",
-        "agent_call",
+        "db_query",
         "llm_call",
         "llm_list",
         "search_tavily",
         "search_xai",
-        "extract",
-        "memory_typed"
+        "search_brightdata",
+        "extract"
       ],
       "system_prompt_folder": "system_prompt/004_reasoning",
-      "temperature": 0.6,
+      "temperature": 0.4,
       "top_p": 0.9,
       "top_k": null,
-      "max_tokens": 128000,
-      "token_selection_setting": "default",
+      "max_tokens": 4096,
+      "token_selection_setting": "custom",
       "memory_scan": false,
       "memory_types_enabled": true,
       "conv_log": true,
-      "identity_name": "samaritan"
+      "identity_name": "samaritan",
+      "allow_text_mode": false
     },
     "samaritan-execution": {
       "database": "mymcp",
@@ -449,7 +466,8 @@
       "token_selection_setting": "custom",
       "llm_tools_gates": [],
       "memory_types_enabled": true,
-      "conv_log": true
+      "conv_log": false,
+      "allow_text_mode": false
     },
     "judge-gemini": {
       "database": "mymcp",
@@ -466,13 +484,102 @@
       "system_prompt_folder": "system_prompt/007_judge",
       "token_selection_setting": "custom",
       "memory_enabled": false
+    },
+    "friendli-llama31": {
+      "database": "mymcp",
+      "model_id": "meta-llama-3.1-8b-instruct",
+      "type": "OPENAI",
+      "host": "https://api.friendli.ai/serverless/v1",
+      "env_key": "FRIENDLI_TOKEN",
+      "max_context": 2000,
+      "enabled": true,
+      "description": "FriendliAI Llama-3.1-8B-Instruct (serverless)",
+      "llm_call_timeout": 60,
+      "llm_tools": [
+        "core",
+        "admin",
+        "db",
+        "search",
+        "drive",
+        "extract",
+        "agent",
+        "vscode"
+      ],
+      "system_prompt_folder": "system_prompt/004_reasoning",
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "top_k": null,
+      "token_selection_setting": "default"
+    },
+    "friendli-llama31-executor": {
+      "database": "mymcp",
+      "model_id": "meta-llama-3.1-8b-instruct",
+      "type": "OPENAI",
+      "host": "https://api.friendli.ai/serverless/v1",
+      "env_key": "FRIENDLI_TOKEN",
+      "max_context": 8000,
+      "enabled": false,
+      "description": "FriendliAI Llama-3.1-8B-Instruct — FAILED executor eval: hallucinates tool outputs",
+      "llm_call_timeout": 90,
+      "llm_tools": [
+        "db",
+        "search",
+        "drive",
+        "extract"
+      ],
+      "system_prompt_folder": "system_prompt/004_execution",
+      "temperature": 0.0,
+      "top_p": 0.1,
+      "top_k": null,
+      "token_selection_setting": "custom",
+      "llm_tools_gates": [],
+      "memory_enabled": false,
+      "conv_log": false,
+      "allow_text_mode": false
+    },
+    "friendli-qwen3-executor": {
+      "database": "mymcp",
+      "model_id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "type": "OPENAI",
+      "host": "https://api.friendli.ai/serverless/v1",
+      "env_key": "FRIENDLI_TOKEN",
+      "max_context": 8000,
+      "enabled": true,
+      "description": "FriendliAI Qwen3-235B-A22B — single-step executor eval (db, drive, search, extract)",
+      "llm_call_timeout": 90,
+      "llm_tools": [
+        "db_query",
+        "search_tavily",
+        "search_xai",
+        "search_brightdata",
+        "google_drive",
+        "url_extract",
+        "url_extract_brightdata"
+      ],
+      "system_prompt_folder": "system_prompt/004_execution",
+      "temperature": 0.0,
+      "top_p": 0.1,
+      "top_k": null,
+      "token_selection_setting": "custom",
+      "llm_tools_gates": [],
+      "memory_enabled": false,
+      "conv_log": false,
+      "allow_text_mode": false
     }
   },
   "model_roles": {
-    "summarizer": "summarizer-anthropic",
-    "reviewer":   "reviewer-gemini",
-    "extractor":  "extractor-gemini",
-    "judge":      "judge-gemini"
+    "summarizer":              "summarizer-anthropic",
+    "reviewer":                "reviewer-gemini",
+    "extractor":               "extractor-gemini",
+    "judge":                   "judge-gemini",
+    "plan_decomposer":         "plan-decomposer",
+    "plan_executor":           "friendli-qwen3-executor",
+    "plan_executor_fallback":  "samaritan-execution",
+    "contradiction":           "qwen25-cogn",
+    "prospective":             "qwen25-cogn",
+    "reflection":              "summarizer-gemini",
+    "goal_health":             "samaritan-reasoning",
+    "temporal_inference":      "summarizer-gemini"
   },
   "limits": {
     "max_at_llm_depth": 1,

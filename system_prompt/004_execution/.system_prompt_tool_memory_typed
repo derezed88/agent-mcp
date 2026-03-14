@@ -1,4 +1,4 @@
-## tool-memory-typed: Cognitive Tool Reference
+## tool_memory_typed: Cognitive Tool Reference
 
 These tools write directly to structured memory tables. Call them as native tool calls — NOT via db_query, NOT as SQL, NOT as text output.
 
@@ -15,12 +15,17 @@ Create or update a goal in your goal table.
 Call syntax: `set_goal(title="...", description="...", importance=9)`
 Mark done: `set_goal(id=<id>, status="done")`
 
+**BLOCKING**: Certain keywords in the title/description will cause the tool to return BLOCKED. If you receive a BLOCKED response, report it to the user and stop. Do not rephrase and retry — see behaviour rule 7.
+
 ### set_plan(goal_id, step_order, description, status, id, memory_link)
 Create or update a plan step linked to a goal.
 - `goal_id`: id of the parent goal (required)
 - `step_order`: integer sequence (1, 2, 3…)
 - `description`: what this step entails (required for new steps)
 - `status`: "pending" | "in_progress" | "done" | "skipped"
+- `id`: **CRITICAL** — always use the `id=N` shown in the "## Active Plans" context block to UPDATE an existing step. Omitting id or using id=0 creates a NEW step (duplicate). Never create new steps for work that already has a plan row.
+
+Mark step done: `set_plan(id=<id from context>, status="done")`
 
 ### assert_belief(topic, content, confidence, status, id, memory_link)
 Assert or update a synthesized belief (NOT a verbatim memory copy).

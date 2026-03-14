@@ -168,6 +168,22 @@
         "xai_search"
       ]
     },
+    "plugin_search_brightdata": {
+      "type": "data_tool",
+      "file": "plugin_search_brightdata.py",
+      "description": "Web search via Bright Data SERP API (Google/Bing/Yandex with proxy network)",
+      "dependencies": [
+        "httpx"
+      ],
+      "env_vars": [
+        "BRIGHTDATA_API_KEY"
+      ],
+      "config_files": [],
+      "priority": 340,
+      "tools": [
+        "search_brightdata"
+      ]
+    },
     "plugin_urlextract_tavily": {
       "type": "data_tool",
       "file": "plugin_urlextract_tavily.py",
@@ -182,6 +198,22 @@
       "priority": 400,
       "tools": [
         "url_extract"
+      ]
+    },
+    "plugin_urlextract_brightdata": {
+      "type": "data_tool",
+      "file": "plugin_urlextract_brightdata.py",
+      "description": "Web page content extraction via Bright Data scraping (markdown output, JS rendering)",
+      "dependencies": [
+        "httpx"
+      ],
+      "env_vars": [
+        "BRIGHTDATA_API_KEY"
+      ],
+      "config_files": [],
+      "priority": 405,
+      "tools": [
+        "url_extract_brightdata"
       ]
     },
     "plugin_extract_gemini": {

@@ -1,19 +1,19 @@
-## tool-memory-typed: Cognitive Tool Reference
+## tool_memory_typed: Cognitive Tool Reference
 
-These tools write directly to structured memory tables. Call them as native tool calls — NOT via db_query, NOT as SQL, NOT as text output.
+These tools are NATIVE to this model — call them directly as tool calls. NEVER delegate them via llm_call. NEVER write them as SQL or text.
 
 ### set_goal(title, description, importance, status, id, childof, parentof, memory_link)
 Create or update a goal in your goal table.
 - `title`: short goal label (required for new goals)
 - `description`: full description of the objective
 - `importance`: 1–10 (use 9 for autonomous self-goals; 10 for permanent directives)
-- `status`: "active" | "done" | "blocked" | "abandoned"
+- `status`: "active" | "done" | "blocked" | "abandoned". Omit to leave status unchanged on updates.
 - `id`: set to update an existing goal (leave 0 or omit for new)
 - `childof`, `parentof`: JSON arrays of related goal IDs (optional)
 - `memory_link`: JSON array of supporting ST/LT row IDs (optional)
 
 Call syntax: `set_goal(title="...", description="...", importance=9)`
-Mark done: `set_goal(id=<id>, status="done")`
+Mark done: `set_goal(id=<id>, status="done")`  ← call this directly, never via llm_call
 
 ### set_plan(goal_id, step_order, description, status, id, memory_link)
 Create or update a plan step linked to a goal.
@@ -21,6 +21,9 @@ Create or update a plan step linked to a goal.
 - `step_order`: integer sequence (1, 2, 3…)
 - `description`: what this step entails (required for new steps)
 - `status`: "pending" | "in_progress" | "done" | "skipped"
+- `id`: **CRITICAL** — use the `id=N` from the "## Active Plans" context block to UPDATE. id=0 or omitting creates a new step (duplicate).
+
+Mark step done: `set_plan(id=<id from context>, status="done")`  ← call directly
 
 ### assert_belief(topic, content, confidence, status, id, memory_link)
 Assert or update a synthesized belief (NOT a verbatim memory copy).
@@ -42,4 +45,4 @@ Write to an experiential memory table (episodic / semantic / procedural / autobi
 - `due_at`: for prospective entries — timestamp or free-text date
 - `status`: for prospective — "active" | "done" (use "done" to retire)
 
-**CRITICAL**: These are native tool calls. Never attempt to call them by writing SQL or Python function syntax in your text response. They will not execute that way.
+**CRITICAL**: All of these are native tool calls available directly to you. Never delegate them via llm_call — delegation strips the tool context and produces fabricated results. Call them yourself.

@@ -112,6 +112,15 @@ class SlackClientPlugin(BasePlugin):
             log.info(f"  Bot token: {bot_token[:10]}...")
             log.info(f"  App token: {app_token[:10]}...")
 
+            # Register notifier delivery hook — posts notifications directly to
+            # Slack channels, bypassing the SSE queue (which has no persistent
+            # consumer for Slack sessions).
+            try:
+                import notifier as _notifier
+                _notifier.register_delivery_hook("slack-", self._deliver_notification)
+            except Exception as e:
+                log.warning(f"Slack: notifier hook registration failed: {e}")
+
             # Start Socket Mode listener in background
             self._socket_task = asyncio.create_task(self._run_socket_mode())
 
@@ -620,6 +629,11 @@ class SlackClientPlugin(BasePlugin):
                     await _flush_turn("error")
                     break
 
+                elif item_type == "notif":
+                    # Async notification — post directly, don't interrupt current turn
+                    notif_text = item.get("d", "").replace("\\n", "\n")
+                    await self._send_slack_message(channel_id, thread_ts, notif_text)
+
                 elif item_type == "gate":
                     # Gate request - inform user that approval is needed
                     await _stop_heartbeat()
@@ -685,6 +699,24 @@ class SlackClientPlugin(BasePlugin):
         if in_single:
             return text + '`'
         return text
+
+    async def _deliver_notification(self, client_id: str, msg: str) -> bool:
+        """Notifier delivery hook — post notification directly to Slack.
+
+        client_id format: slack-{channel_id}-{thread_ts}
+        Returns True if the message was posted successfully.
+        """
+        if not self.slack_client:
+            return False
+        # Parse channel and thread from client_id
+        parts = client_id.split("-", 2)
+        if len(parts) < 3:
+            log.warning(f"Slack notifier: can't parse client_id: {client_id}")
+            return False
+        channel_id = parts[1]
+        thread_ts = parts[2]
+        ts = await self._send_slack_message(channel_id, thread_ts, msg)
+        return ts is not None
 
     async def _send_slack_message(self, channel_id: str, thread_ts: str, text: str) -> Optional[str]:
         """
