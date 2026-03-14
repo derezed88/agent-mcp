@@ -91,6 +91,30 @@ The result: an agent that gets better at your specific workflows the more you us
 
 This is the foundation for building an agent that isn't just a stateless tool — it's an accumulating, adapting system.
 
+#### Cognitive Architecture — Background Loops and Autonomous Behavior
+
+Beyond per-turn memory, five independent background loops run on configurable timers. Each is toggle-able in `plugins-enabled.json` — no code changes required.
+
+- **Reflection loop** (default: 60 min) — Pulls recent conversation turns, extracts insights and self-model patterns via LLM, detects goal completions, and saves structured memories to an isolated cognition table. Includes a staleness gate: if there's been no new conversation, the cycle is skipped entirely (zero tokens). Every 5th cycle, synthesises all `self-*` patterns into a compact self-summary.
+- **Goal processor** (default: 30 min) — Scans for unplanned goals, decomposes them into concept and task steps via the plan engine, manages an approval workflow (propose → approve/defer/reject), and executes model-owned steps serially. Human-required steps pause and notify. Zero tokens on quiet cycles — the scanner is pure SQL.
+- **Contradiction detection** (default: 60 min) — Groups active beliefs by topic, sends pairs to an LLM for conflict detection, and flags contradictions. Optionally auto-retracts the lower-confidence belief (off by default — destruction requires confirmation).
+- **Prospective reminders** (default: 5 min) — Polls pending reminders with due dates (datetime or natural language like "next Monday"). Overdue items are injected into short-term memory as high-importance reminders and marked done.
+- **Temporal inference** (default: 3 hr) — Analyses recent conversation topics and proposes time-aware queries ("what do I usually do at 10 AM?"). Fills the gap that semantic search can't cover — Qdrant has no time dimension.
+
+**Self-tuning via cognitive feedback** — Each loop measures its own usefulness (e.g., what fraction of reflection outputs were later retrieved, how many reminders were acted on). Low-value loops are automatically throttled or disabled; recovery happens when value improves. No manual tuning required.
+
+**Typed memory system** — 11 memory types (`goal`, `belief`, `procedural`, `self_model`, `prospective`, `conditioned`, etc.) stored in dedicated tables. Typed context is injected per-model based on `memory_types_enabled` — a reasoning model gets goals and beliefs, an execution model gets procedures and plans.
+
+**Drive / affect system** — Five persistent drives (`curiosity`, `task-completion`, `user-trust`, `discomfort`, `autonomy`) with values from 0–1. Drives decay toward baseline each reflection cycle and are nudged by goal performance: completions boost `task-completion`, blocks raise `discomfort`. Goals are sorted by `importance × drive_weight`, so the agent's priorities shift based on what's working.
+
+**Plan engine** — Two-tier decomposition (concept steps → executable task steps) with a three-tier execution chain: direct execution (zero LLM cost), primary LLM recovery, and fallback LLM. Failure at any tier cascades back to block the parent goal. Approval workflow supports propose/approve/defer/reject at each level.
+
+**LLM-as-judge** — Four gate points (prompt, response, tool call, memory save) where a separate judge model scores content before it proceeds. Per-model configuration in `llm-models.json`. Fail-open on parse errors.
+
+All cognitive subsystems share the same MySQL tables and Qdrant vector index. Cognitive loop outputs are stored in an isolated `samaritan_cognition` table (not in conversation memory) to prevent feedback spirals.
+
+> See [docs/COGNITION.md](docs/COGNITION.md) for the full architecture reference, including typed memory schemas, loop configuration, cognitive feedback thresholds, and the goal/plan state machine.
+
 #### Runtime Admin Without Code
 
 All configuration is JSON + commands. Nothing requires a restart:
@@ -549,6 +573,7 @@ python llmemctl.py disable <plugin_name>
 | [docs/setup_services.md](docs/setup_services.md) | systemd, tmux, screen, and tunnel deployment |
 | [docs/plugin-client-api.md](docs/plugin-client-api.md) | API plugin — programmatic access and swarm setup |
 | [docs/SWARMDESIGN.md](docs/SWARMDESIGN.md) | Swarm foundation and discovery design options |
+| [docs/COGNITION.md](docs/COGNITION.md) | Cognitive architecture — typed memory, background loops, drives, goal/plan state machine, cognitive feedback |
 | [docs/JUDGEMODEL.md](docs/JUDGEMODEL.md) | Judge model architecture — per-turn scoring, memory review, history filtering |
 | [docs/plugin-*.md](docs/) | Per-plugin setup and configuration |
 
