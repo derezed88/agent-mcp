@@ -101,6 +101,9 @@ def _DRIVES() -> str:
 def _COGNITION() -> str:
     return get_tables_for_model().get("cognition", "samaritan_cognition")
 
+def _TEMPORAL() -> str:
+    return get_tables_for_model().get("temporal", "samaritan_temporal")
+
 # ---------------------------------------------------------------------------
 # Typed table metrics — write/read counters, reset on restart
 # ---------------------------------------------------------------------------
@@ -1088,6 +1091,51 @@ async def _age_topic_chunks(
                 f"{forced[0][0]!r} ({forced[0][1]} rows) — single dominant topic"
             )
 
+    # --- Step 2c: normalize candidate topic slugs before aging ---
+    # Fuzzy-match each candidate against existing topics to prevent fragmented
+    # slugs from being promoted verbatim to LT.  This closes the race condition
+    # where ST hits HWM before memreview_auto runs.  No LLM call — pure string
+    # matching via _normalize_topic().  The scheduled memreview auto pass handles
+    # any semantic duplicates that fuzzy matching misses.
+    normalized_candidates: list[str] = []
+    for topic in candidate_topics:
+        normalized = await _normalize_topic(topic)
+        if normalized != topic:
+            log.info(f"_age_topic_chunks: pre-age normalize '{topic}' → '{normalized}'")
+            t_escaped_old = topic.replace("'", "''")
+            t_escaped_new = normalized.replace("'", "''")
+            try:
+                from database import execute_sql as _exec_sql, fetch_dicts as _fd_norm
+                # Update MySQL ST rows
+                await _exec_sql(
+                    f"UPDATE {_ST()} SET topic = '{t_escaped_new}' "
+                    f"WHERE topic = '{t_escaped_old}'"
+                )
+                # Update Qdrant payloads to match
+                try:
+                    from plugin_memory_vector_qdrant import get_vector_api as _gva
+                    _vec = _gva()
+                    if _vec:
+                        affected = await _fd_norm(
+                            f"SELECT id FROM {_ST()} WHERE topic = '{t_escaped_new}'"
+                        )
+                        ids = [int(r["id"]) for r in affected if r.get("id")]
+                        if ids:
+                            _vec._qc.set_payload(
+                                collection_name=_COLLECTION(),
+                                payload={"topic": normalized},
+                                points=ids,
+                            )
+                except Exception as _qe:
+                    log.warning(f"_age_topic_chunks: Qdrant payload update failed for '{topic}': {_qe}")
+            except Exception as _ne:
+                log.warning(f"_age_topic_chunks: pre-age normalize update failed for '{topic}': {_ne}")
+                normalized = topic  # fall back to original if update failed
+        normalized_candidates.append(normalized)
+    # Deduplicate — two candidates may have normalized to the same slug
+    seen: set[str] = set()
+    candidate_topics = [t for t in normalized_candidates if not (t in seen or seen.add(t))]
+
     # --- Step 3: process one topic at a time until ST < lwm ---
     # Large topics are sub-chunked to keep summarizer prompt manageable.
     _CHUNK_SIZE = 50
@@ -1836,7 +1884,7 @@ async def _upsert_procedure_vec(
         if not vec:
             return
         coll = _PROC_COLLECTION()
-        vec._ensure_proc_collection()
+        vec._ensure_collection(coll)
         await vec.upsert_memory(
             row_id=row_id,
             topic=topic,
